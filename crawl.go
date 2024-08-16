@@ -1,4 +1,4 @@
-package scraper
+package crawl
 
 import (
 	"bytes"
@@ -45,7 +45,7 @@ func getLinksFromHTML(htmlContent io.Reader) []string {
 	}
 }
 
-func scrapeLinks(wg *sync.WaitGroup, semaphore chan struct{}, link string, discoveredLinks chan<- string) {
+func crawlLinks(wg *sync.WaitGroup, semaphore chan struct{}, link string, discoveredLinks chan<- string) {
 	defer wg.Done()
 
 	mu.Lock()
@@ -94,14 +94,14 @@ func scrapeLinks(wg *sync.WaitGroup, semaphore chan struct{}, link string, disco
 
 		resolvedURL := baseURL.ResolveReference(parsedChildLink)
 		if resolvedURL.Host == baseURL.Host {
-			log.Printf("%s Kicking off scrape for %s\n", link, resolvedURL.String())
+			log.Printf("%s Kicking off crawl for %s\n", link, resolvedURL.String())
 			wg.Add(1)
-			go scrapeLinks(wg, semaphore, resolvedURL.String(), discoveredLinks)
+			go crawlLinks(wg, semaphore, resolvedURL.String(), discoveredLinks)
 		}
 	}
 }
 
-func ScrapeSiteForLinks(startURL string, maxConns int) []string {
+func CrawlSiteForLinks(startURL string, maxConns int) []string {
 
 	var waitGroup sync.WaitGroup
 	done := make(chan bool)
@@ -110,7 +110,7 @@ func ScrapeSiteForLinks(startURL string, maxConns int) []string {
 	linksToReturn := make([]string, 0)
 
 	waitGroup.Add(1)
-	go scrapeLinks(&waitGroup, semaphore, startURL, discoveredLinks)
+	go crawlLinks(&waitGroup, semaphore, startURL, discoveredLinks)
 	go func() {
 		for link := range discoveredLinks {
 			linksToReturn = append(linksToReturn, link)
@@ -121,6 +121,6 @@ func ScrapeSiteForLinks(startURL string, maxConns int) []string {
 	waitGroup.Wait()
 	close(discoveredLinks)
 	<-done
-	log.Printf("%s scraper done\n", startURL)
+	log.Printf("%s crawler done\n", startURL)
 	return linksToReturn
 }

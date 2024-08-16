@@ -1,4 +1,4 @@
-module scrape.go
+module crawl.go
 
 go 1.22.5
 
