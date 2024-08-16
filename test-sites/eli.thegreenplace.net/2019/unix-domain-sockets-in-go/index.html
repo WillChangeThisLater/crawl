@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Unix domain sockets in Go - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Unix domain sockets in Go">
+                        Unix domain sockets in Go
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> February 12, 2019 at 05:27</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/linux.html">Linux</a>
+        ,
+    <a href="../../tag/network-programming.html">Network Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>When it comes to inter-process communication (IPC) between processes on the same
+Linux host, there are multiple options: FIFOs, pipes, shared memory, sockets and
+so on. One of the most interesting options is <em>Unix Domain Sockets</em> that combine
+the convenient API of sockets with the higher performance of the other
+single-host methods.</p>
+<p>This post demonstrates some basic examples of using Unix domain sockets with Go
+and explores some benchmarks comparing them to TCP loop-back sockets.</p>
+<div class="section" id="unix-domain-sockets-uds">
+<h2>Unix domain sockets (UDS)</h2>
+<p>Unix domain sockets (UDS) have a long history, going back to the original BSD
+socket specification in the 1980s. The <a class="reference external" href="https://en.wikipedia.org/wiki/Unix_domain_socket">Wikipedia definition</a> is:</p>
+<blockquote>
+A Unix domain socket or IPC socket (inter-process communication socket) is a
+data communications endpoint for exchanging data between processes executing
+on the same host operating system.</blockquote>
+<p>UDS support streams (TCP equivalent) and datagrams (UDP equivalent); this
+post focuses on the stream APIs.</p>
+<p>IPC with UDS looks very similar to IPC with regular TCP sockets using the
+loop-back interface (<tt class="docutils literal">localhost</tt> or <tt class="docutils literal">127.0.0.1</tt>), but there is a key
+difference: performance. While the TCP loop-back interface can skip some of the
+complexities of the full TCP/IP network stack, it retains many others (ACKs, TCP
+flow control, and so on). These complexities are designed for reliable
+cross-machine communication, but on a single host they're an unnecessary burden.
+This post will explore some of the performance advantages of UDS.</p>
+<p>There are some additional differences. For example, since UDS use paths in the
+filesystem as their addresses, we can use directory and file permissions to
+control access to sockets, simplifying authentication. I won't list all the
+differences here; for more information feel free to check out the Wikipedia link
+and additional resources like <a class="reference external" href="http://beej.us/guide/bgipc/html/multi/unixsock.html">Beej's UNIX IPC guide</a>.</p>
+<p>The big disadvantage of UDS compared to TCP sockets is the single-host
+restriction, of course. For code written to use TCP sockets we only have to
+change the address from local to remote and everything keeps working. That said,
+the performance advantages of UDS are significant enough, and the API is similar
+enough to TCP sockets that it's quite possible to write code that supports both
+(UDS on a single host, TCP for remote IPC) with very little difficulty.</p>
+</div>
+<div class="section" id="using-unix-domain-sockets-in-go">
+<h2>Using Unix domain sockets in Go</h2>
+<p>Let's start with a basic example of a server in Go that listens on a UNIX
+domain socket:</p>
+<div class="highlight"><pre><span></span><span class="kd">const</span><span class="w"> </span><span class="nx">SockAddr</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s">&quot;/tmp/echo.sock&quot;</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">echoServer</span><span class="p">(</span><span class="nx">c</span><span class="w"> </span><span class="nx">net</span><span class="p">.</span><span class="nx">Conn</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;Client connected [%s]&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">c</span><span class="p">.</span><span class="nx">RemoteAddr</span><span class="p">().</span><span class="nx">Network</span><span class="p">())</span><span class="w"></span>
+<span class="w">    </span><span class="nx">io</span><span class="p">.</span><span class="nx">Copy</span><span class="p">(</span><span class="nx">c</span><span class="p">,</span><span class="w"> </span><span class="nx">c</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">c</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">RemoveAll</span><span class="p">(</span><span class="nx">SockAddr</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="nx">l</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">net</span><span class="p">.</span><span class="nx">Listen</span><span class="p">(</span><span class="s">&quot;unix&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">SockAddr</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;listen error:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="nx">l</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// Accept new connections, dispatching them to echoServer</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// in a goroutine.</span><span class="w"></span>
+<span class="w">        </span><span class="nx">conn</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">l</span><span class="p">.</span><span class="nx">Accept</span><span class="p">()</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;accept error:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">        </span><span class="k">go</span><span class="w"> </span><span class="nx">echoServer</span><span class="p">(</span><span class="nx">conn</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>UDS are identified with paths in the file system; for our server here we use
+<tt class="docutils literal">/tmp/echo.sock</tt>. The server begins by removing this file if it exists, what
+is that about?</p>
+<p>When servers shut down, the file representing the socket can remain in the
+file system unless the server did orderly cleanup after itself. If we re-run
+another server with the same socket path, we may get the error:</p>
+<div class="highlight"><pre><span></span>$ go run simple-echo-server.go
+2019/02/08 05:41:33 listen error:listen unix /tmp/echo.sock: bind: address already in use
+</pre></div>
+<p>To prevent that, the server begins by removing the socket file, if it exists
+<a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>.</p>
+<p>Now that the server is running, we can interact with it using Netcat, which can
+be asked to connect to UDS with the <tt class="docutils literal"><span class="pre">-U</span></tt> flag:</p>
+<div class="highlight"><pre><span></span>$ nc -U /tmp/echo.sock
+</pre></div>
+<p>Whatever you type in, the server will echo back. Press <tt class="docutils literal">^D</tt> to terminate the
+session. Alternatively, we can write a simple client in Go that connects to the
+server, sends it a message, waits for a response and exits. The full code for
+the client <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2019/unix-domain-sockets-go/simple-client.go">is here</a>,
+but the important part is the connection:</p>
+<div class="highlight"><pre><span></span><span class="nx">c</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">net</span><span class="p">.</span><span class="nx">Dial</span><span class="p">(</span><span class="s">&quot;unix&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;/tmp/echo.sock&quot;</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>We can see that writing UDS servers and clients is very similar to writing
+regular socket servers and clients. The only difference is having to pass
+<tt class="docutils literal">&quot;unix&quot;</tt> as the <tt class="docutils literal">network</tt> parameter of <tt class="docutils literal">net.Listen</tt> and <tt class="docutils literal">net.Dial</tt>; the
+rest of the code remains the same. Obviously, this makes it very easy to
+write generic server and client code that's independent of the actual kind of
+socket it's using.</p>
+</div>
+<div class="section" id="http-and-rpc-protocols-over-uds">
+<h2>HTTP and RPC protocols over UDS</h2>
+<p>Network protocols compose by design. High-level protocols, such as HTTP and
+various forms of RPC, don't particularly care about how the lower levels of the
+stack are implemented as long as certain guarantees are maintained.</p>
+<p>Go's standard library comes with a small and useful <tt class="docutils literal">rpc</tt> package that makes
+it trivial to throw together quick RPC servers and clients. Here's a simple
+server that has a single procedure defined:</p>
+<div class="highlight"><pre><span></span><span class="kd">const</span><span class="w"> </span><span class="nx">SockAddr</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s">&quot;/tmp/rpc.sock&quot;</span><span class="w"></span>
+
+<span class="kd">type</span><span class="w"> </span><span class="nx">Greeter</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">g</span><span class="w"> </span><span class="nx">Greeter</span><span class="p">)</span><span class="w"> </span><span class="nx">Greet</span><span class="p">(</span><span class="nx">name</span><span class="w"> </span><span class="o">*</span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">reply</span><span class="w"> </span><span class="o">*</span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="kt">error</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="o">*</span><span class="nx">reply</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s">&quot;Hello, &quot;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="o">*</span><span class="nx">name</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">RemoveAll</span><span class="p">(</span><span class="nx">SockAddr</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="nx">greeter</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">new</span><span class="p">(</span><span class="nx">Greeter</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">rpc</span><span class="p">.</span><span class="nx">Register</span><span class="p">(</span><span class="nx">greeter</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">rpc</span><span class="p">.</span><span class="nx">HandleHTTP</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">,</span><span class="w"> </span><span class="nx">e</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">net</span><span class="p">.</span><span class="nx">Listen</span><span class="p">(</span><span class="s">&quot;unix&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">SockAddr</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">e</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;listen error:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">e</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;Serving...&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">http</span><span class="p">.</span><span class="nx">Serve</span><span class="p">(</span><span class="nx">l</span><span class="p">,</span><span class="w"> </span><span class="kc">nil</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Note that we use the HTTP version of the server. It registers a HTTP handler
+with the <tt class="docutils literal">http</tt> package, and the actual serving is done with the standard
+<tt class="docutils literal">http.Serve</tt>. The network stack here looks something like this:</p>
+<img alt="RPC / HTTP / Unix domain socket stack" class="align-center" src="../../images/2019/rpc-http-uds.png" />
+<p>An RPC client that can connect to the server shown above is <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2019/unix-domain-sockets-go/rpc-client.go">available here</a>.
+It uses the standard <tt class="docutils literal">rpc.Client.Call</tt> method to connect to the server.</p>
+</div>
+<div class="section" id="benchmarking-uds-compared-to-loop-back-tcp-sockets">
+<h2>Benchmarking UDS compared to loop-back TCP sockets</h2>
+<p>Note: benchmarking is hard, so please take these results with a grain of salt.
+There's some more information on benchmarking different socket types
+on the <a class="reference external" href="https://redis.io/topics/benchmarks">Redis benchmarks page</a> and in
+<a class="reference external" href="http://osnet.cs.binghamton.edu/publications/TR-20070820.pdf">this paper</a>, as
+well as many other resources online. I also found <a class="reference external" href="https://github.com/rigtorp/ipc-bench/">this set of benchmarks</a> (written in C) instructive.</p>
+<p>I'm running two kinds of benchmarks: one for latency, and one for throughput.</p>
+<p>For latency, the <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2019/unix-domain-sockets-go/local-latency-benchmark.go">full code of the benchmark is here</a>.
+Run it with <tt class="docutils literal"><span class="pre">-help</span></tt> to see what the flags are, and the code should be very
+straightforward to grok. The idea is to ping-pong a small packet of data (128
+bytes by default) between a server and a client. The client measures how long it
+takes to send one such message and receive one back, and takes that combined
+time as &quot;twice the latency&quot;, averaging it over many messages.</p>
+<p>On my machine, I see average latency of ~3.6 microseconds for TCP loop-back
+sockets, and ~2.3 microseconds for UDS.</p>
+<p>The <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2019/unix-domain-sockets-go/local-throughput-benchmark.go">throughput/bandwidth benchmark</a>
+is conceptually simpler than the latency benchmark. The server listens on a
+socket and grabs all the data it can get (and discards it). The client sends
+<em>large</em> packets (hundreds of KB or more) and measures how long each packet takes
+to send; the send is done synchronously and the client expects the whole message
+to be sent in a single call, so it's a good approximation of bandwidth if the
+packet size is large enough.</p>
+<p>Obviously, the throughput measurement is more representative with larger
+messages. I tried increasing them until the throughput improvements tapered off.</p>
+<p>For smaller packet sizes, I see UDS winning over TCP: 10 GB/sec compared to 9.4
+GB/sec for 512K. For much larger packet sizes 16-32 MB, the difference becomes
+negligible (both taper off at about 13 GB/sec). Interestingly, for some packet
+sizes (like 64K), TCP sockets are winning on my machine.</p>
+<p>For very small message sizes we're getting back to latency-dominated
+performance, so UDS is considerably faster (more than 2x the number of packets
+per second compared to TCP). In most cases I'd say that the latency measurements
+are more important - they're more applicable to things like RPC servers
+and databases. In some cases like streaming video or other &quot;big data&quot; over
+sockets, you may want to pick the packet sizes carefully to optimize the
+performance for the specific machine you're using.</p>
+<p><a class="reference external" href="https://lists.freebsd.org/pipermail/freebsd-performance/2005-February/001143.html">This discussion</a>
+has some really insightful information about why we should expect UDS to be
+faster. However, beware - it's from 2005 and much in Linux has changed since
+then.</p>
+</div>
+<div class="section" id="unix-domain-sockets-in-the-real-world-go-projects">
+<h2>Unix domain sockets in the real-world Go projects</h2>
+<p>I was curious to see if UDS are actually used in real-world Go projects. They
+sure are! A few minutes of browsing/searching GitHub quickly uncovered UDS
+servers in many components of the new Go-dominated cloud infrastructure:
+runc, moby (Docker), k8s, lstio - pretty much every project I looked at.</p>
+<p>That makes sense - as the benchmarks demonstrate, there are significant
+performance advantages to using a UDS when the client and server are both on the
+same host. And the API of UDS and TCP sockets is so similar that the cost of
+supporting both interchangeably is quite small.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>For internet-domain socket, the same issue exists with ports that are
+marked taken by processes that die without cleanup. The <tt class="docutils literal">SO_REUSEADDR</tt>
+socket option exists to address this problem.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

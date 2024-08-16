@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>On the uses and misuses of panics in Go - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to On the uses and misuses of panics in Go">
+                        On the uses and misuses of panics in Go
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> August 08, 2018 at 05:56</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/programming.html">Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>Go has a unique approach to error handling, with a combination of explicit error
+values and an exception-like <tt class="docutils literal">panic</tt> mechanism. In this post I'm looking at
+the philosophical aspects of <tt class="docutils literal">panic</tt>, trying to understand some of the
+conflicting guidelines coming from the Go team.</p>
+<p>Most of all, it's a story of pragmatism in language design, with some musings on
+the merits and dangers of a pragmatic approach.</p>
+<div class="section" id="introduction-errors-and-exceptions">
+<h2>Introduction - errors and exceptions</h2>
+<p>Many programming languages support exceptions as a standard way of handling
+errors - for example Java or Python. While certainly convenient, exceptions have
+many issues as well, which is why they're frowned upon by other languages or
+their style guides. The main criticism of exceptions is that they introduce a
+&quot;side channel&quot; for control flow; when reading the code, you also have to keep in
+mind the path in which exceptions can flow and this makes reasoning about some
+code very difficult <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>.</p>
+<p>Let's talk about error handling in Go to make this concrete. I assume you know
+how &quot;standard&quot; error handling in Go works - it's quite hard to miss! Here's how
+we open a file:</p>
+<div class="highlight"><pre><span></span><span class="nx">f</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Open</span><span class="p">(</span><span class="s">&quot;file.txt&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// handle error here</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="c1">// do stuff with f here</span><span class="w"></span>
+</pre></div>
+<p>If the file is missing, say, <tt class="docutils literal">os.Open</tt> will return a non-<tt class="docutils literal">nil</tt> error. In
+some other languages, errors are done differently. For example, Python's
+built-in <tt class="docutils literal">open</tt> function will raise an exception if something is wrong:</p>
+<div class="highlight"><pre><span></span><span class="k">try</span><span class="p">:</span>
+  <span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">&quot;file.txt&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+    <span class="c1"># do stuff with f here</span>
+<span class="k">except</span> <span class="ne">OSError</span> <span class="k">as</span> <span class="n">err</span><span class="p">:</span>
+  <span class="c1"># handle exception err here</span>
+</pre></div>
+<p>While error handling via exceptions in Python is consistent, it's also a target
+of criticism because of its pervasiveness. Even iterators use exceptions to
+signal the end of a sequence (<tt class="docutils literal">StopIteration</tt>). The main question is &quot;what
+does <em>exceptional</em> really mean?&quot;. Here's a relevant comment by Rob Pike from <a class="reference external" href="https://groups.google.com/forum/#!topic/golang-nuts/HOXNBQu5c-Q%5B26-50%5D">a
+mailing list discussion</a>
+where the modern incarnation of Go's panic/recover mechanism is proposed:</p>
+<blockquote>
+This is exactly the kind of thing the proposal tries to avoid.  Panic
+and recover are not an exception mechanism as usually defined because
+the usual approach, which ties exceptions to a control structure,
+encourages fine-grained exception handling that makes code unreadable
+in practice.  There really is a difference between an error and what
+we call a panic, and we want that difference to matter.  Consider
+Java, in which opening a file can throw an exception.  In my
+experience few things are less exceptional than failing to open a
+file, and requiring me to write inside-out code to handle such a
+quotidian operation feels like a Procrustean imposition.</blockquote>
+<p>To be objective, exceptions have proponents that scoff at Go's explicit
+error handling for many reasons. For one, note the <em>order</em> of the code in the
+two minimal samples above. In Python the primary flow of the program immediately
+follows the <tt class="docutils literal">open</tt> call, and the error handling is delegated to a later stage
+(not to mention that in many cases the exception will be caught higher up the
+call stack and not in this function at all). In Go, on the other hand, error
+handling comes first and may obscure the main flow of the program. Moreover,
+Go's error handling is very verbose - this being one of the major criticisms of
+the language. I'll mention one potential way to address this later in the post.</p>
+<p>In addition to Rob's quote above, Go's philosophy towards exceptions is
+summarized well <a class="reference external" href="https://golang.org/doc/faq#exceptions">in the FAQ</a>:</p>
+<blockquote>
+We believe that coupling exceptions to a control structure, as in the
+try-catch-finally idiom, results in convoluted code. It also tends to
+encourage programmers to label too many ordinary errors, such as failing to
+open a file, as exceptional.</blockquote>
+<p>However, in some cases having an exception-like mechanism is actually useful;
+in a high-level language like Go it's even essential, I'd say. This is why
+<tt class="docutils literal">panic</tt> and <tt class="docutils literal">recover</tt> exist.</p>
+</div>
+<div class="section" id="the-need-to-occasionally-panic">
+<h2>The need to occasionally panic</h2>
+<p>Go is a <em>safe</em> language with run-time checks for some serious programming
+errors. For example, when you try to access a slice out of bounds, the result is
+not undefined behavior. Rather, the Go runtime will <em>panic</em>. For example,
+this minimal program:</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span><span class="w"> </span><span class="nx">main</span><span class="w"></span>
+
+<span class="kn">import</span><span class="w"> </span><span class="p">(</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;fmt&quot;</span><span class="w"></span>
+<span class="p">)</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">s</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">make</span><span class="p">([]</span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nx">s</span><span class="p">[</span><span class="mi">5</span><span class="p">])</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Will die with a runtime error followed by a stack trace:</p>
+<div class="highlight"><pre><span></span>panic: runtime error: index out of range
+
+goroutine 1 [running]:
+main.main()
+  /tmp/sandbox209906601/main.go:9 +0x40
+</pre></div>
+<p>Other common things that panic include accessing <tt class="docutils literal">nil</tt> structure fields
+through pointers, closing an already-closed channel, etc. What are the
+alternatives to panicking here? We <em>could</em> make slice access return a <tt class="docutils literal">result,
+err</tt> pair, and we could also make slice element assignment a function that
+potentially returns an error, but this would result in cumbersome code.
+Imagine rewriting this snippet, where <tt class="docutils literal">foo</tt>, <tt class="docutils literal">bar</tt> and <tt class="docutils literal">baz</tt> are all
+slices of strings:</p>
+<div class="highlight"><pre><span></span><span class="nx">foo</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">bar</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">baz</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"></span>
+</pre></div>
+<p>Into something like:</p>
+<div class="highlight"><pre><span></span><span class="nx">br</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">bar</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="nx">bz</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">baz</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">assign_slice_element</span><span class="p">(</span><span class="nx">foo</span><span class="p">,</span><span class="w"> </span><span class="nx">i</span><span class="p">,</span><span class="w"> </span><span class="nx">br</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">bz</span><span class="p">)</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Looks like fun? Nope. Different languages handle this in different ways: Python
+and Java throw an exception if <tt class="docutils literal">i</tt> points out of bounds in either of the
+slices/lists/arrays. C will emit code without bounds checking, with a good
+chance of accessing/trampling the wrong memory area, crashing the process or
+exposing it to security vulnerabilities. C++ takes the middle way, with some
+&quot;performance oriented&quot; modes that are unsafe and other modes
+(<tt class="docutils literal"><span class="pre">std::vector::at</span></tt>) that could throw an exception.</p>
+<p>Since the verbosity of the rewritten snippet above is unacceptable, Go chose to
+have <em>panics</em>, which is an exception-like mechanism reserved for <em>truly
+exceptional conditions</em> such as bugs in the code.</p>
+<p>This isn't restricted to built-ins; user code can also panic if needed.
+Sometimes code encounters errors that can only mean something went horribly
+wrong - a bug, or some key invariant being violated. For example, a <tt class="docutils literal">switch</tt>
+case that just can't happen in the current context. The <tt class="docutils literal">panic</tt> function
+exists for just such cases; it's morally equivalent to Python's <tt class="docutils literal">raise</tt> and
+C++'s <tt class="docutils literal">throw</tt>. That said, subtle but powerful restrictions on how exceptions
+are caught make Go's exception handling unique.</p>
+</div>
+<div class="section" id="restrictions-on-panic-recovery-in-go">
+<h2>Restrictions on panic recovery in Go</h2>
+<p>When a panic is not caught/recovered anywhere in the calling stack, it will end
+up crashing the program with a stack dump, as shown above. This behavior is
+pretty useful for debugging, but not ideal in realistic scenarios. If we're
+writing a server that serves many clients, we don't want it to immediately crash
+because of an internal bug in some data parsing library it's using. It would be
+much better to catch such an error, log it, and keep serving other clients. Go's
+<tt class="docutils literal">recover</tt> function can help with that. Here's a code sample from
+<a class="reference external" href="https://golang.org/doc/effective_go.html">Effective Go</a> demonstrating this:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">server</span><span class="p">(</span><span class="nx">workChan</span><span class="w"> </span><span class="o">&lt;-</span><span class="kd">chan</span><span class="w"> </span><span class="o">*</span><span class="nx">Work</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="nx">work</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">workChan</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">go</span><span class="w"> </span><span class="nx">safelyDo</span><span class="p">(</span><span class="nx">work</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">safelyDo</span><span class="p">(</span><span class="nx">work</span><span class="w"> </span><span class="o">*</span><span class="nx">Work</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="kd">func</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">recover</span><span class="p">();</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;work failed:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">do</span><span class="p">(</span><span class="nx">work</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Even though Go's <tt class="docutils literal">panic</tt> and <tt class="docutils literal">recover</tt> resemble exceptions at first glance,
+they come with some important and deliberate limitations that makes them less
+prone to common problems with exception-heavy code. Here's another quote from
+the FAQ:</p>
+<blockquote>
+Go also has a couple of built-in functions to signal and recover from truly
+exceptional conditions. The recovery mechanism is executed only as part of a
+function's state being torn down after an error, which is sufficient to handle
+catastrophe but requires no extra control structures and, when used well, can
+result in clean error-handling code.</blockquote>
+<p>Rob Pike's quote from the thread I linked to earlier is also relevant:</p>
+<blockquote>
+Our proposal instead ties the handling to a function - a dying
+function - and thereby, deliberately, makes it harder to use.  We want
+you think of panics as, well, panics! They are rare events that very
+few functions should ever need to think about. If you want to protect
+your code, one or two recover calls should do it for the whole
+program.  If you're already worrying about discriminating different
+kinds of panics, you've lost sight of the ball.</blockquote>
+<p>The specific limitation is that <tt class="docutils literal">recover</tt> can only be called in a
+<tt class="docutils literal">defer</tt> code block, which cannot return control to an arbitrary point,
+but can only do clean-ups and tweak the function's return values. The Python
+file-opening exception handling shown above can't work in Go - we can't just
+catch <tt class="docutils literal">OSError</tt> and try to open another file (or create the file we failed
+to open) without significant restructuring of the code.</p>
+<p>This limitation is coupled with an important coding guideline - keep panics
+within package boundaries. It's a good practice for packages not to panic in
+their public interfaces. Rather, the public-facing functions and methods should
+recover from panics internally and translate them to error messages. This makes
+panics friendlier to use, though high-availability servers will still likely
+want to have outer <tt class="docutils literal">recover</tt>s installed just in case.</p>
+</div>
+<div class="section" id="the-siren-call-of-panic">
+<h2>The siren call of panic</h2>
+<p>Every language feature is destined to be misused; this is just a fact of
+programming life, and it's not different for Go's <tt class="docutils literal">panic</tt>. This is not to say
+that all misuses are categorically wrong though, just that the feature ends up
+being used for goals it was not originally designed to fulfill.</p>
+<p>Consider this real example from the <tt class="docutils literal">scanInt</tt> method in <tt class="docutils literal">fmt/scan.go</tt> of the
+Go (1.10) standard library:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">s</span><span class="w"> </span><span class="o">*</span><span class="nx">ss</span><span class="p">)</span><span class="w"> </span><span class="nx">scanInt</span><span class="p">(</span><span class="nx">verb</span><span class="w"> </span><span class="kt">rune</span><span class="p">,</span><span class="w"> </span><span class="nx">bitSize</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="kt">int64</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">verb</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;c&#39;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">scanRune</span><span class="p">(</span><span class="nx">bitSize</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">s</span><span class="p">.</span><span class="nx">SkipSpace</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">s</span><span class="p">.</span><span class="nx">notEOF</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">base</span><span class="p">,</span><span class="w"> </span><span class="nx">digits</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">getBase</span><span class="p">(</span><span class="nx">verb</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// ... other code</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Each one of the methods <tt class="docutils literal">SkipSpace</tt>, <tt class="docutils literal">notEOF</tt> and <tt class="docutils literal">getBase</tt> can fail, but
+where is the error handling? In fact, this package - like several others in the
+standard library - is using <tt class="docutils literal">panic</tt>s for some of its error handling
+internally. A <tt class="docutils literal">panic</tt> from each of these will be recovered in the public API
+(like the <tt class="docutils literal">Token</tt> method) and converted to an error. If we had to rewrite this
+code with explicit error handling, it would be more cumbersome, for sure <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>:</p>
+<div class="highlight"><pre><span></span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">SkipSpace</span><span class="p">();</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">notEOF</span><span class="p">();</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="nx">base</span><span class="p">,</span><span class="w"> </span><span class="nx">digits</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">getBase</span><span class="p">(</span><span class="nx">verb</span><span class="p">)</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="c1">// ... other code</span><span class="w"></span>
+</pre></div>
+<p>Of course, <tt class="docutils literal">panic</tt> is not the only way to solve this. As Rob Pike says,
+<a class="reference external" href="https://blog.golang.org/errors-are-values">Errors are Values</a> and thus they
+are programmable, and we could devise some clever way to make the code flow
+better without using an exception-like escape mechanism. Other languages have
+useful features that would make it much simpler; for example Rust has the <tt class="docutils literal">?</tt>
+operator <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a> that propagates an error returned from a given expression
+automatically, so in a hypothetical syntax we could write:</p>
+<div class="highlight"><pre><span></span>s.SkipSpace()?
+s.notEOF()?
+base, digits := s.getBase(verb)?
+</pre></div>
+<p>But we don't have this in Go (yet?), so the core Go team made the choice to use
+<tt class="docutils literal">panic</tt>s instead. They even condone this pattern in <a class="reference external" href="https://golang.org/doc/effective_go.html#recover">Effective Go</a>:</p>
+<blockquote>
+With our recovery pattern in place, the do function (and anything it calls)
+can get out of any bad situation cleanly by calling panic. We can use that
+idea to simplify error handling in complex software.</blockquote>
+<p>And it's being used in several more places; a few I found with a quick search:</p>
+<ul class="simple">
+<li><tt class="docutils literal">fmt/scan.go</tt></li>
+<li><tt class="docutils literal">json/encode.go</tt></li>
+<li><tt class="docutils literal">text/template/parse/parser.go</tt></li>
+</ul>
+</div>
+<div class="section" id="but-isn-t-this-wrong">
+<h2>But isn't this... wrong?</h2>
+<p>I empathize with folks lured by the siren, its call is strong here! But I also
+can't shake off the feeling that this goes against the principles designed into
+the language. In the quote shown above Rob Pike says:</p>
+<blockquote>
+In my experience few things are less exceptional than failing to open a file</blockquote>
+<p>But what is less exceptional than running into an unexpected character while
+parsing? Isn't it the most common kind of error a parser encounters?
+Pike goes on to say:</p>
+<blockquote>
+We want you think of panics as, well, panics! They are rare events that very
+few functions should ever need to think about.</blockquote>
+<p>But is a parsing error rare? And very many functions in <tt class="docutils literal">fmt/scan.go</tt> have
+to &quot;think about&quot; panics because that's what they use for signaling errors!</p>
+<blockquote>
+If you're already worrying about discriminating different
+kinds of panics, you've lost sight of the ball.</blockquote>
+<p>But here is <tt class="docutils literal">errorHandler</tt> from <tt class="docutils literal">fmt/scan.go</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">errorHandler</span><span class="p">(</span><span class="nx">errp</span><span class="w"> </span><span class="o">*</span><span class="kt">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">e</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">recover</span><span class="p">();</span><span class="w"> </span><span class="nx">e</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">se</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">e</span><span class="p">.(</span><span class="nx">scanError</span><span class="p">);</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">// catch local error</span><span class="w"></span>
+<span class="w">      </span><span class="o">*</span><span class="nx">errp</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">se</span><span class="p">.</span><span class="nx">err</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="nx">eof</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">e</span><span class="p">.(</span><span class="kt">error</span><span class="p">);</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">eof</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nx">io</span><span class="p">.</span><span class="nx">EOF</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="c1">// out of input</span><span class="w"></span>
+<span class="w">      </span><span class="o">*</span><span class="nx">errp</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">eof</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nb">panic</span><span class="p">(</span><span class="nx">e</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Is this not &quot;worrying about discriminating different kinds of panics&quot;?</p>
+</div>
+<div class="section" id="conclusion-pragmatism-vs-purity">
+<h2>Conclusion - pragmatism vs. purity</h2>
+<p>It's not my intention to attack the Go standard library developers here. As I've
+mentioned, I fully see why <tt class="docutils literal">panic</tt>s are attractive in some cases where call
+stacks are deep and sequences of error-signaling operations are common. I really
+hope Go will introduce some syntax that will make propagating an error easier,
+which would render this discussion moot.</p>
+<p>Sometimes, it's better to be pragmatic than a zealot. If a certain language
+feature is really helpful in solving a problem, even outside of its classical
+domain of use, it may be better to use it than to ardently sticking to principles
+and ending up with convoluted code. Kind-of like my old defense of
+<a class="reference external" href="../../2009/04/27/using-goto-for-error-handling-in-c.html">using goto for error handling in C</a>.
+The Go guidelines are clear and the restrictions on <tt class="docutils literal">recover</tt> are craftily
+placed - even when used for control flow in parsers, it's much harder to misuse
+than classical exceptions.</p>
+<p>Interestingly, when this problem first drew my attention I was looking into
+the source of the <tt class="docutils literal">json/encode.go</tt> package. It turns out that it was recently
+<a class="reference external" href="https://go-review.googlesource.com/c/go/+/98440">fixed to use classical error handling</a>!
+Yes, some code turned more verbose, from:</p>
+<div class="highlight"><pre><span></span><span class="k">if</span><span class="w"> </span><span class="nx">destring</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">switch</span><span class="w"> </span><span class="nx">qv</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">d</span><span class="p">.</span><span class="nx">valueQuoted</span><span class="p">().(</span><span class="kd">type</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="kc">nil</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="nx">d</span><span class="p">.</span><span class="nx">literalStore</span><span class="p">(</span><span class="nx">nullLiteral</span><span class="p">,</span><span class="w"> </span><span class="nx">subv</span><span class="p">,</span><span class="w"> </span><span class="kc">false</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="kt">string</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="nx">d</span><span class="p">.</span><span class="nx">literalStore</span><span class="p">([]</span><span class="nb">byte</span><span class="p">(</span><span class="nx">qv</span><span class="p">),</span><span class="w"> </span><span class="nx">subv</span><span class="p">,</span><span class="w"> </span><span class="kc">true</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// ... other code</span><span class="w"></span>
+</pre></div>
+<p>To:</p>
+<div class="highlight"><pre><span></span><span class="k">if</span><span class="w"> </span><span class="nx">destring</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">q</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">d</span><span class="p">.</span><span class="nx">valueQuoted</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">switch</span><span class="w"> </span><span class="nx">qv</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">q</span><span class="p">.(</span><span class="kd">type</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">case</span><span class="w"> </span><span class="kc">nil</span><span class="p">:</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">d</span><span class="p">.</span><span class="nx">literalStore</span><span class="p">(</span><span class="nx">nullLiteral</span><span class="p">,</span><span class="w"> </span><span class="nx">subv</span><span class="p">,</span><span class="w"> </span><span class="kc">false</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">case</span><span class="w"> </span><span class="kt">string</span><span class="p">:</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">d</span><span class="p">.</span><span class="nx">literalStore</span><span class="p">([]</span><span class="nb">byte</span><span class="p">(</span><span class="nx">qv</span><span class="p">),</span><span class="w"> </span><span class="nx">subv</span><span class="p">,</span><span class="w"> </span><span class="kc">true</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>But overall it's not <em>that</em> bad and certainly wouldn't look unfamiliar to a Go
+coder. And it gives me hope :-)</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td><a class="reference external" href="https://en.wikipedia.org/wiki/Exception_safety">C++'s set of exception safety guarantees</a>
+is a good example of some of the complexities involved.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>If you spend some time reading the <a class="reference external" href="https://groups.google.com/forum/#!topic/golang-nuts/HOXNBQu5c-Q%5B26-50%5D">mailing list discussion where the
+recover mechanism was proposed</a>,
+you'll find Russ Cox mentioning a similar issue with parsing a binary
+stream and how to propagate errors through the process.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>Even C++ has a similar pattern that you will find in some codebases where
+a standard return type is used. Macros commonly named
+<tt class="docutils literal">ASSIGN_OR_RETURN</tt> are popular in C++ code released by Google and show
+up in other places like LLVM.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

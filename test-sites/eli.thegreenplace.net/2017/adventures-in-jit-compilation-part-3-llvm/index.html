@@ -1,0 +1,765 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Adventures in JIT compilation: Part 3 - LLVM - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Adventures in JIT compilation: Part 3 - LLVM">
+                        Adventures in JIT compilation: Part 3 - LLVM
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> May 01, 2017 at 05:51</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/llvm-clang.html">LLVM & Clang</a>
+        ,
+    <a href="../../tag/compilation.html">Compilation</a>
+        ,
+    <a href="../../tag/code-generation.html">Code generation</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This is part 3 of my &quot;Adventures in JIT compilation&quot; series.
+<a class="reference external" href="../adventures-in-jit-compilation-part-1-an-interpreter/index.html">Part 1</a>
+introduced the BF input language and presented a few interpreters in increasing
+degree of optimization. In <a class="reference external" href="../adventures-in-jit-compilation-part-2-an-x64-jit/index.html">part 2</a>
+we've seen how to roll a JIT compiler for BF from scratch, by emitting x64
+machine code into executable memory and jumping to it for execution.</p>
+<p>In this part, I'm going to present another JIT compiler for BF. This time,
+however, rather than rolling everything from scratch, I'll be using the <a class="reference external" href="http://llvm.org/">LLVM</a> framework.</p>
+<div class="section" id="llvm-as-a-programming-language-backend">
+<h2>LLVM as a programming language backend</h2>
+<p>I'll start by saying this post is not meant to be a full tutorial for LLVM. LLVM
+has <a class="reference external" href="http://llvm.org/docs/tutorial/">a pretty good tutorial</a> already (see also
+<a class="reference external" href="../../2015/python-version-of-the-llvm-tutorial/index.html">my Python port of it</a>).
+I've also written <a class="reference external" href="../../tag/llvm-clang.html">more in-depth pieces about LLVM</a> in the past; see for example
+<a class="reference external" href="../../2012/11/24/life-of-an-instruction-in-llvm.html">Life of an instruction in LLVM</a>. That
+said, I do hope that seeing how to apply LLVM to develop a complete JIT compiler
+for BF can be useful, and the <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/bfjit/llvmjit.cpp">complete code sample</a>
+can serve as a starting point for programming language enthusiasts to develop
+their own backends with a fairly modern version of LLVM. If you have a bit more
+time, look for exercise and experiment suggestions in the footnotes.</p>
+<p>Speaking of LLVM versions... LLVM's C++ API is notoriously volatile, and code
+working today has little chance of working in just a few months without any
+changes. However, LLVM <em>does</em> have <a class="reference external" href="http://releases.llvm.org/">numbered releases</a> that can be used to maintain some sort of sanity
+since they are extensively tested. The code for this post was developed with the
+LLVM 4.0 release. Even if you're reading this in the year 2022, hopefully you
+should be able to download LLVM 4.0 and compile &amp; link the sample code.</p>
+<p>As opposed to the use of asmjit in <a class="reference external" href="../adventures-in-jit-compilation-part-2-an-x64-jit/index.html">part 2</a>,
+LLVM offers several distinct advantages:</p>
+<ol class="arabic simple">
+<li>Since LLVM comes with many state-of-the-art optimizations on the IR level, we
+can generate fairly straightforward LLVM IR from our source language, without
+worrying too much about its efficiency. I'll demonstrate this shortly.</li>
+<li>LLVM is multi-target. In this post I'm showing a JIT compiler that emits
+code for the machine it runs on (x64 in my case), but one can easily reuse
+the same code to compile BF to ARM, PowerPC, MIPS or a bunch of other
+backends supported by LLVM.</li>
+<li>LLVM comes with a large set of tools useful to visualize and manipulate IR
+and other stages of compilation. I mention a couple uses of the <tt class="docutils literal">opt</tt> tool
+throughout the post, and <a class="reference external" href="http://llvm.org/docs/CommandGuide/">there are others</a>.</li>
+</ol>
+</div>
+<div class="section" id="generating-llvm-ir-from-bf">
+<h2>Generating LLVM IR from BF</h2>
+<p>The core of the code generation code in this sample is fairly short - only ~130
+lines of C++ in <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/bfjit/llvmjit.cpp">emit_jit_function</a>.
+I'll walk through it, leaving some details out. Feel free to check the LLVM
+documentation or API headers for more information, if needed.</p>
+<div class="highlight"><pre><span></span><span class="n">llvm</span><span class="o">::</span><span class="n">FunctionType</span><span class="o">*</span><span class="w"> </span><span class="n">jit_func_type</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">    </span><span class="n">llvm</span><span class="o">::</span><span class="n">FunctionType</span><span class="o">::</span><span class="n">get</span><span class="p">(</span><span class="n">void_type</span><span class="p">,</span><span class="w"> </span><span class="p">{},</span><span class="w"> </span><span class="nb">false</span><span class="p">);</span><span class="w"></span>
+<span class="n">llvm</span><span class="o">::</span><span class="n">Function</span><span class="o">*</span><span class="w"> </span><span class="n">jit_func</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">llvm</span><span class="o">::</span><span class="n">Function</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span><span class="w"></span>
+<span class="w">    </span><span class="n">jit_func_type</span><span class="p">,</span><span class="w"> </span><span class="n">llvm</span><span class="o">::</span><span class="n">Function</span><span class="o">::</span><span class="n">ExternalLinkage</span><span class="p">,</span><span class="w"> </span><span class="n">JIT_FUNC_NAME</span><span class="p">,</span><span class="w"> </span><span class="k">module</span><span class="p">);</span><span class="w"></span>
+
+<span class="n">llvm</span><span class="o">::</span><span class="n">BasicBlock</span><span class="o">*</span><span class="w"> </span><span class="n">entry_bb</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">    </span><span class="n">llvm</span><span class="o">::</span><span class="n">BasicBlock</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span><span class="n">context</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;entry&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">jit_func</span><span class="p">);</span><span class="w"></span>
+<span class="n">llvm</span><span class="o">::</span><span class="n">IRBuilder</span><span class="o">&lt;&gt;</span><span class="w"> </span><span class="n">builder</span><span class="p">(</span><span class="n">entry_bb</span><span class="p">);</span><span class="w"></span>
+</pre></div>
+<p>We begin by creating a LLVM function to hold the emitted code. The function is
+named <tt class="docutils literal">__llvmjit</tt> (which is what the constant <tt class="docutils literal">JIT_FUNC_NAME</tt> contains) and
+its linkage is external so that we could call it from outside the LLVM module
+where it resides. We also create the entry basic block in the function where the
+initial code will go, as well as an <em>IR builder</em> that makes the job of emitting
+LLVM IR a bit easier than using raw APIs.</p>
+<p>More setup follows:</p>
+<div class="highlight"><pre><span></span><span class="n">llvm</span><span class="o">::</span><span class="n">AllocaInst</span><span class="o">*</span><span class="w"> </span><span class="n">memory</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">    </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateAlloca</span><span class="p">(</span><span class="n">int8_type</span><span class="p">,</span><span class="w"> </span><span class="n">builder</span><span class="p">.</span><span class="n">getInt32</span><span class="p">(</span><span class="n">MEMORY_SIZE</span><span class="p">),</span><span class="w"> </span><span class="s">&quot;memory&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="n">builder</span><span class="p">.</span><span class="n">CreateMemSet</span><span class="p">(</span><span class="n">memory</span><span class="p">,</span><span class="w"> </span><span class="n">builder</span><span class="p">.</span><span class="n">getInt8</span><span class="p">(</span><span class="mi">0</span><span class="p">),</span><span class="w"> </span><span class="n">MEMORY_SIZE</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+<span class="n">llvm</span><span class="o">::</span><span class="n">AllocaInst</span><span class="o">*</span><span class="w"> </span><span class="n">dataptr_addr</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">    </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateAlloca</span><span class="p">(</span><span class="n">int32_type</span><span class="p">,</span><span class="w"> </span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;dataptr_addr&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="n">builder</span><span class="p">.</span><span class="n">CreateStore</span><span class="p">(</span><span class="n">builder</span><span class="p">.</span><span class="n">getInt32</span><span class="p">(</span><span class="mi">0</span><span class="p">),</span><span class="w"> </span><span class="n">dataptr_addr</span><span class="p">);</span><span class="w"></span>
+</pre></div>
+<p>In this version of the BF JIT, I decided to keep the data memory on the stack of
+the JITed function. This makes it easier for LLVM to optimize accesses to the
+memory (as we'll see), because the memory is private - it can't be aliased from
+outside the function and can't have side effects, which frees the optimizer to
+be more aggressive <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>. The data pointer itself is kept on the stack too
+(created with an <tt class="docutils literal">alloca</tt> instruction) - more on this very shortly. The
+data pointer is initialized to 0, per BF semantics <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.</p>
+<p>Finally, as usual for one-pass code emission from BF, we have to keep a stack of
+open brackets (in the <tt class="docutils literal">asmjit</tt> version the type was called <tt class="docutils literal">BracketLabels</tt>):</p>
+<div class="highlight"><pre><span></span><span class="n">std</span><span class="o">::</span><span class="n">stack</span><span class="o">&lt;</span><span class="n">BracketBlocks</span><span class="o">&gt;</span><span class="w"> </span><span class="n">open_bracket_stack</span><span class="p">;</span><span class="w"></span>
+</pre></div>
+<p>Now we're ready for the compilation loop that takes the next BF instruction and
+emits the LLVM IR for it. First, pointer movement:</p>
+<div class="highlight"><pre><span></span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">pc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">pc</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">program</span><span class="p">.</span><span class="n">instructions</span><span class="p">.</span><span class="n">size</span><span class="p">();</span><span class="w"> </span><span class="o">++</span><span class="n">pc</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kt">char</span><span class="w"> </span><span class="n">instruction</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">program</span><span class="p">.</span><span class="n">instructions</span><span class="p">[</span><span class="n">pc</span><span class="p">];</span><span class="w"></span>
+<span class="w">  </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">instruction</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;&gt;&#39;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">dataptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateLoad</span><span class="p">(</span><span class="n">dataptr_addr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;dataptr&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">inc_dataptr</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">        </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateAdd</span><span class="p">(</span><span class="n">dataptr</span><span class="p">,</span><span class="w"> </span><span class="n">builder</span><span class="p">.</span><span class="n">getInt32</span><span class="p">(</span><span class="mi">1</span><span class="p">),</span><span class="w"> </span><span class="s">&quot;inc_dataptr&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateStore</span><span class="p">(</span><span class="n">inc_dataptr</span><span class="p">,</span><span class="w"> </span><span class="n">dataptr_addr</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;&lt;&#39;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">dataptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateLoad</span><span class="p">(</span><span class="n">dataptr_addr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;dataptr&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">dec_dataptr</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">        </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateSub</span><span class="p">(</span><span class="n">dataptr</span><span class="p">,</span><span class="w"> </span><span class="n">builder</span><span class="p">.</span><span class="n">getInt32</span><span class="p">(</span><span class="mi">1</span><span class="p">),</span><span class="w"> </span><span class="s">&quot;dec_dataptr&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateStore</span><span class="p">(</span><span class="n">dec_dataptr</span><span class="p">,</span><span class="w"> </span><span class="n">dataptr_addr</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>To move the data pointer, we load its value from its storage on the stack,
+update it (by either incrementing or decrementing) and store it back. If this
+seems inefficient, read on! Later on, the post describes why this style of LLVM
+IR emission is not only acceptable, but desirable.</p>
+<p>For data memory updates, the code is not much more complicated:</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;+&#39;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">dataptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateLoad</span><span class="p">(</span><span class="n">dataptr_addr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;dataptr&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">element_addr</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">      </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateInBoundsGEP</span><span class="p">(</span><span class="n">memory</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="n">dataptr</span><span class="p">},</span><span class="w"> </span><span class="s">&quot;element_addr&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">element</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateLoad</span><span class="p">(</span><span class="n">element_addr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;element&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">inc_element</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">      </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateAdd</span><span class="p">(</span><span class="n">element</span><span class="p">,</span><span class="w"> </span><span class="n">builder</span><span class="p">.</span><span class="n">getInt8</span><span class="p">(</span><span class="mi">1</span><span class="p">),</span><span class="w"> </span><span class="s">&quot;inc_element&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateStore</span><span class="p">(</span><span class="n">inc_element</span><span class="p">,</span><span class="w"> </span><span class="n">element_addr</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="k">case</span><span class="w"> </span><span class="sc">&#39;-&#39;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">dataptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateLoad</span><span class="p">(</span><span class="n">dataptr_addr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;dataptr&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">element_addr</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">      </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateInBoundsGEP</span><span class="p">(</span><span class="n">memory</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="n">dataptr</span><span class="p">},</span><span class="w"> </span><span class="s">&quot;element_addr&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">element</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateLoad</span><span class="p">(</span><span class="n">element_addr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;element&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">dec_element</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">      </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateSub</span><span class="p">(</span><span class="n">element</span><span class="p">,</span><span class="w"> </span><span class="n">builder</span><span class="p">.</span><span class="n">getInt8</span><span class="p">(</span><span class="mi">1</span><span class="p">),</span><span class="w"> </span><span class="s">&quot;sub_element&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateStore</span><span class="p">(</span><span class="n">dec_element</span><span class="p">,</span><span class="w"> </span><span class="n">element_addr</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>We similarly load the data pointer, this time using it to compute an offset into
+the memory (using LLVM's <tt class="docutils literal">getelementptr</tt> instruction). We then load the
+element from memory, update it and store it back. Note how we use the
+<tt class="docutils literal">inbounds</tt> variant of <tt class="docutils literal">getelementptr</tt>; BF doesn't define the behavior of
+stepping outside the bounds of memory - we leverage this fact to let LLVM
+produce more optimized code.</p>
+<p>For I/O, we use a technique similar to the one employed with <tt class="docutils literal">asmjit</tt> in part
+2: call the <tt class="docutils literal">getchar/putchar</tt> functions from the host. If you look at the
+signature of <tt class="docutils literal">emit_jit_function</tt>, it takes a <tt class="docutils literal"><span class="pre">llvm::Function*</span></tt> for each of
+<tt class="docutils literal">getchar</tt> and <tt class="docutils literal">putchar</tt>; these are declared in the caller by adding their
+declaration to the module. Later, in the section dealing with the JIT we'll see
+how these get resolved at run-time.</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;.&#39;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">dataptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateLoad</span><span class="p">(</span><span class="n">dataptr_addr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;dataptr&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">element_addr</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">      </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateInBoundsGEP</span><span class="p">(</span><span class="n">memory</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="n">dataptr</span><span class="p">},</span><span class="w"> </span><span class="s">&quot;element_addr&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">element</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateLoad</span><span class="p">(</span><span class="n">element_addr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;element&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">element_i32</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">      </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateIntCast</span><span class="p">(</span><span class="n">element</span><span class="p">,</span><span class="w"> </span><span class="n">int32_type</span><span class="p">,</span><span class="w"> </span><span class="nb">false</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;element_i32_&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateCall</span><span class="p">(</span><span class="n">putchar_func</span><span class="p">,</span><span class="w"> </span><span class="n">element_i32</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="k">case</span><span class="w"> </span><span class="sc">&#39;,&#39;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">user_input</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">      </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateCall</span><span class="p">(</span><span class="n">getchar_func</span><span class="p">,</span><span class="w"> </span><span class="p">{},</span><span class="w"> </span><span class="s">&quot;user_input&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">user_input_i8</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">      </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateIntCast</span><span class="p">(</span><span class="n">user_input</span><span class="p">,</span><span class="w"> </span><span class="n">int8_type</span><span class="p">,</span><span class="w"> </span><span class="nb">false</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;user_input_i8_&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">dataptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateLoad</span><span class="p">(</span><span class="n">dataptr_addr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;dataptr&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">element_addr</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">      </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateInBoundsGEP</span><span class="p">(</span><span class="n">memory</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="n">dataptr</span><span class="p">},</span><span class="w"> </span><span class="s">&quot;element_addr&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateStore</span><span class="p">(</span><span class="n">user_input_i8</span><span class="p">,</span><span class="w"> </span><span class="n">element_addr</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>As usual, the trickiest part of generating code for BF is handling the loops,
+which could be nested. LLVM makes this fairly easy by having <a class="reference external" href="https://en.wikipedia.org/wiki/Basic_block">basic blocks</a> as first-class citizens. Every
+loop body gets its basic block, and the original block gets split to two - the
+first part jumping into the loop, the last part happening after the loop (since
+we can skip directly to it). Here's how the control-flow graph within a function
+with just a single loop looks <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>:</p>
+<img alt="CFG for function with one loop" class="align-center" src="../../images/2017/llvmjit-oneloop-cfg.png" />
+<p>Note how the jumps between basic blocks happen on a condition and have <tt class="docutils literal">T</tt>
+(true) or <tt class="docutils literal">F</tt> (false) clauses. These just encode the usual BF semantics:</p>
+<ul class="simple">
+<li>For a <tt class="docutils literal">[</tt>, we compare the current memory cell with 0; if it's 0, we skip the
+loop (the <tt class="docutils literal">T</tt> clause); if it's not 0, we enter the loop (the <tt class="docutils literal">F</tt> clause).</li>
+<li>For a <tt class="docutils literal">]</tt>, we compare the current memory cell with 0; if it's 0, we jump
+back to the loop start; otherwise we end the loop.</li>
+</ul>
+<p>Here's the code generating LLVM IR from <tt class="docutils literal">[</tt>:</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;[&#39;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">dataptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateLoad</span><span class="p">(</span><span class="n">dataptr_addr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;dataptr&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">element_addr</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">      </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateInBoundsGEP</span><span class="p">(</span><span class="n">memory</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="n">dataptr</span><span class="p">},</span><span class="w"> </span><span class="s">&quot;element_addr&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">element</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateLoad</span><span class="p">(</span><span class="n">element_addr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;element&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">cmp</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">      </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateICmpEQ</span><span class="p">(</span><span class="n">element</span><span class="p">,</span><span class="w"> </span><span class="n">builder</span><span class="p">.</span><span class="n">getInt8</span><span class="p">(</span><span class="mi">0</span><span class="p">),</span><span class="w"> </span><span class="s">&quot;compare_zero&quot;</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">BasicBlock</span><span class="o">*</span><span class="w"> </span><span class="n">loop_body_block</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">      </span><span class="n">llvm</span><span class="o">::</span><span class="n">BasicBlock</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span><span class="n">context</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;loop_body&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">jit_func</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">BasicBlock</span><span class="o">*</span><span class="w"> </span><span class="n">post_loop_block</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">      </span><span class="n">llvm</span><span class="o">::</span><span class="n">BasicBlock</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span><span class="n">context</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;post_loop&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">jit_func</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateCondBr</span><span class="p">(</span><span class="n">cmp</span><span class="p">,</span><span class="w"> </span><span class="n">post_loop_block</span><span class="p">,</span><span class="w"> </span><span class="n">loop_body_block</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">open_bracket_stack</span><span class="p">.</span><span class="n">push</span><span class="p">(</span><span class="n">BracketBlocks</span><span class="p">(</span><span class="n">loop_body_block</span><span class="p">,</span><span class="w"> </span><span class="n">post_loop_block</span><span class="p">));</span><span class="w"></span>
+<span class="w">  </span><span class="n">builder</span><span class="p">.</span><span class="n">SetInsertPoint</span><span class="p">(</span><span class="n">loop_body_block</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>With the overview and control-flow graph above, I hope it's clear. The most
+interesting part is using the basic blocks to represent parts of the loop. When
+<tt class="docutils literal">[</tt> is encountered, we create both the loop and &quot;post loop&quot; blocks, since the
+branch instruction has to refer to them. We also save these blocks on the open
+bracket stack to refer to them when the matching <tt class="docutils literal">]</tt> is encountered. Finally,
+we set our IR builder to insert all subsequent instructions into the loop block.</p>
+<p>This is how <tt class="docutils literal">]</tt> is handled:</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;]&#39;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">open_bracket_stack</span><span class="p">.</span><span class="n">empty</span><span class="p">())</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">DIE</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;unmatched closing &#39;]&#39; at pc=&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">pc</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="n">BracketBlocks</span><span class="w"> </span><span class="n">blocks</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">open_bracket_stack</span><span class="p">.</span><span class="n">top</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="n">open_bracket_stack</span><span class="p">.</span><span class="n">pop</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">dataptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateLoad</span><span class="p">(</span><span class="n">dataptr_addr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;dataptr&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">element_addr</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">      </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateInBoundsGEP</span><span class="p">(</span><span class="n">memory</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="n">dataptr</span><span class="p">},</span><span class="w"> </span><span class="s">&quot;element_addr&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">element</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateLoad</span><span class="p">(</span><span class="n">element_addr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;element&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">llvm</span><span class="o">::</span><span class="n">Value</span><span class="o">*</span><span class="w"> </span><span class="n">cmp</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">      </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateICmpNE</span><span class="p">(</span><span class="n">element</span><span class="p">,</span><span class="w"> </span><span class="n">builder</span><span class="p">.</span><span class="n">getInt8</span><span class="p">(</span><span class="mi">0</span><span class="p">),</span><span class="w"> </span><span class="s">&quot;compare_zero&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">builder</span><span class="p">.</span><span class="n">CreateCondBr</span><span class="p">(</span><span class="n">cmp</span><span class="p">,</span><span class="w"> </span><span class="n">blocks</span><span class="p">.</span><span class="n">loop_body_block</span><span class="p">,</span><span class="w"> </span><span class="n">blocks</span><span class="p">.</span><span class="n">post_loop_block</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">builder</span><span class="p">.</span><span class="n">SetInsertPoint</span><span class="p">(</span><span class="n">blocks</span><span class="p">.</span><span class="n">post_loop_block</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Pretty much as we'd expect: the relevant blocks are popped from the stack and
+used as targets for another conditional branch <a class="footnote-reference" href="index.html#footnote-4" id="footnote-reference-4">[4]</a>.</p>
+</div>
+<div class="section" id="ir-sample-for-a-simple-bf-program">
+<h2>IR sample for a simple BF program</h2>
+<p>Let's see what LLVM IR our code emits for the simple <tt class="docutils literal">count1to5.bf</tt> program:</p>
+<div class="highlight"><pre><span></span>++++++++ ++++++++ ++++++++ ++++++++ ++++++++ ++++++++
+
+&gt;+++++
+[&lt;+.&gt;-]
+</pre></div>
+<p>The full LLVM-based JIT is available in <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/bfjit/llvmjit.cpp">llvmjit.cpp</a>.
+When invoked in verbose mode, it will dump LLVM IR for the translated program
+before and after LLVM optimization. Let's start by looking at the
+pre-optimization IR. I've added comments on lines starting with <tt class="docutils literal">###</tt>:</p>
+<div class="highlight"><pre><span></span>define void @__llvmjit() {
+entry:
+
+  ### The entry BB starts by declaring the memory and data pointer, and
+  ### initializing the data pointer to 0.
+
+  %memory = alloca i8, i32 30000
+  call void @llvm.memset.p0i8.i64(i8* %memory, i8 0, i64 30000, i32 1, i1 false)
+  %dataptr_addr = alloca i32
+  store i32 0, i32* %dataptr_addr
+
+  ### The following 5 instructions increment memory[dataptr] (with dataptr
+  ### remaining at 0, as initialized), and they are repeated 48 times...
+
+  %dataptr = load i32, i32* %dataptr_addr
+  %element_addr = getelementptr inbounds i8, i8* %memory, i32 %dataptr
+  %element = load i8, i8* %element_addr
+  %inc_element = add i8 %element, 1
+  store i8 %inc_element, i8* %element_addr
+
+  ### ... 47 more times skipped ...
+
+  store i8 %inc_element184, i8* %element_addr182
+  %dataptr185 = load i32, i32* %dataptr_addr
+  %element_addr186 = getelementptr inbounds i8, i8* %memory, i32 %dataptr185
+  %element187 = load i8, i8* %element_addr186
+  %inc_element188 = add i8 %element187, 1
+  store i8 %inc_element188, i8* %element_addr186
+
+  ### Now incrementing dataptr and 5 more data increments.
+
+  %dataptr189 = load i32, i32* %dataptr_addr
+  %inc_dataptr = add i32 %dataptr189, 1
+  store i32 %inc_dataptr, i32* %dataptr_addr
+
+  %dataptr190 = load i32, i32* %dataptr_addr
+  %element_addr191 = getelementptr inbounds i8, i8* %memory, i32 %dataptr190
+  %element192 = load i8, i8* %element_addr191
+  %inc_element193 = add i8 %element192, 1
+  store i8 %inc_element193, i8* %element_addr191
+
+  ### ... 4 more increments skipped
+
+  ### Load memory[dataptr] and compare it to 0; on true, jump to %post_loop;
+  ### on false jump to %loop_body.
+
+  %dataptr210 = load i32, i32* %dataptr_addr
+  %element_addr211 = getelementptr inbounds i8, i8* %memory, i32 %dataptr210
+  %element212 = load i8, i8* %element_addr211
+  %compare_zero = icmp eq i8 %element212, 0
+  br i1 %compare_zero, label %post_loop, label %loop_body
+
+loop_body:
+
+  ### Decrement dataptr
+
+  %dataptr213 = load i32, i32* %dataptr_addr
+  %dec_dataptr = sub i32 %dataptr213, 1
+  store i32 %dec_dataptr, i32* %dataptr_addr
+
+  ### Increment memory[dataptr]
+
+  %dataptr214 = load i32, i32* %dataptr_addr
+  %element_addr215 = getelementptr inbounds i8, i8* %memory, i32 %dataptr214
+  %element216 = load i8, i8* %element_addr215
+  %inc_element217 = add i8 %element216, 1
+  store i8 %inc_element217, i8* %element_addr215
+
+  ### Invoke putchar on memory[dataptr]
+
+  %dataptr218 = load i32, i32* %dataptr_addr
+  %element_addr219 = getelementptr inbounds i8, i8* %memory, i32 %dataptr218
+  %element220 = load i8, i8* %element_addr219
+  %element_i32_ = zext i8 %element220 to i32
+  %0 = call i32 @putchar(i32 %element_i32_)
+
+  ### Increment dataptr
+
+  %dataptr221 = load i32, i32* %dataptr_addr
+  %inc_dataptr222 = add i32 %dataptr221, 1
+  store i32 %inc_dataptr222, i32* %dataptr_addr
+
+  ### Decrement memory[dataptr]
+
+  %dataptr223 = load i32, i32* %dataptr_addr
+  %element_addr224 = getelementptr inbounds i8, i8* %memory, i32 %dataptr223
+  %element225 = load i8, i8* %element_addr224
+  %sub_element = sub i8 %element225, 1
+  store i8 %sub_element, i8* %element_addr224
+
+  ### Load memory[dataptr] and compare it to 0; on true, jump back to
+  ### %loop_body; on false jump to %post_loop.
+
+  %dataptr226 = load i32, i32* %dataptr_addr
+  %element_addr227 = getelementptr inbounds i8, i8* %memory, i32 %dataptr226
+  %element228 = load i8, i8* %element_addr227
+  %compare_zero229 = icmp ne i8 %element228, 0
+  br i1 %compare_zero229, label %loop_body, label %post_loop
+
+post_loop
+  call void @dump_memory(i8* %memory)
+  ret void
+}
+</pre></div>
+<p>As discussed before, this code is doing a huge amount of repetetive and mostly
+unnecessary work. It keeps storing and reloading values it should already have.
+But this is precisely what the LLVM optimizer is designed to fix. Let's see the
+post-optimization code LLVM produces:</p>
+<div class="highlight"><pre><span></span>define void @__llvmjit() local_unnamed_addr {
+loop_body.preheader:
+  %memory290 = alloca [30000 x i8], align 1
+  %memory290.sub = getelementptr inbounds [30000 x i8], [30000 x i8]* %memory290, i64 0, i64 0
+  %0 = getelementptr inbounds [30000 x i8], [30000 x i8]* %memory290, i64 0, i64 2
+  call void @llvm.memset.p0i8.i64(i8* nonnull %0, i8 0, i64 29998, i32 1, i1 false)
+  store i8 48, i8* %memory290.sub, align 1
+  %element_addr191 = getelementptr inbounds [30000 x i8], [30000 x i8]* %memory290, i64 0, i64 1
+  store i8 5, i8* %element_addr191, align 1
+  br label %loop_body
+
+loop_body:
+  %1 = tail call i32 @putchar(i32 49)
+  %2 = tail call i32 @putchar(i32 50)
+  %3 = tail call i32 @putchar(i32 51)
+  %4 = tail call i32 @putchar(i32 52)
+  %5 = tail call i32 @putchar(i32 53)
+  store i8 53, i8* %memory290.sub, align 1
+  store i8 0, i8* %element_addr191, align 1
+  call void @dump_memory(i8* nonnull %memory290.sub)
+  ret void
+}
+</pre></div>
+<p>The LLVM optimizer is extremely aggressive! Not only all the repetition is gone,
+but there isn't even a loop any more because LLVM statically computed it will
+just run 5 times and unrolled it completely. <tt class="docutils literal">putchar</tt> is invoked 5 times
+with the values the loop would have produced, and that's all. The reason LLVM
+kept <tt class="docutils literal">memory</tt> around was only so the call to <tt class="docutils literal">dump_memory</tt> would have data.
+If we remove this debugging call, the function turns into:</p>
+<div class="highlight"><pre><span></span>define void @__llvmjit() local_unnamed_addr #0 {
+entry:
+  %0 = tail call i32 @putchar(i32 49)
+  %1 = tail call i32 @putchar(i32 50)
+  %2 = tail call i32 @putchar(i32 51)
+  %3 = tail call i32 @putchar(i32 52)
+  %4 = tail call i32 @putchar(i32 53)
+  ret void
+}
+</pre></div>
+</div>
+<div class="section" id="observing-how-llvm-handles-our-loops">
+<h2>Observing how LLVM handles our loops</h2>
+<p>So the <tt class="docutils literal">count1to5</tt> sample was a bit too simple for the LLVM optimizer. To see
+our loops actually being emitted, we'll have to resort to more tricks - by
+placing &quot;input&quot; instructions (<tt class="docutils literal">,</tt> in BF) in stratetic locations so that LLVM
+can't just infer their value statically. Take for example the
+(slightly-nonsensical) BF program:</p>
+<div class="highlight"><pre><span></span>&gt;,
+
+[&lt;+.&gt;,]
+</pre></div>
+<p>It places user input into cell 1, and then repeatedly:</p>
+<ul class="simple">
+<li>Increments cell 0, printing its value out</li>
+<li>Places new user input in cell 1</li>
+</ul>
+<p>It will terminate when the user input is 0. Not very useful, but it does the
+job. Here's the <em>optimized</em> IR LLVM emits for it:</p>
+<div class="highlight"><pre><span></span>define void @__llvmjit() local_unnamed_addr {
+entry:
+  %memory29 = alloca [30000 x i8], align 1
+  %memory29.sub = getelementptr inbounds [30000 x i8], [30000 x i8]* %memory29, i64 0, i64 0
+  call void @llvm.memset.p0i8.i64(i8* nonnull %memory29.sub, i8 0, i64 30000, i32 1, i1 false)
+  %user_input = tail call i32 @getchar()
+  %user_input_i8_ = trunc i32 %user_input to i8
+  %element_addr = getelementptr inbounds [30000 x i8], [30000 x i8]* %memory29, i64 0, i64 1
+  store i8 %user_input_i8_, i8* %element_addr, align 1
+  %compare_zero = icmp eq i8 %user_input_i8_, 0
+  br i1 %compare_zero, label %post_loop, label %loop_body.preheader
+
+loop_body.preheader:
+  br label %loop_body
+
+loop_body:
+  %element730 = phi i8 [ %inc_element, %loop_body ], [ 0, %loop_body.preheader ]
+  %inc_element = add i8 %element730, 1
+  %element_i32_ = zext i8 %inc_element to i32
+  %0 = tail call i32 @putchar(i32 %element_i32_)
+  %user_input13 = tail call i32 @getchar()
+  %user_input_i8_14 = trunc i32 %user_input13 to i8
+  %compare_zero20 = icmp eq i8 %user_input_i8_14, 0
+  br i1 %compare_zero20, label %post_loop.loopexit, label %loop_body
+
+post_loop.loopexit:
+  store i8 %inc_element, i8* %memory29.sub, align 1
+  store i8 0, i8* %element_addr, align 1
+  br label %post_loop
+
+post_loop:
+  call void @dump_memory(i8* nonnull %memory29.sub)
+  ret void
+}
+</pre></div>
+<p>The two most important points to note are:</p>
+<ul class="simple">
+<li>There's no extra stack movement; like, <em>at all</em>. LLVM statically computed what
+happens at address 0 and address 1 and just juggles virtual registers with
+these values, <em>actually storing to memory only outside the loop</em>!</li>
+<li>To be able to do that, it generated a <tt class="docutils literal">phi</tt> instruction at the loop body
+start.</li>
+</ul>
+<p>The latter is especially important: this is LLVM converting the IR to <em>SSA
+form</em>, where every value is assigned only once and special <tt class="docutils literal">phi</tt> nodes are
+required to merge multiple possible values. SSA is well outside the scope of
+this humble post, but I suggest reading about it. LLVM's <tt class="docutils literal">mem2reg</tt> pass
+converts our naive stack-using code to SSA with virtual registers, and SSA form
+makes it much easier for the compiler to analyze the IR and optimize it
+aggressively.</p>
+<p>On the other hand, <em>emitters</em> of LLVM IR don't have to worry about efficient
+usage of virtual registers and can just assign stack slots for all &quot;variables&quot;,
+leaving the optimization to LLVM. For our simple use case of BF this may not
+matter too much, but think about a classical programming language where a
+function may have dozens of variables to track <a class="footnote-reference" href="index.html#footnote-5" id="footnote-reference-5">[5]</a>.</p>
+</div>
+<div class="section" id="jiting-llvm-ir-to-executable-machine-code">
+<h2>JITing LLVM IR to executable machine code</h2>
+<p>Being able to optimize LLVM IR is just one of the strengths of LLVM <tt class="docutils literal">llvmjit</tt>
+is using. The other is the ability to efficiently execute this IR at run-time
+by JITing it into an excutable in-memory chunk of machine code.</p>
+<p>In <tt class="docutils literal">llvmjit</tt>, the part doing this is:</p>
+<div class="highlight"><pre><span></span><span class="n">SimpleOrcJIT</span><span class="w"> </span><span class="nf">jit</span><span class="p">(</span><span class="cm">/*verbose=*/</span><span class="n">verbose</span><span class="p">);</span><span class="w"></span>
+<span class="k">module</span><span class="o">-&gt;</span><span class="n">setDataLayout</span><span class="p">(</span><span class="n">jit</span><span class="p">.</span><span class="n">get_target_machine</span><span class="p">().</span><span class="n">createDataLayout</span><span class="p">());</span><span class="w"></span>
+<span class="n">jit</span><span class="p">.</span><span class="n">add_module</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">move</span><span class="p">(</span><span class="k">module</span><span class="p">));</span><span class="w"></span>
+
+<span class="n">llvm</span><span class="o">::</span><span class="n">JITSymbol</span><span class="w"> </span><span class="n">jit_func_sym</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">jit</span><span class="p">.</span><span class="n">find_symbol</span><span class="p">(</span><span class="n">JIT_FUNC_NAME</span><span class="p">);</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">jit_func_sym</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">DIE</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Unable to find symbol &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">JIT_FUNC_NAME</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot; in module&quot;</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">using</span><span class="w"> </span><span class="n">JitFuncType</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="p">)(</span><span class="kt">void</span><span class="p">);</span><span class="w"></span>
+<span class="n">JitFuncType</span><span class="w"> </span><span class="n">jit_func_ptr</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">    </span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="n">JitFuncType</span><span class="o">&gt;</span><span class="p">(</span><span class="n">jit_func_sym</span><span class="p">.</span><span class="n">getAddress</span><span class="p">());</span><span class="w"></span>
+<span class="n">jit_func_ptr</span><span class="p">();</span><span class="w"></span>
+</pre></div>
+<p>Which, of course, leaves the question - what is <tt class="docutils literal">SimpleOrcJit</tt>? It's a
+simplified instantiation of LLVM's <a class="reference external" href="http://llvm.org/docs/tutorial/BuildingAJIT2.html">newest JIT engine - ORC</a>. For the full code see
+<a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/bfjit/llvm_jit_utils.h">this header</a>
+and its accompanying source file. My implementation of the JIT is very similar
+to the one in the LLVM tutorial, with the addition of dumping the JITed machine
+code to a binary file prior to returning an executable pointer to it.</p>
+<p>LLVM's ORC JIT looks formidable, but there's no magic to it. In its essence,
+it's just doing the thing <a class="reference external" href="../../2013/11/05/how-to-jit-an-introduction.html">my introduction to JITing</a>
+describes, with with many (many!) more layers on top. One interesting thing I
+<em>would</em> like to mention, though, is how the JIT finds host functions to call,
+since it's designed differently from the previous JITs I showed.</p>
+<p>For <tt class="docutils literal">llvmjit</tt>, all we do is <em>declare</em> (without defining) the host functions in
+the module, so that we can insert a <tt class="docutils literal">call</tt> instruction to these functions. For
+example:</p>
+<div class="highlight"><pre><span></span>declare i32 @putchar(i32) local_unnamed_addr #0
+</pre></div>
+<p>Unlike the approach with <tt class="docutils literal">asmjit</tt>-based JITs, we don't encode the address of
+the host function in the JITed code. Rather we let the JIT resolve it
+automatically. This is done by adding the following <em>resolver</em> to the JIT:</p>
+<div class="highlight"><pre><span></span><span class="k">auto</span><span class="w"> </span><span class="n">resolver</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">orc</span><span class="o">::</span><span class="n">createLambdaResolver</span><span class="p">(</span><span class="w"></span>
+<span class="w">    </span><span class="p">[</span><span class="k">this</span><span class="p">](</span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&amp;</span><span class="w"> </span><span class="n">name</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="w"> </span><span class="n">sym</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">find_mangled_symbol</span><span class="p">(</span><span class="n">name</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">sym</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">JITSymbol</span><span class="p">(</span><span class="k">nullptr</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">},</span><span class="w"></span>
+<span class="w">    </span><span class="p">[](</span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&amp;</span><span class="w"> </span><span class="n">name</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="w"> </span><span class="n">sym_addr</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">              </span><span class="n">RTDyldMemoryManager</span><span class="o">::</span><span class="n">getSymbolAddressInProcess</span><span class="p">(</span><span class="n">name</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="n">JITSymbol</span><span class="p">(</span><span class="n">sym_addr</span><span class="p">,</span><span class="w"> </span><span class="n">JITSymbolFlags</span><span class="o">::</span><span class="n">Exported</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">JITSymbol</span><span class="p">(</span><span class="k">nullptr</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">});</span><span class="w"></span>
+</pre></div>
+<p>The second lambda function passed to the resolver is invoked when the LLVM IR
+being compiled contains a <tt class="docutils literal">call</tt> to a symbol that wasn't defined in the
+module. In this case, what we do amounts to a call to <tt class="docutils literal">dlsym</tt> with the symbol
+name. The constructor of <tt class="docutils literal">SimpleOrcJIT</tt> calls
+<tt class="docutils literal">LoadLibraryPermanently(nullptr)</tt> which translates to <tt class="docutils literal">dlopen(nullptr,
+<span class="pre">...)</span></tt>, meaning that all symbols contained in the host executable are
+visible to the JIT. To accomplish this, <tt class="docutils literal">llvmjit</tt> is compiled with the
+<tt class="docutils literal"><span class="pre">-rdynamic</span></tt> linker flag. This way the JITed code can call any function found
+in the host code, including standard C library functions like <tt class="docutils literal">putchar</tt>.</p>
+</div>
+<div class="section" id="how-fast-does-it-run">
+<h2>How fast does it run?</h2>
+<p>Let's see how <tt class="docutils literal">llvmjit</tt> compares to the JITs developed in <a class="reference external" href="../adventures-in-jit-compilation-part-2-an-x64-jit/index.html">part 2</a>.
+To make this measurement fair, I'm instrumenting the program to report <em>execution</em>
+time separately from <em>compilation</em> time, since LLVM may take a while optimizing
+a large IR program.</p>
+<p>With this instrumentation, <tt class="docutils literal">llvmjit</tt> takes 0.92 seconds to run <tt class="docutils literal">mandelbrot</tt>,
+which is virtually the same time <tt class="docutils literal">optasmjit</tt> took; it takes 0.14 seconds to
+run <tt class="docutils literal">factor</tt>, half of the time of <tt class="docutils literal">optasmjit</tt>. That said, for these programs
+LLVM optimizations took roughly the same amount of time as execution, so if you
+include everything in - <tt class="docutils literal">llvmjit</tt> is equal on <tt class="docutils literal">factor</tt> and loses by ~2x on
+<tt class="docutils literal">mandelbrot</tt> <a class="footnote-reference" href="index.html#footnote-6" id="footnote-reference-6">[6]</a>. So, as often is the case with JITs, it all depends on the
+use case - if we care about run-time of long programs, it makes sense to spend
+more time optimizing; it we mostly care about short programs, it doesn't. This
+is why many modern JITs (think JavaScript) are multi-stage - starting with a
+fast interpreter or <em>baseline</em> (very light on optimization) JIT, and switching
+to a more optimizing JIT if the program turns out to be longer-running than
+initially expected.</p>
+<img alt="BF opt3 vs. part 2 jits vs. llvmjit" class="align-center" src="../../images/2017/bf-runtime-vs-llvmjit.png" />
+<p>Optimization-time aside, it's quite amazing that LLVM is managing to reach the
+speed of <tt class="docutils literal">optasmjit</tt>, which emits tight machine code and uses domain-specific
+optimizations to convert whole loops from the BF code to simple O(1) sequences.
+This is due to the power of LLVM's optimizer; it is able, on its own, to infer
+that some of these loops are really accomplishing trivial computations. I
+suggest taking this as an exercise: write simple BF programs and run them
+through <tt class="docutils literal">llvmjit <span class="pre">--verbose</span></tt> to observe the post-optimization IR. You'll see
+that LLVM is able to remove loops like <tt class="docutils literal"><span class="pre">[-]</span></tt> and <tt class="docutils literal"><span class="pre">[&lt;-&gt;+]</span></tt>, replacing them by
+simple data initialization &amp; movement. Bonus points for uncovering other
+optimizations that LLVM did but our <tt class="docutils literal">optasmjit</tt> didn't - after all, LLVM does
+run the <tt class="docutils literal">factor</tt> benchmark much faster, so there must be something interesting
+there.</p>
+</div>
+<div class="section" id="conclusion">
+<h2>Conclusion</h2>
+<p>After playing with manual code-generation in part 2, this post demonstrates
+using an industrial-strength compiler backend to create a JIT for BF. LLVM is a
+large and complex library with a steep learning curve, but once you're past
+the initial ramp-up stage it's an extremely powerful tool. LLVM lets you emit
+very straightforward code without worrying about things like registers and
+recomputing the same values over and over again. Its state-of-the art optimizer
+removes all these inefficiencies, producing extremely tight IR. Moreover, LLVM
+lets us target multiple architectures very easily from the same code - just
+choose which targets you want when configuring &amp; compiling LLVM itself, and you
+have a multi-target compiler.</p>
+<p>However, LLVM has downsides as well - it's large, and its compile time is
+considerable. This sometimes makes it less desirable in situations where a small
+footprint and fast compilation are required. For an interesting account of how
+the WebKit developers replaced LLVM with a custom backend for their &quot;last-tier&quot;
+optimized JIT, read <a class="reference external" href="https://webkit.org/blog/5852/introducing-the-b3-jit-compiler/">Introducing the B3 JIT compiler</a>.</p>
+<hr class="docutils" />
+<p>Links to all posts in this series:</p>
+<ul class="simple">
+<li><a class="reference external" href="../adventures-in-jit-compilation-part-1-an-interpreter/index.html">Part 1 - an interpreter</a></li>
+<li><a class="reference external" href="../adventures-in-jit-compilation-part-2-an-x64-jit/index.html">Part 2 - an x64 JIT</a></li>
+<li><a class="reference external" href="index.html">Part 3 - LLVM</a></li>
+<li><a class="reference external" href="../adventures-in-jit-compilation-part-4-in-python/index.html">Part 4 - Python</a></li>
+</ul>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>As an exercise, move this memory outside the function - by allocating it
+on the host and passing a pointer to the JITed code, similarly to how it
+was done in <a class="reference external" href="../adventures-in-jit-compilation-part-2-an-x64-jit/index.html">part 2</a>.
+Observe how this affects LLVM's optimization, if at all. Read on LLVM's
+concepts of <em>volatile</em> and <em>aliasing</em> and think about how they may affect
+optimizations.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>A fun experiment is to remove this initialization and observe what LLVM
+does with the code. I had this bug initially, and it's a brilliant
+demonstration of LLVM's capability of optimizing code that has undefined
+behavior (in this case using uninitialized values).</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>This CFG is produced automatically by LLVM and is a good example of the
+tools provided by default with this framework. To generate it, I took
+the LLVM IR file dumped by <tt class="docutils literal">llvmjit</tt> in verbose mode, and ran LLVM's
+<tt class="docutils literal">opt</tt> tool on it with the <tt class="docutils literal"><span class="pre">-view-cfg-only</span></tt> flag. This makes <tt class="docutils literal">opt</tt>
+dump a Graphviz <tt class="docutils literal">.dot</tt> file which can then be converted to an image.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-4">[4]</a></td><td>Exercise: why do we need to save <tt class="docutils literal">loop_body_block</tt> at all? When a <tt class="docutils literal">]</tt>
+is encountered, shouldn't the matching <tt class="docutils literal">loop_body_block</tt> be the same
+one as the currently populated block?</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-5">[5]</a></td><td>A cool experiment to try is compile some C function to LLVM IR with
+the Clang front-end and observe stack usage in unoptimized code, followed
+by running <tt class="docutils literal">opt <span class="pre">-O3</span></tt> to see what the optimizer turned it into.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-6" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-6">[6]</a></td><td>For <tt class="docutils literal">mandelbrot</tt>, the textual representation of LLVM IR generated for
+the BF program runs to ~42,000 lines, which takes LLVM 0.8 seconds to
+fully optimize.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

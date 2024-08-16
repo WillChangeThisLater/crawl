@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>A recursive descent parser with an infix expression evaluator - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../../index.html" class="navbar-brand">
+                <img src="../../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="../a-recursive-descent-parser-with-an-infix-expression-evaluator.html"
+                       rel="bookmark"
+                       title="Permalink to A recursive descent parser with an infix expression evaluator">
+                        A recursive descent parser with an infix expression evaluator
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> March 20, 2009 at 18:01</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../../tag/compilation.html">Compilation</a>
+        ,
+    <a href="../../../../tag/recursive-descent-parsing.html">Recursive descent parsing</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p><a class="reference external" href="../../14/some-problems-of-recursive-descent-parsers/index.html">Last week</a> I wrote about some of the inherent problems of recursive-descent parsers. An elegant solution to the operator associativity problem was shown, but another problem remained - and that is of the unwieldy handling of expressions, mainly performance-wise.</p>
+<p>Here I want to present one alternative to the pure-RD approach, and that is intermixing RD with another parsing method.</p>
+<div class="section" id="the-code">
+<h3>The code</h3>
+<p>I'll begin by pointing to <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2009/py_rd_parser_example">the code for this article</a>. It contains several Python files and a <tt class="docutils literal"><span class="pre">readme.txt</span></tt> explaining what is what. Throughout the article I'll present short snippets from the code, but it's encouraged to run it on your own. The code is self-contained and only requires Python (version 2.5) to run.</p>
+</div>
+<div class="section" id="extending-the-grammar">
+<h3>Extending the grammar</h3>
+<p>To illuminate some of the points I'm presenting better, I've greatly extended the EBNF grammar we'll be parsing. Here's the new grammar (taken from the top of the <tt class="docutils literal"><span class="pre">rd_parser_ebnf.py</span></tt> in the code .zip):</p>
+<div class="highlight"><pre># EBNF:
+#
+# &lt;stmt&gt;        : &lt;assign_stmt&gt;
+#               | &lt;if_stmt&gt;
+#               | &lt;cmp_expr&gt;
+#
+# &lt;assign_stmt&gt; : set &lt;id&gt; = &lt;cmp_expr&gt;
+#
+## Note &#39;else&#39; binds to the innermost &#39;if&#39;, like in C
+#
+# &lt;if_stmt&gt;     : if &lt;cmp_expr&gt; then &lt;stmt&gt; [else &lt;stmt&gt;]
+#
+# &lt;cmp_expr&gt;    : &lt;bitor_expr&gt; [== &lt;bitor_expr&gt;]
+#               | &lt;bitor_expr&gt; [!= &lt;bitor_expr&gt;]
+#               | &lt;bitor_expr&gt; [&gt; &lt;bitor_expr&gt;]
+#               | &lt;bitor_expr&gt; [&lt; &lt;bitor_expr&gt;]
+#               | &lt;bitor_expr&gt; [&gt;= &lt;bitor_expr&gt;]
+#               | &lt;bitor_expr&gt; [&lt;= &lt;bitor_expr&gt;]
+#
+# &lt;bitor_expr&gt;  | &lt;bitxor_expr&gt; {| &lt;bitxor_expr&gt;}
+#
+# &lt;bitxor_expr&gt; | &lt;bitand_expr&gt; {^ &lt;bitand_expr&gt;}
+#
+# &lt;bitand_expr&gt; | &lt;shift_expr&gt; {&amp; &lt;shift_expr&gt;}
+#
+# &lt;shift_expr&gt;  | &lt;arith_expr&gt; {&lt;&lt; &lt;arith_expr&gt;}
+#               : &lt;arith_expr&gt; {&gt;&gt; &lt;arith_expr&gt;}
+#
+# &lt;arith_expr&gt;  : &lt;term&gt; {+ &lt;term&gt;}
+#               | &lt;term&gt; {- &lt;term&gt;}
+#
+# &lt;term&gt;        : &lt;power&gt; {* &lt;power&gt;}
+#               | &lt;power&gt; {/ &lt;power&gt;}
+#
+# &lt;power&gt;       : &lt;power&gt; ** &lt;factor&gt;
+#               | &lt;factor&gt;
+#
+# &lt;factor&gt;      : &lt;id&gt;
+#               | &lt;number&gt;
+#               | - &lt;factor&gt;
+#               | ( &lt;cmp_expr&gt; )
+#
+# &lt;id&gt;          : [a-zA-Z_]\w+
+# &lt;number&gt;      : \d+
+</pre></div>
+<p>As you can see, this simple calculator is starting to approach a real programming language, as it supports a plethora of mathematical and logical expressions, as well as conditional statements (<tt class="docutils literal"><span class="pre">if</span> <span class="pre">...</span> <span class="pre">then</span> <span class="pre">...</span> <span class="pre">else</span></tt>) and assignments. I've added a simplistic &quot;prompt&quot; so you can experiment with the calculator from the command line:</p>
+<div class="highlight"><pre>D:\zzz\rd_parser_calc&gt;rd_parser_ebnf.py -p
+Welcome to the calculator. Press Ctrl+C to exit.
+--&gt; set x = 2 + 2 * 3
+8
+--&gt; set y = (x - 1) * (x - 2)
+42
+--&gt; if y &gt; x then set y = x else set x = y
+8
+--&gt; x
+8
+--&gt; y
+8
+--&gt; x ** ((y - 10) * -3)
+262144
+--&gt; ... Thanks for using the calculator.
+</pre></div>
+<p>Note that since a separate expression &quot;level&quot; is required for each precedence, the resulting code is somewhat repetitive. I'll get back to this point later on.</p>
+</div>
+<div class="section" id="evaluating-infix-expressions">
+<h3>Evaluating infix expressions</h3>
+<p>An alternative method of evaluating expressions is required, then. Luckily, such a need arose early enough (in the 1950s and 60s, when first compilers and interpreters were constructed) and some luminaries examined this problem in detail. In particular, <a class="reference external" href="http://en.wikipedia.org/wiki/Edsger_Dijkstra">Edsger W. Dijkstra</a> proposed an efficient and intuitive algorithm for converting from <a class="reference external" href="http://en.wikipedia.org/wiki/Infix_notation">infix notation</a> to <a class="reference external" href="http://en.wikipedia.org/wiki/Reverse_Polish_notation">RPN</a>, called the <a class="reference external" href="http://en.wikipedia.org/wiki/Shunting_yard_algorithm">Shunting Yard algorithm</a>.</p>
+<p>I will not describe the algorithm here, as it's been done several times already. If the Wikipedia article is not enough, <a class="reference external" href="http://www.engr.mun.ca/~theo/Misc/exp_parsing.htm">here's another good source</a> (which I've actually used as the basis for my implementation).</p>
+<p>The algorithm employs two stacks to resolve the precedence dilemmas of infix notation. One stack is for storing operators of relatively low precedence that await results from computations with higher precedence. The other stack keeps the result accumulated so far. The result can either be a RPN expression, an AST or just the computed result (a number) of the computation.</p>
+<p>In my code, the file <tt class="docutils literal"><span class="pre">rd_parser_infix_exper.py</span></tt> implements a hybrid parser, using Shunting Yard to evaluate expressions and a top-level RD parser for statements and combining everything together. It's instructive to examine the implementation and see how things fit together.</p>
+<p>The grammar this parser accepts is exactly the same as the pure RD EBNF parser presented eariler. The statements (<tt class="docutils literal"><span class="pre">assign_stmt</span></tt>, <tt class="docutils literal"><span class="pre">if_stmt</span></tt>, and <tt class="docutils literal"><span class="pre">stmt</span></tt>) are evaluated by traditional RD, but getting deeper into expressions is done with an &quot;infix evaluator&quot;, the gateway to which is the <tt class="docutils literal"><span class="pre">_infix_eval</span></tt> method <a class="footnote-reference" href="index.html#id4" id="id1">[1]</a>:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">_infix_eval</span>(<span style="color: #00007f">self</span>):
+    <span style="color: #7f007f">&quot;&quot;&quot; Run the infix evaluator and return the result.</span>
+<span style="color: #7f007f">    &quot;&quot;&quot;</span>
+    <span style="color: #00007f">self</span>.op_stack = []
+    <span style="color: #00007f">self</span>.res_stack = []
+
+    <span style="color: #00007f">self</span>.op_stack.append(<span style="color: #00007f">self</span>._sentinel)
+    <span style="color: #00007f">self</span>._infix_eval_expr()
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">self</span>.res_stack[-<span style="color: #007f7f">1</span>]
+</pre></div>
+<p>This method prepares the Shunting Yard stacks and begins evaluating the expression, terminating with returning its results.</p>
+<p>Note that the connection to the RD parser is seamless. When <tt class="docutils literal"><span class="pre">_infix_eval</span></tt> is called, it assumes that the current token is the beginning of an expression (just like any RD rule), and consumes as much tokens as required to parse the full expression before returning the result.</p>
+<p>The rest of the implementation (the <tt class="docutils literal"><span class="pre">_infix_eval_expr</span></tt>, <tt class="docutils literal"><span class="pre">_infix_eval_atom</span></tt>, <tt class="docutils literal"><span class="pre">_push_op</span></tt> and <tt class="docutils literal"><span class="pre">_pop_op</span></tt> methods) is pretty much a word by word translation of the algorithm described in <a class="reference external" href="http://www.engr.mun.ca/~theo/Misc/exp_parsing.htm">this article</a> into Python.</p>
+</div>
+<div class="section" id="adding-expressions">
+<h3>Adding expressions</h3>
+<p>Here's a big advantage of this hybrid parser: adding new expressions and/or changing precedence levels is much simpler and requires far less code. In the pure RD parser, the operators and their precedences are determined by the structure of recursive calls between methods. Adding a new operator requires a new method, as well as modifying some of the other methods <a class="footnote-reference" href="index.html#id5" id="id2">[2]</a>. Changing the precedence of some operator is also troublesome and requires moving around lots of code.</p>
+<p>Not so in the infix expression parser. Once the Shunting Yard machinery is in place, all we have to do to add new operators or modify existing ones is update the <tt class="docutils literal"><span class="pre">_ops</span></tt> table:</p>
+<div class="highlight"><pre>_ops = {
+    <span style="color: #7f007f">&#39;u-&#39;</span>:   Op(<span style="color: #7f007f">&#39;unary -&#39;</span>, operator.neg, <span style="color: #007f7f">90</span>, unary=<span style="color: #00007f">True</span>),
+    <span style="color: #7f007f">&#39;**&#39;</span>:   Op(<span style="color: #7f007f">&#39;**&#39;</span>, operator.pow, <span style="color: #007f7f">70</span>, right_assoc=<span style="color: #00007f">True</span>),
+    <span style="color: #7f007f">&#39;*&#39;</span>:    Op(<span style="color: #7f007f">&#39;*&#39;</span>, operator.mul, <span style="color: #007f7f">50</span>),
+    <span style="color: #7f007f">&#39;/&#39;</span>:    Op(<span style="color: #7f007f">&#39;/&#39;</span>, operator.div, <span style="color: #007f7f">50</span>),
+    <span style="color: #7f007f">&#39;+&#39;</span>:    Op(<span style="color: #7f007f">&#39;+&#39;</span>, operator.add, <span style="color: #007f7f">40</span>),
+    <span style="color: #7f007f">&#39;-&#39;</span>:    Op(<span style="color: #7f007f">&#39;-&#39;</span>, operator.sub, <span style="color: #007f7f">40</span>),
+    <span style="color: #7f007f">&#39;&lt;&lt;&#39;</span>:   Op(<span style="color: #7f007f">&#39;&lt;&lt;&#39;</span>, operator.lshift, <span style="color: #007f7f">35</span>),
+    <span style="color: #7f007f">&#39;&gt;&gt;&#39;</span>:   Op(<span style="color: #7f007f">&#39;&gt;&gt;&#39;</span>, operator.rshift, <span style="color: #007f7f">35</span>),
+    <span style="color: #7f007f">&#39;&amp;&#39;</span>:    Op(<span style="color: #7f007f">&#39;&amp;&#39;</span>, operator.and_, <span style="color: #007f7f">30</span>),
+    <span style="color: #7f007f">&#39;^&#39;</span>:    Op(<span style="color: #7f007f">&#39;^&#39;</span>, operator.xor, <span style="color: #007f7f">29</span>),
+    <span style="color: #7f007f">&#39;|&#39;</span>:    Op(<span style="color: #7f007f">&#39;|&#39;</span>, operator.or_, <span style="color: #007f7f">28</span>),
+    <span style="color: #7f007f">&#39;&gt;&#39;</span>:    Op(<span style="color: #7f007f">&#39;&gt;&#39;</span>, operator.gt, <span style="color: #007f7f">20</span>),
+    <span style="color: #7f007f">&#39;&gt;=&#39;</span>:   Op(<span style="color: #7f007f">&#39;&gt;=&#39;</span>, operator.ge, <span style="color: #007f7f">20</span>),
+    <span style="color: #7f007f">&#39;&lt;&#39;</span>:    Op(<span style="color: #7f007f">&#39;&lt;&#39;</span>, operator.lt, <span style="color: #007f7f">20</span>),
+    <span style="color: #7f007f">&#39;&lt;=&#39;</span>:   Op(<span style="color: #7f007f">&#39;&lt;=&#39;</span>, operator.le, <span style="color: #007f7f">20</span>),
+    <span style="color: #7f007f">&#39;==&#39;</span>:   Op(<span style="color: #7f007f">&#39;==&#39;</span>, operator.eq, <span style="color: #007f7f">15</span>),
+    <span style="color: #7f007f">&#39;!=&#39;</span>:   Op(<span style="color: #7f007f">&#39;!=&#39;</span>, operator.ne, <span style="color: #007f7f">15</span>),
+}
+</pre></div>
+<p>I also find this table much more descriptive in the sense of understanding how the operators relate to one another than the parallel 9 methods required to implement them in the pure RD version (<tt class="docutils literal"><span class="pre">rd_parser_ebnf.py</span></tt>).</p>
+</div>
+<div class="section" id="performance">
+<h3>Performance</h3>
+<p>Now here is the funny thing. My initial motivation for examining the infix expression hybrid was the allegedly poor performance of the RD parser for parsing expressions (as described in the <a class="reference external" href="../../14/some-problems-of-recursive-descent-parsers/index.html">previous article</a>). But the performance hasn't improved! In fact, the new hybrid parser is a bit slower than the pure RD parser!</p>
+<p>And the annoying thing is that it's entirely unclear to me how to optimize it, since profiling shows that the runtime divides rather evenly between the various methods of the algorithm. Yes, the pure RD parser requires the full precedence-chain of methods called for each single terminal, but the infix version has more method calls in total.</p>
+<p>If anything, this has been a lesson in optimization, as profiling initially showed that the vast majority of the time is spent in the lexer <a class="footnote-reference" href="index.html#id6" id="id3">[3]</a>. So I've managed to optimize my lexer (by precompiling all its regexes into a single large one using alternation), which greatly reduced the runtime.</p>
+</div>
+<div class="section" id="conclusion">
+<h3>Conclusion</h3>
+<p>This article has presented an alternative to the pure recursive-descent parser. The hybrid parser developed here combines RD with infix expression evaluation using the Shunting Yard algorithm.</p>
+<p>We've seen that the new code is more manageable for operator-rich grammars. If even more operators are to be added to the parser (such as the full set of operators supported by C), it's much simpler to implement into the parser, and the operator table is a single place summarizing the operators, their associativities and precedences, making the parser more readable.</p>
+<p>However, this has not made the parser any faster. The pure-RD implementation is lean enough to be efficient even when the grammar consists of many precedence levels. This is an important lesson in optimization - it's difficult to assess the relative runtimes of complex chunks of code in advance, without actually trying them out and profiling them.</p>
+<div align="center" class="align-center"><img class="align-center" src="../../../../images/hline.jpg" style="width: 320px; height: 5px;" /></div>
+<table class="docutils footnote" frame="void" id="id4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id1">[1]</a></td><td>It would be a swell idea to read the description of the algorithm and have an intuitive understanding of it from this point and on in the article.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id2">[2]</a></td><td>Suppose we had no multiplication and division and had to add the <tt class="docutils literal"><span class="pre">term</span></tt> rule. In addition to writing the code for the new rule, we must modify the <tt class="docutils literal"><span class="pre">arith_expr</span></tt> rule to now call <tt class="docutils literal"><span class="pre">term</span></tt> instead of <tt class="docutils literal"><span class="pre">power</span></tt>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id6" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id3">[3]</a></td><td>Which makes lots of sense, as it's well known that lexing/tokenization is usually the most time consuming stage of parsing. This is because the lexer has to examine every single character of the input, while the parser above it works on the level of whole tokens.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../../theme/js/count.js"></script>
+</body>
+</html>

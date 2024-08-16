@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Computed goto for efficient dispatch tables - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="computed-goto-for-efficient-dispatch-tables.html"
+                       rel="bookmark"
+                       title="Permalink to Computed goto for efficient dispatch tables">
+                        Computed goto for efficient dispatch tables
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> July 12, 2012 at 15:44</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/assembly.html">Assembly</a>
+        ,
+    <a href="../../../tag/c-c.html">C & C++</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>Recently, while idly browsing through the source code of Python, I came upon an interesting comment in the bytecode VM implementation (<tt class="docutils literal">Python/ceval.c</tt>) about using the <a class="reference external" href="http://gcc.gnu.org/onlinedocs/gcc/Labels-as-Values.html">computed gotos</a> extension of GCC <a class="footnote-reference" href="computed-goto-for-efficient-dispatch-tables.html#id4" id="id1">[1]</a>. Driven by curiosity, I decided to code a simple example to evaluate the difference between using a computed goto and a traditional <tt class="docutils literal">switch</tt> statement for a simple VM. This post is a summary of my findings.</p>
+<div class="section" id="defining-a-simple-bytecode-vm">
+<h3>Defining a simple bytecode VM</h3>
+<p>First let's make clear what I mean by a &quot;VM&quot; in this context - a <a class="reference external" href="http://en.wikipedia.org/wiki/Interpreter_(computing)">Bytecode Interpreter</a>. Simply put, it's a loop that chugs through a sequence of instructions, executing them one by one.</p>
+<p>Using Python's 2000-line strong (a bunch of supporting macros not included) <tt class="docutils literal">PyEval_EvalFrameEx</tt> as an example wouldn't be very educational. Therefore, I'll define a tiny VM whose only state is an integer and has a few instructions for manipulating it. While simplistic, the general structure of this VM is very similar to real-world VMs. This VM is so basic that the best way to explain it is just to show its implementation:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">#define OP_HALT     0x0</span>
+<span style="color: #007f00">#define OP_INC      0x1</span>
+<span style="color: #007f00">#define OP_DEC      0x2</span>
+<span style="color: #007f00">#define OP_MUL2     0x3</span>
+<span style="color: #007f00">#define OP_DIV2     0x4</span>
+<span style="color: #007f00">#define OP_ADD7     0x5</span>
+<span style="color: #007f00">#define OP_NEG      0x6</span>
+
+<span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">interp_switch</span>(<span style="color: #00007f; font-weight: bold">unsigned</span> <span style="color: #00007f; font-weight: bold">char</span>* code, <span style="color: #00007f; font-weight: bold">int</span> initval) {
+    <span style="color: #00007f; font-weight: bold">int</span> pc = <span style="color: #007f7f">0</span>;
+    <span style="color: #00007f; font-weight: bold">int</span> val = initval;
+
+    <span style="color: #00007f; font-weight: bold">while</span> (<span style="color: #007f7f">1</span>) {
+        <span style="color: #00007f; font-weight: bold">switch</span> (code[pc++]) {
+            <span style="color: #00007f; font-weight: bold">case</span> OP_HALT:
+                <span style="color: #00007f; font-weight: bold">return</span> val;
+            <span style="color: #00007f; font-weight: bold">case</span> OP_INC:
+                val++;
+                <span style="color: #00007f; font-weight: bold">break</span>;
+            <span style="color: #00007f; font-weight: bold">case</span> OP_DEC:
+                val--;
+                <span style="color: #00007f; font-weight: bold">break</span>;
+            <span style="color: #00007f; font-weight: bold">case</span> OP_MUL2:
+                val *= <span style="color: #007f7f">2</span>;
+                <span style="color: #00007f; font-weight: bold">break</span>;
+            <span style="color: #00007f; font-weight: bold">case</span> OP_DIV2:
+                val /= <span style="color: #007f7f">2</span>;
+                <span style="color: #00007f; font-weight: bold">break</span>;
+            <span style="color: #00007f; font-weight: bold">case</span> OP_ADD7:
+                val += <span style="color: #007f7f">7</span>;
+                <span style="color: #00007f; font-weight: bold">break</span>;
+            <span style="color: #00007f; font-weight: bold">case</span> OP_NEG:
+                val = -val;
+                <span style="color: #00007f; font-weight: bold">break</span>;
+            default:
+                <span style="color: #00007f; font-weight: bold">return</span> val;
+        }
+    }
+}
+</pre></div>
+<p>Note that this is perfectly &quot;standard&quot; C. An endless loop goes through the instruction stream and a <tt class="docutils literal">switch</tt> statement chooses what to do based on the instruction opcode. In this example the control is always linear (<tt class="docutils literal">pc</tt> only advances by 1 between instructions), but it would not be hard to extend this with flow-control instructions that modify <tt class="docutils literal">pc</tt> in less trivial ways.</p>
+<p>The <tt class="docutils literal">switch</tt> statement should be implemented very efficiently by C compilers - the condition serves as an offset into a lookup table that says where to jump next. However, it turns out that there's a popular GCC extension that allows the compiler to generate even faster code.</p>
+</div>
+<div class="section" id="id2">
+<h3>Computed gotos</h3>
+<p>I will cover the details of computed gotos very briefly. For more information, turn to the <a class="reference external" href="http://gcc.gnu.org/onlinedocs/gcc/Labels-as-Values.html">GCC docs</a> or Google.</p>
+<p>Computed gotos is basically a combination of two new features for C. The first is taking addresses of labels into a <tt class="docutils literal">void*</tt>.</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">   <span style="color: #00007f; font-weight: bold">void</span>* labeladdr = &amp;&amp;somelabel;
+somelabel:
+   <span style="color: #007f00">// code</span>
+</pre></div>
+<p>The second is invoking <tt class="docutils literal">goto</tt> on a variable expression instead of a compile-time-known label, i.e.:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">void</span>* table[];  <span style="color: #007f00">// addresses</span>
+<span style="color: #00007f; font-weight: bold">goto</span> *table[pc];
+</pre></div>
+<p>As we'll see shortly, these two features, when combined, can facilitate an interesting alternative implementation of the main VM loop.</p>
+<p>To anyone with a bit of experience with assembly language programming, the computed goto immediately makes sense because it just exposes a common instruction that most modern CPU architectures have - jump through a register (aka. indirect jump).</p>
+</div>
+<div class="section" id="the-simple-vm-implemented-with-a-computed-goto">
+<h3>The simple VM implemented with a computed goto</h3>
+<p>Here's the same VM, this time implemented using a computed goto <a class="footnote-reference" href="computed-goto-for-efficient-dispatch-tables.html#id5" id="id3">[2]</a>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">interp_cgoto</span>(<span style="color: #00007f; font-weight: bold">unsigned</span> <span style="color: #00007f; font-weight: bold">char</span>* code, <span style="color: #00007f; font-weight: bold">int</span> initval) {
+    <span style="color: #007f00">/* The indices of labels in the dispatch_table are the relevant opcodes</span>
+<span style="color: #007f00">    */</span>
+    <span style="color: #00007f; font-weight: bold">static</span> <span style="color: #00007f; font-weight: bold">void</span>* dispatch_table[] = {
+        &amp;&amp;do_halt, &amp;&amp;do_inc, &amp;&amp;do_dec, &amp;&amp;do_mul2,
+        &amp;&amp;do_div2, &amp;&amp;do_add7, &amp;&amp;do_neg};
+<span style="color: #007f00">    #define DISPATCH() goto *dispatch_table[code[pc++]]</span>
+
+    <span style="color: #00007f; font-weight: bold">int</span> pc = <span style="color: #007f7f">0</span>;
+    <span style="color: #00007f; font-weight: bold">int</span> val = initval;
+
+    DISPATCH();
+    <span style="color: #00007f; font-weight: bold">while</span> (<span style="color: #007f7f">1</span>) {
+        do_halt:
+            <span style="color: #00007f; font-weight: bold">return</span> val;
+        do_inc:
+            val++;
+            DISPATCH();
+        do_dec:
+            val--;
+            DISPATCH();
+        do_mul2:
+            val *= <span style="color: #007f7f">2</span>;
+            DISPATCH();
+        do_div2:
+            val /= <span style="color: #007f7f">2</span>;
+            DISPATCH();
+        do_add7:
+            val += <span style="color: #007f7f">7</span>;
+            DISPATCH();
+        do_neg:
+            val = -val;
+            DISPATCH();
+    }
+}
+</pre></div>
+</div>
+<div class="section" id="benchmarking">
+<h3>Benchmarking</h3>
+<p><a href="https://github.com/eliben/code-for-blog/tree/main/2012/computed-goto-dispatch-tables">I did some simple benchmarking</a> with random opcodes and the <tt class="docutils literal">goto</tt> version is 25% faster than the <tt class="docutils literal">switch</tt> version. This, naturally, depends on the data and so the results can differ for real-world programs.</p>
+<p>Comments inside the CPython implementation note that using computed goto made the Python VM 15-20% faster, which is also consistent with other numbers I've seen mentioned online.</p>
+</div>
+<div class="section" id="why-is-it-faster">
+<h3>Why is it faster?</h3>
+<p>Further down in the post you'll find two &quot;bonus&quot; sections that contain annotated disassembly of the two functions shown above, compiled at the <tt class="docutils literal"><span class="pre">-O3</span></tt> optimization level with GCC. It's there for the real low-level buffs among my readers, and as a future reference for myself. Here I aim to explain why the computed goto code is faster at a bit of a higher level, so if you feel there are not enough details, go over the disassembly in the bonus sections.</p>
+<p>The computed goto version is faster because of two reasons:</p>
+<ol class="arabic simple">
+<li>The <tt class="docutils literal">switch</tt> does a bit more per iteration because of bounds checking.</li>
+<li>The effects of hardware branch prediction.</li>
+</ol>
+</div>
+<div class="section" id="doing-less-per-iteration">
+<h3>Doing less per iteration</h3>
+<p>If you examine the disassembly of the <tt class="docutils literal">switch</tt> version, you'll see that it does the following per opcode:</p>
+<ul class="simple">
+<li>Execute the operation itself (i.e. <tt class="docutils literal">val *= 2</tt> for <tt class="docutils literal">OP_MUL2</tt>)</li>
+<li><tt class="docutils literal">pc++</tt></li>
+<li>Check the contents of <tt class="docutils literal">code[pc]</tt>. If within bounds (<tt class="docutils literal">&lt;= 6</tt>), proceed. Otherwise return from the function.</li>
+<li>Jump through the jump table based on offset computed from <tt class="docutils literal">code[pc]</tt>.</li>
+</ul>
+<p>On the other hand, the computed goto version does this:</p>
+<ul class="simple">
+<li>Execute the operation itself</li>
+<li><tt class="docutils literal">pc++</tt></li>
+<li>Jump through the jump table based on offset computed from <tt class="docutils literal">code[pc]</tt>.</li>
+</ul>
+<p>The difference between the two is obviously the &quot;bounds check&quot; step of the <tt class="docutils literal">switch</tt>. Why is it required? You may think that this is because of the <tt class="docutils literal">default</tt> clause, but that isn't true. Even without the <tt class="docutils literal">default</tt> clause, the compiler is forced to generate the bounds check for the <tt class="docutils literal">switch</tt> statement to conform to the C standard. Quoting from C99:</p>
+<blockquote>
+If no converted case constant expression matches and there is no default label, no part of the switch body is executed.</blockquote>
+<p>Therefore, the standard forces the compiler to generate &quot;safe&quot; code for the switch. Safety, as usual, has cost, so the <tt class="docutils literal">switch</tt> version ends up doing a bit more per loop iteration.</p>
+</div>
+<div class="section" id="branch-prediction">
+<h3>Branch prediction</h3>
+<p>Modern CPUs have deep instruction pipelines and go to great lengths ensuring that the pipelines stay as full as possible. One thing that can ruin a pipeline's day is a branch, which is why <a class="reference external" href="http://en.wikipedia.org/wiki/Branch_predictor">branch predictors</a> exist. Put simply (read the linked Wikipedia article for more details), it's an algorithm used by the CPU to try to predict in advance whether a branch will be taken or not. Since a CPU can easily pre-fetch instructions from the branch's target, successful prediction can make the pre-fetched instructions valid and there is no need to fully flush the pipeline.</p>
+<img class="align-center" src="../../../images/2012/07/branchpredictor.png" />
+<p>The thing with branch predictors is that they map branches based on their addresses. Since the <tt class="docutils literal">switch</tt> statement has a single &quot;master jump&quot; that dispatches all opcodes, predicting its destination is quite difficult. On the other hand, the computed goto statement is compiled into a separate jump per opcode, so given that instructions often come in pairs it's much easier for the branch predictor to &quot;home in&quot; on the various jumps correctly.</p>
+<p>Think about it this way: for each jump, the branch predictor keeps a prediction of where it will jump next. If there's a jump per opcode, this is equivalent to predicting the second opcode in an opcode pair, which actually has some chance of success from time to time. On the other hand, if there's just a single jump, the prediction is shared between all opcodes and they keep stepping on each other's toes with each iteration.</p>
+<p>I can't say for sure which one of the two factors weighs more in the speed difference between the <tt class="docutils literal">switch</tt> and the computed goto, but if I had to guess I'd say it's the branch prediction.</p>
+</div>
+<div class="section" id="what-is-done-in-other-vms">
+<h3>What is done in other VMs?</h3>
+<p>So this post started by mentioning that the Python implementation uses a computed goto in its bytecode interpreter. What about other VMs?</p>
+<ul class="simple">
+<li>Ruby 1.9 (YARV): also uses computed goto.</li>
+<li>Dalvik (the Android Java VM): computed goto</li>
+<li>Lua 5.2: uses a switch</li>
+<li>Finally, if you want to take a look at a simple, yet realistic VM, I invite you to examine the source code of <a class="reference external" href="https://github.com/eliben/bobscheme">Bobscheme</a> - my own Scheme implementation. The &quot;barevm&quot; component (a bytecode interpreter in C++) uses a switch to do the dispatching.</li>
+</ul>
+</div>
+<div class="section" id="bonus-detailed-disassembly-of-interp-switch">
+<h3>Bonus: detailed disassembly of interp_switch</h3>
+<p>Here's an annotated disassembly of the <tt class="docutils literal">interp_switch</tt> function. The code was compiled with <tt class="docutils literal">gcc</tt>, enabling full optimizations (<tt class="docutils literal"><span class="pre">-O3</span></tt>).</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">0000000000400650 &lt;interp_switch&gt;:
+#
+# Per the System V x64 ABI, &quot;code&quot; is in %rdi, &quot;initval&quot; is in %rsi,
+# the returned value is in %eax.
+#
+  400650:     89 f0                   mov    %esi,%eax
+#
+# This an other NOPx instructions are fillers used for aligning other
+# instructions.
+#
+  400652:     66 0f 1f 44 00 00       nopw   0x0(%rax,%rax,1)
+#
+# This is the main entry to the loop.
+# If code[pc] &lt;= 6, go to the jump table. Otherwise, proceed to return
+# from the function.
+#
+  400658:     80 3f 06                cmpb   $0x6,(%rdi)
+  40065b:     76 03                   jbe    400660 &lt;interp_switch+0x10&gt;
+#
+# Return. This also handles OP_HALT
+#
+  40065d:     f3 c3                   repz retq
+  40065f:     90                      nop
+#
+# Put code[pc] in %edx and jump through the jump table according to
+# its value.
+#
+  400660:     0f b6 17                movzbl (%rdi),%edx
+  400663:     ff 24 d5 20 0b 40 00    jmpq   *0x400b20(,%rdx,8)
+  40066a:     66 0f 1f 44 00 00       nopw   0x0(%rax,%rax,1)
+#
+# Handle OP_ADD7
+#
+  400670:     83 c0 07                add    $0x7,%eax
+  400673:     0f 1f 44 00 00          nopl   0x0(%rax,%rax,1)
+#
+# pc++, and back to check the next opcode.
+#
+  400678:     48 83 c7 01             add    $0x1,%rdi
+  40067c:     eb da                   jmp    400658 &lt;interp_switch+0x8&gt;
+  40067e:     66 90                   xchg   %ax,%ax
+#
+# Handle OP_DIV2
+#
+  400680:     89 c2                   mov    %eax,%edx
+  400682:     c1 ea 1f                shr    $0x1f,%edx
+  400685:     8d 04 02                lea    (%rdx,%rax,1),%eax
+  400688:     d1 f8                   sar    %eax
+  40068a:     eb ec                   jmp    400678 &lt;interp_switch+0x28&gt;
+  40068c:     0f 1f 40 00             nopl   0x0(%rax)
+#
+# Handle OP_MUL2
+#
+  400690:     01 c0                   add    %eax,%eax
+  400692:     eb e4                   jmp    400678 &lt;interp_switch+0x28&gt;
+#
+# Handle OP_DEC
+#
+  400694:     0f 1f 40 00             nopl   0x0(%rax)
+  400698:     83 e8 01                sub    $0x1,%eax
+  40069b:     eb db                   jmp    400678 &lt;interp_switch+0x28&gt;
+  40069d:     0f 1f 00                nopl   (%rax)
+#
+# Handle OP_INC
+#
+  4006a0:     83 c0 01                add    $0x1,%eax
+  4006a3:     eb d3                   jmp    400678 &lt;interp_switch+0x28&gt;
+  4006a5:     0f 1f 00                nopl   (%rax)
+#
+# Handle OP_NEG
+#
+  4006a8:     f7 d8                   neg    %eax
+  4006aa:     eb cc                   jmp    400678 &lt;interp_switch+0x28&gt;
+  4006ac:     0f 1f 40 00             nopl   0x0(%rax)
+</pre></div>
+<p>How did I figure out which part of the code handles which opcode? Note that the &quot;table jump&quot; is done with:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">jmpq   *0x400b20(,%rdx,8)
+</pre></div>
+<p>This takes the value in <tt class="docutils literal">%rdx</tt>, multiplies it by 8 and uses the result as an offset from <tt class="docutils literal">0x400b20</tt>. So the jump table itself is contained at address <tt class="docutils literal">0x400b20</tt>, which can be seen by examining the <tt class="docutils literal">.rodata</tt> section of the executable:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ readelf -x .rodata interp_compute_gotos
+
+Hex dump of section &#39;.rodata&#39;:
+  0x00400b00 01000200 00000000 00000000 00000000 ................
+  0x00400b10 00000000 00000000 00000000 00000000 ................
+  0x00400b20 5d064000 00000000 a0064000 00000000 ].@.......@.....
+  0x00400b30 98064000 00000000 90064000 00000000 ..@.......@.....
+  0x00400b40 80064000 00000000 70064000 00000000 ..@.....p.@.....
+  0x00400b50 a8064000 00000000 01010306 02020405 ..@.............
+</pre></div>
+<p>Reading the 8-byte values starting at <tt class="docutils literal">0x400b20</tt>, we get the mapping:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">0x0 (OP_HALT) -&gt; 0x40065d
+0x1 (OP_INC)  -&gt; 0x4006a0
+0x2 (OP_DEC)  -&gt; 0x400698
+0x3 (OP_MUL2) -&gt; 0x400690
+0x4 (OP_DIV2) -&gt; 0x400680
+0x5 (OP_ADD7) -&gt; 0x400670
+0x6 (OP_NEG)  -&gt; 0x4006a8
+</pre></div>
+</div>
+<div class="section" id="bonus-detailed-disassembly-of-interp-cgoto">
+<h3>Bonus: detailed disassembly of interp_cgoto</h3>
+<p>Similarly to the above, here is an annotated disassembly of the <tt class="docutils literal">interp_cgoto</tt> function. I'll leave out stuff explained in the earlier snippet, trying to focus only on the things unique to the computed goto implementation.</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">00000000004006b0 &lt;interp_cgoto&gt;:
+  4006b0:     0f b6 07                movzbl (%rdi),%eax
+#
+# Move the jump address indo %rdx from the jump table
+#
+  4006b3:     48 8b 14 c5 e0 0b 40    mov    0x400be0(,%rax,8),%rdx
+  4006ba:     00
+  4006bb:     89 f0                   mov    %esi,%eax
+#
+# Jump through the dispatch table.
+#
+  4006bd:     ff e2                   jmpq   *%rdx
+  4006bf:     90                      nop
+#
+# Return. This also handles OP_HALT
+#
+  4006c0:     f3 c3                   repz retq
+  4006c2:     66 0f 1f 44 00 00       nopw   0x0(%rax,%rax,1)
+#
+# Handle OP_INC.
+# The pattern here repeats for handling other instructions as well.
+# The next opcode is placed into %edx (note that here the compiler
+# chose to access the next opcode by indexing code[1] and only later
+# doing code++.
+# Then the operation is done (here, %eax += 1) and finally a jump
+# through the table to the next instruction is performed.
+#
+  4006c8:     0f b6 57 01             movzbl 0x1(%rdi),%edx
+  4006cc:     83 c0 01                add    $0x1,%eax
+  4006cf:     48 8b 14 d5 e0 0b 40    mov    0x400be0(,%rdx,8),%rdx
+  4006d6:     00
+  4006d7:     66 0f 1f 84 00 00 00    nopw   0x0(%rax,%rax,1)
+  4006de:     00 00
+  4006e0:     48 83 c7 01             add    $0x1,%rdi
+  4006e4:     ff e2                   jmpq   *%rdx
+  4006e6:     66 2e 0f 1f 84 00 00    nopw   %cs:0x0(%rax,%rax,1)
+  4006ed:     00 00 00
+#
+# Handle OP_DEC
+#
+  4006f0:     0f b6 57 01             movzbl 0x1(%rdi),%edx
+  4006f4:     83 e8 01                sub    $0x1,%eax
+  4006f7:     48 8b 14 d5 e0 0b 40    mov    0x400be0(,%rdx,8),%rdx
+  4006fe:     00
+  4006ff:     48 83 c7 01             add    $0x1,%rdi
+  400703:     ff e2                   jmpq   *%rdx
+  400705:     0f 1f 00                nopl   (%rax)
+#
+# Handle OP_MUL2
+#
+  400708:     0f b6 57 01             movzbl 0x1(%rdi),%edx
+  40070c:     01 c0                   add    %eax,%eax
+  40070e:     48 8b 14 d5 e0 0b 40    mov    0x400be0(,%rdx,8),%rdx
+  400715:     00
+  400716:     48 83 c7 01             add    $0x1,%rdi
+  40071a:     ff e2                   jmpq   *%rdx
+  40071c:     0f 1f 40 00             nopl   0x0(%rax)
+#
+# Handle OP_DIV2
+#
+  400720:     89 c2                   mov    %eax,%edx
+  400722:     c1 ea 1f                shr    $0x1f,%edx
+  400725:     8d 04 02                lea    (%rdx,%rax,1),%eax
+  400728:     0f b6 57 01             movzbl 0x1(%rdi),%edx
+  40072c:     d1 f8                   sar    %eax
+  40072e:     48 8b 14 d5 e0 0b 40    mov    0x400be0(,%rdx,8),%rdx
+  400735:     00
+  400736:     48 83 c7 01             add    $0x1,%rdi
+  40073a:     ff e2                   jmpq   *%rdx
+  40073c:     0f 1f 40 00             nopl   0x0(%rax)
+#
+# Handle OP_ADD7
+#
+  400740:     0f b6 57 01             movzbl 0x1(%rdi),%edx
+  400744:     83 c0 07                add    $0x7,%eax
+  400747:     48 8b 14 d5 e0 0b 40    mov    0x400be0(,%rdx,8),%rdx
+  40074e:     00
+  40074f:     48 83 c7 01             add    $0x1,%rdi
+  400753:     ff e2                   jmpq   *%rdx
+  400755:     0f 1f 00                nopl   (%rax)
+#
+# Handle OP_NEG
+#
+  400758:     0f b6 57 01             movzbl 0x1(%rdi),%edx
+  40075c:     f7 d8                   neg    %eax
+  40075e:     48 8b 14 d5 e0 0b 40    mov    0x400be0(,%rdx,8),%rdx
+  400765:     00
+  400766:     48 83 c7 01             add    $0x1,%rdi
+  40076a:     ff e2                   jmpq   *%rdx
+  40076c:     0f 1f 40 00             nopl   0x0(%rax)
+</pre></div>
+<p>Again, if we use <tt class="docutils literal">readelf</tt> to look at address <tt class="docutils literal">0x400be0</tt>, we see the contents of the jump table, and infer the addresses which handle the various opcodes:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">0x0 (OP_HALT) -&gt; 0x4006c0
+0x1 (OP_INC)  -&gt; 0x4006c8
+0x2 (OP_DEC)  -&gt; 0x4006f0
+0x3 (OP_MUL2) -&gt; 0x400708
+0x4 (OP_DIV2) -&gt; 0x400720
+0x5 (OP_ADD7) -&gt; 0x400740
+0x6 (OP_NEG)  -&gt; 0x400758
+</pre></div>
+<img class="align-center" src="../../../images/hline.jpg" style="width: 320px; height: 5px;" />
+<table class="docutils footnote" frame="void" id="id4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="computed-goto-for-efficient-dispatch-tables.html#id1">[1]</a></td><td>To the best of my knowledge, it's supported by other major compilers such as ICC and Clang, but not by Visual C++.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="computed-goto-for-efficient-dispatch-tables.html#id3">[2]</a></td><td>Note that the <tt class="docutils literal">while</tt> loop here isn't really necessary because the looping is implicitly handled by the <tt class="docutils literal">goto</tt> dispatching. I'm leaving it in just for visual consistency with the previous sample.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="computed-goto-for-efficient-dispatch-tables.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

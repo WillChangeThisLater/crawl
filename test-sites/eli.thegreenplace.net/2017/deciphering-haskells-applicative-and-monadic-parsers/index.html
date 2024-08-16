@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Deciphering Haskell's applicative and monadic parsers - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Deciphering Haskell's applicative and monadic parsers">
+                        Deciphering Haskell's applicative and monadic parsers
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> November 27, 2017 at 05:28</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/haskell.html">Haskell</a>
+        ,
+    <a href="../../tag/recursive-descent-parsing.html">Recursive descent parsing</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This post follows the construction of parsers described in <a class="reference external" href="http://www.cs.nott.ac.uk/~pszgmh/pih.html">Graham Hutton's
+&quot;Programming in Haskell&quot; (2nd edition)</a>. It's my attempt to work through
+chapter 13 in this book and understand the details of applicative and monadic
+combination of parsers presented therein.</p>
+<div class="section" id="basic-definitions-for-the-parser-type">
+<h2>Basic definitions for the Parser type</h2>
+<p>A parser parameterized on some type <tt class="docutils literal">a</tt> is:</p>
+<div class="highlight"><pre><span></span><span class="kr">newtype</span><span class="w"> </span><span class="kt">Parser</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="ow">=</span><span class="w"> </span><span class="kt">P</span><span class="w"> </span><span class="p">(</span><span class="kt">String</span><span class="w"> </span><span class="ow">-&gt;</span><span class="w"> </span><span class="p">[(</span><span class="n">a</span><span class="p">,</span><span class="kt">String</span><span class="p">)])</span><span class="w"></span>
+</pre></div>
+<p>It's a function taking a <tt class="docutils literal">String</tt> and returning a list of <tt class="docutils literal">(a,String)</tt>
+pairs, where <tt class="docutils literal">a</tt> is a value of the parameterized type and <tt class="docutils literal">String</tt> is (by
+convention) the unparsed remainder of the input. The returned list is
+potentially empty, which signals a failure in parsing <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>. It might have made
+more sense to define <tt class="docutils literal">Parser</tt> as a <tt class="docutils literal">type</tt> alias for the function, but
+<tt class="docutils literal">type</tt>s can't be made into instances of typeclasses; therefore, we use
+<tt class="docutils literal">netwype</tt> with a dummy constructor named <tt class="docutils literal">P</tt>.</p>
+<p>With this <tt class="docutils literal">Parser</tt> type, the act of actually parsing a string is expressed
+with the following helper function. It's not strictly necessary, but it helps
+make code cleaner by hiding <tt class="docutils literal">P</tt> from users of the parser.</p>
+<div class="highlight"><pre><span></span><span class="nf">parse</span><span class="w"> </span><span class="ow">::</span><span class="w"> </span><span class="kt">Parser</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="ow">-&gt;</span><span class="w"> </span><span class="kt">String</span><span class="w"> </span><span class="ow">-&gt;</span><span class="w"> </span><span class="p">[(</span><span class="n">a</span><span class="p">,</span><span class="kt">String</span><span class="p">)]</span><span class="w"></span>
+<span class="nf">parse</span><span class="w"> </span><span class="p">(</span><span class="kt">P</span><span class="w"> </span><span class="n">p</span><span class="p">)</span><span class="w"> </span><span class="n">inp</span><span class="w"> </span><span class="ow">=</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="n">inp</span><span class="w"></span>
+</pre></div>
+<p>The most basic parsing primitive plucks off the first character from a given
+string:</p>
+<div class="highlight"><pre><span></span><span class="nf">item</span><span class="w"> </span><span class="ow">::</span><span class="w"> </span><span class="kt">Parser</span><span class="w"> </span><span class="kt">Char</span><span class="w"></span>
+<span class="nf">item</span><span class="w"> </span><span class="ow">=</span><span class="w"> </span><span class="kt">P</span><span class="w"> </span><span class="p">(</span><span class="nf">\</span><span class="n">inp</span><span class="w"> </span><span class="ow">-&gt;</span><span class="w"> </span><span class="kr">case</span><span class="w"> </span><span class="n">inp</span><span class="w"> </span><span class="kr">of</span><span class="w"></span>
+<span class="w">                    </span><span class="kt">[]</span><span class="w">      </span><span class="ow">-&gt;</span><span class="w"> </span><span class="kt">[]</span><span class="w"></span>
+<span class="w">                    </span><span class="p">(</span><span class="n">x</span><span class="kt">:</span><span class="n">xs</span><span class="p">)</span><span class="w">  </span><span class="ow">-&gt;</span><span class="w"> </span><span class="p">[(</span><span class="n">x</span><span class="p">,</span><span class="n">xs</span><span class="p">)])</span><span class="w"></span>
+</pre></div>
+<p>Here's how it works in practice:</p>
+<div class="highlight"><pre><span></span>&gt; parse item &quot;foo&quot;
+[(&#39;f&#39;,&quot;oo&quot;)]
+&gt; parse item &quot;f&quot;
+[(&#39;f&#39;,&quot;&quot;)]
+&gt; parse item &quot;&quot;
+[]
+</pre></div>
+</div>
+<div class="section" id="parser-as-a-functor">
+<h2>Parser as a Functor</h2>
+<p>We'll start by making <tt class="docutils literal">Parser</tt> an instance of <tt class="docutils literal">Functor</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kr">instance</span><span class="w"> </span><span class="kt">Functor</span><span class="w"> </span><span class="kt">Parser</span><span class="w"> </span><span class="kr">where</span><span class="w"></span>
+<span class="w">  </span><span class="c1">-- fmap :: (a -&gt; b) -&gt; Parser a -&gt; Parser b</span><span class="w"></span>
+<span class="w">  </span><span class="n">fmap</span><span class="w"> </span><span class="n">g</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="ow">=</span><span class="w"> </span><span class="kt">P</span><span class="w"> </span><span class="p">(</span><span class="nf">\</span><span class="n">inp</span><span class="w"> </span><span class="ow">-&gt;</span><span class="w"> </span><span class="kr">case</span><span class="w"> </span><span class="n">parse</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="n">inp</span><span class="w"> </span><span class="kr">of</span><span class="w"></span>
+<span class="w">                          </span><span class="kt">[]</span><span class="w">        </span><span class="ow">-&gt;</span><span class="w"> </span><span class="kt">[]</span><span class="w"></span>
+<span class="w">                          </span><span class="p">[(</span><span class="n">v</span><span class="p">,</span><span class="n">out</span><span class="p">)]</span><span class="w"> </span><span class="ow">-&gt;</span><span class="w"> </span><span class="p">[(</span><span class="n">g</span><span class="w"> </span><span class="n">v</span><span class="p">,</span><span class="n">out</span><span class="p">)])</span><span class="w"></span>
+</pre></div>
+<p>With <tt class="docutils literal">fmap</tt> we can create a new parser from an existing parser, with a
+function applied to the parser's output. For example:</p>
+<div class="highlight"><pre><span></span>&gt; parse (fmap toUpper item) &quot;foo&quot;
+[(&#39;F&#39;,&quot;oo&quot;)]
+&gt; parse (fmap toUpper item) &quot;&quot;
+[]
+</pre></div>
+<p>Let's check that the functor laws work for this definition. The first law:</p>
+<div class="highlight"><pre><span></span>fmap id = id
+</pre></div>
+<p>Is fairly obvious when we substitute <tt class="docutils literal">id</tt> for <tt class="docutils literal">g</tt> in the definition of
+<tt class="docutils literal">fmap</tt>. We get:</p>
+<div class="highlight"><pre><span></span>fmap id p = P (\inp -&gt; case parse p inp of
+                        []        -&gt; []
+                        [(v,out)] -&gt; [(id v,out)])
+</pre></div>
+<p>Which takes the parse result of <tt class="docutils literal">p</tt> and passes it through without
+modification. In other words, it's equivalent to <tt class="docutils literal">p</tt> itself, and hence the
+first law holds.</p>
+<p>Verifying the second law:</p>
+<div class="highlight"><pre><span></span>fmap (g . h) = fmap g . fmap h
+</pre></div>
+<p>... is similarly straightforward and is left as an exercise to the reader.</p>
+<p>While it's not obvious why a <tt class="docutils literal">Functor</tt> instance for <tt class="docutils literal">Parser</tt> is useful in
+its own right, it's actually required to make <tt class="docutils literal">Parser</tt> into an
+<tt class="docutils literal">Applicative</tt>, and also when combining parsers using applicative style.</p>
+</div>
+<div class="section" id="parser-as-an-applicative">
+<h2>Parser as an Applicative</h2>
+<p>Consider parsing conditional expressions in a fictional language:</p>
+<div class="highlight"><pre><span></span>if &lt;expr&gt; then &lt;expr&gt; else &lt;expr&gt;
+</pre></div>
+<p>To parse such expressions we'd like to say:</p>
+<ul class="simple">
+<li>Parse the token <tt class="docutils literal">if</tt></li>
+<li>Parse an &lt;expr&gt;</li>
+<li>Parse the token <tt class="docutils literal">then</tt></li>
+<li>Parse an &lt;expr&gt;</li>
+<li>Parse the token <tt class="docutils literal">else</tt></li>
+<li>Parse an &lt;expr&gt;</li>
+<li>If all of this was successful, combine all the parsed expressions into some
+sort of result, like an AST node.</li>
+</ul>
+<p>Such sequences, along with alternation (an expression is either <em>this</em> or
+<em>that</em>) are two of the critical basic blocks of constructing non-trivial
+parsers. Let's see a popular way to accomplish this in Haskell (for a complete
+example demonstrating how to construct a parser for this particular conditional
+expression, see the last section in this post).</p>
+<p><a class="reference external" href="https://en.wikipedia.org/wiki/Parser_combinator">Parser combinators</a> is a
+popular technique for constructing complex parsers from simpler parsers, by
+means of higher-order functions. In Haskell, one of the ways in which parsers
+can be elegantly combined is using applicative style. Here's the <tt class="docutils literal">Applicative</tt>
+instance for <tt class="docutils literal">Parser</tt>.</p>
+<div class="highlight"><pre><span></span><span class="kr">instance</span><span class="w"> </span><span class="kt">Applicative</span><span class="w"> </span><span class="kt">Parser</span><span class="w"> </span><span class="kr">where</span><span class="w"></span>
+<span class="w">  </span><span class="c1">-- pure :: a -&gt; Parser a</span><span class="w"></span>
+<span class="w">  </span><span class="n">pure</span><span class="w"> </span><span class="n">v</span><span class="w"> </span><span class="ow">=</span><span class="w"> </span><span class="kt">P</span><span class="w"> </span><span class="p">(</span><span class="nf">\</span><span class="n">inp</span><span class="w"> </span><span class="ow">-&gt;</span><span class="w"> </span><span class="p">[(</span><span class="n">v</span><span class="p">,</span><span class="n">inp</span><span class="p">)])</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">-- &lt;*&gt; :: Parser (a -&gt; b) -&gt; Parser a -&gt; Parser b</span><span class="w"></span>
+<span class="w">  </span><span class="n">pg</span><span class="w"> </span><span class="o">&lt;*&gt;</span><span class="w"> </span><span class="n">px</span><span class="w"> </span><span class="ow">=</span><span class="w"> </span><span class="kt">P</span><span class="w"> </span><span class="p">(</span><span class="nf">\</span><span class="n">inp</span><span class="w"> </span><span class="ow">-&gt;</span><span class="w"> </span><span class="kr">case</span><span class="w"> </span><span class="n">parse</span><span class="w"> </span><span class="n">pg</span><span class="w"> </span><span class="n">inp</span><span class="w"> </span><span class="kr">of</span><span class="w"></span>
+<span class="w">                            </span><span class="kt">[]</span><span class="w">        </span><span class="ow">-&gt;</span><span class="w"> </span><span class="kt">[]</span><span class="w"></span>
+<span class="w">                            </span><span class="p">[(</span><span class="n">g</span><span class="p">,</span><span class="n">out</span><span class="p">)]</span><span class="w"> </span><span class="ow">-&gt;</span><span class="w"> </span><span class="n">parse</span><span class="w"> </span><span class="p">(</span><span class="n">fmap</span><span class="w"> </span><span class="n">g</span><span class="w"> </span><span class="n">px</span><span class="p">)</span><span class="w"> </span><span class="n">out</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>Recall how we created a parser that applied <tt class="docutils literal">toUpper</tt> to its result using
+<tt class="docutils literal">fmap</tt>? We can now do the same in applicative style:</p>
+<div class="highlight"><pre><span></span>&gt; parse (pure toUpper &lt;*&gt; item) &quot;foo&quot;
+[(&#39;F&#39;,&quot;oo&quot;)]
+</pre></div>
+<p>Let's see why this works. While not too exciting on its own, this application of
+a single-argument function is a good segue to more complicated use cases.</p>
+<p>Looking at the <tt class="docutils literal">Applicative</tt> instance, <tt class="docutils literal">pure toUpper</tt> translates to
+<tt class="docutils literal">P (\inp <span class="pre">-&gt;</span> [(toUpper,inp)]</tt> - a parser that passes its input through
+unchanged, returning <tt class="docutils literal">toUpper</tt> as a result. Now, substituting <tt class="docutils literal">item</tt> into
+the definition of <tt class="docutils literal">&lt;*&gt;</tt> we get:</p>
+<div class="highlight"><pre><span></span>pg &lt;*&gt; item = P (\inp -&gt; case parse pg inp of
+                            []        -&gt; []
+                            [(g,out)] -&gt; parse (fmap g item) out)
+
+... pg is (pure toUpper), the parsing of which always succeeds, returning
+    [(toUpper,inp)]
+
+pg &lt;*&gt; item = P (\inp -&gt; parse (fmap toUpper item) inp)
+</pre></div>
+<p>In other words, this is exactly the example we had for <tt class="docutils literal">Functor</tt> by
+<tt class="docutils literal">fmap</tt>-ing <tt class="docutils literal">toUpper</tt> onto <tt class="docutils literal">item</tt>.</p>
+<p>The more interesting case is applying functions with multiple parameters. Here's
+how we define a parser that parses three items from the input, dropping the
+middle result:</p>
+<div class="highlight"><pre><span></span><span class="nf">dropMiddle</span><span class="w"> </span><span class="ow">::</span><span class="w"> </span><span class="kt">Parser</span><span class="w"> </span><span class="p">(</span><span class="kt">Char</span><span class="p">,</span><span class="kt">Char</span><span class="p">)</span><span class="w"></span>
+<span class="nf">dropMiddle</span><span class="w"> </span><span class="ow">=</span><span class="w"></span>
+<span class="w">  </span><span class="n">pure</span><span class="w"> </span><span class="n">selector</span><span class="w"> </span><span class="o">&lt;*&gt;</span><span class="w"> </span><span class="n">item</span><span class="w"> </span><span class="o">&lt;*&gt;</span><span class="w"> </span><span class="n">item</span><span class="w"> </span><span class="o">&lt;*&gt;</span><span class="w"> </span><span class="n">item</span><span class="w"></span>
+<span class="w">  </span><span class="kr">where</span><span class="w"> </span><span class="n">selector</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="n">z</span><span class="w"> </span><span class="ow">=</span><span class="w"> </span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="n">z</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>Following the application of nested <tt class="docutils literal">&lt;*&gt;</tt> operators is tricky because it
+builds a run-time chain of functions referring to other functions. This chain
+is only collapsed when the parser is used to actually <tt class="docutils literal">parse</tt> some input, so
+it is necessary to keep a lot of context &quot;on the fly&quot;. To better understand how
+this works, we can break the definition of <tt class="docutils literal">dropMiddle</tt> into parts as follows
+(since <tt class="docutils literal">&lt;*&gt;</tt> is left-associative):</p>
+<div class="highlight"><pre><span></span><span class="nf">dropMiddle</span><span class="w"> </span><span class="ow">=</span><span class="w"></span>
+<span class="w">  </span><span class="p">((</span><span class="n">pure</span><span class="w"> </span><span class="n">selector</span><span class="w"> </span><span class="o">&lt;*&gt;</span><span class="w"> </span><span class="n">item</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;*&gt;</span><span class="w"> </span><span class="n">item</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;*&gt;</span><span class="w"> </span><span class="n">item</span><span class="w"></span>
+<span class="w">  </span><span class="kr">where</span><span class="w"> </span><span class="n">selector</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="n">z</span><span class="w"> </span><span class="ow">=</span><span class="w"> </span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="n">z</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>Applying the first <tt class="docutils literal">&lt;*&gt;</tt>:</p>
+<div class="highlight"><pre><span></span>pg &lt;*&gt; item = P (\inp -&gt; case parse pg inp of
+                            []        -&gt; []
+                            [(g,out)] -&gt; parse (fmap g item) out)
+
+... pg is (pure selector), the parsing of which always succeeds, returning
+    [(selector,inp)]
+
+pg &lt;*&gt; item = P (\inp -&gt; parse (fmap selector item) inp)  --= app1
+</pre></div>
+<p>Let's call this parser <tt class="docutils literal">app1</tt> and apply the second <tt class="docutils literal">&lt;*&gt;</tt> in the sequence.</p>
+<div class="highlight"><pre><span></span>app1 &lt;*&gt; item = P (\inp -&gt; case parse app1 inp of
+                            []        -&gt; []
+                            [(g,out)] -&gt; parse (fmap g item) out)  --= app2
+</pre></div>
+<p>We'll call this <tt class="docutils literal">app2</tt> and move on. Similarly, applying the third <tt class="docutils literal">&lt;*&gt;</tt> in
+the sequence produces:</p>
+<div class="highlight"><pre><span></span>app2 &lt;*&gt; item = P (\inp -&gt; case parse app2 inp of
+                            []        -&gt; []
+                            [(g,out)] -&gt; parse (fmap g item) out)
+</pre></div>
+<p>This is <tt class="docutils literal">dropMiddle</tt>. It's a chain of parsers expressed as a compbination of
+higher-order functions (closures, actually).</p>
+<p>To see how this combined parser actually parses input, let's trace through the
+execution of:</p>
+<div class="highlight"><pre><span></span>&gt; parse dropMiddle &quot;pumpkin&quot;
+[((&#39;p&#39;,&#39;m&#39;),&quot;pkin&quot;)]
+</pre></div>
+<p><tt class="docutils literal">dropMiddle</tt> is <tt class="docutils literal">app2 &lt;*&gt; item</tt>, so we have:</p>
+<div class="highlight"><pre><span></span>-- parse dropMiddle
+
+parse P (\inp -&gt; case parse app2 inp of
+                   []         -&gt; []
+                   [(g,out)]  -&gt; parse (fmap g item) out)
+      &quot;pumpkin&quot;
+
+.. substituting &quot;pumpkin&quot; into inp
+
+case parse app2 &quot;pumpkin&quot; of
+ []         -&gt; []
+ [(g,out)]  -&gt; parse (fmap g item) out
+</pre></div>
+<p>Now <tt class="docutils literal">parse app2 &quot;pumpkin&quot;</tt> is going to be invoked; <tt class="docutils literal">app2</tt> is <tt class="docutils literal">app1 &lt;*&gt;
+item</tt>:</p>
+<div class="highlight"><pre><span></span>-- parse app2
+
+case parse app1 &quot;pumpkin&quot; of
+ []         -&gt; []
+ [(g,out)]  -&gt; parse (fmap g item) out
+</pre></div>
+<p>Similarly, we get to <tt class="docutils literal">parse app1 &quot;pumpkin&quot;</tt>:</p>
+<div class="highlight"><pre><span></span>-- parse app1
+
+parse (fmap selector item) &quot;pumpkin&quot;
+
+.. following the definition of fmap
+
+parse P (\inp -&gt; case parse item inp of
+                  []        -&gt; []
+                  [(v,out)] -&gt; [(selector v,out)])
+      &quot;pumpkin&quot;
+
+.. Since (parse item &quot;pumpkin&quot;) returns [(&#39;p&#39;,&quot;umpkin&quot;)], we get:
+
+[(selector &#39;p&#39;,&quot;umpkin&quot;)]
+</pre></div>
+<p>Now going back to <tt class="docutils literal">parse app2</tt>, knowing what <tt class="docutils literal">parse app1 &quot;pumpkin&quot;</tt> returns:</p>
+<div class="highlight"><pre><span></span>parse (fmap (selector &#39;p&#39;) item) &quot;umpkin&quot;
+
+.. following the definition of fmap
+
+parse P (\inp -&gt; case parse item inp of
+                  []        -&gt; []
+                  [(v,out)] -&gt; [(selector &#39;p&#39; v,out)])
+      &quot;umpkin&quot;
+
+[(selector &#39;p&#39; &#39;u&#39;,&quot;mpkin&quot;)]
+</pre></div>
+<p>Finally, <tt class="docutils literal">dropMiddle</tt>:</p>
+<div class="highlight"><pre><span></span>app2 &lt;*&gt; item = P (\inp -&gt; case parse app2 inp of
+                            []        -&gt; []
+                            [(g,out)] -&gt; parse (fmap g item) out)
+
+.. Since (parse app2 &quot;pumpkin&quot;) returns [(selector &#39;p&#39; &#39;u&#39;,&quot;mpkin&quot;)]
+
+parse (fmap (selector &#39;p&#39; &quot;u&quot;) item) &quot;mpkin&quot;
+
+.. If we follow the definition of fmap again, we&#39;ll get:
+
+[(selector &#39;p&#39; &#39;u&#39; &#39;m&#39;,&quot;pkin&quot;)]
+</pre></div>
+<p>This is the final result of applying <tt class="docutils literal">dropMiddle</tt> to &quot;pumpkin&quot;, and when
+<tt class="docutils literal">selector</tt> is invoked we get <tt class="docutils literal"><span class="pre">[(('p','m'),&quot;pkin&quot;)]</span></tt>, as expected.</p>
+</div>
+<div class="section" id="parser-as-a-monad">
+<h2>Parser as a Monad</h2>
+<p>Parsers can also be expressed and combined using monadic style. Here's the
+<tt class="docutils literal">Monad</tt> instance for <tt class="docutils literal">Parser</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kr">instance</span><span class="w"> </span><span class="kt">Monad</span><span class="w"> </span><span class="kt">Parser</span><span class="w"> </span><span class="kr">where</span><span class="w"></span>
+<span class="w">  </span><span class="c1">-- return :: a -&gt; Parser a</span><span class="w"></span>
+<span class="w">  </span><span class="n">return</span><span class="w"> </span><span class="ow">=</span><span class="w"> </span><span class="n">pure</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">-- (&gt;&gt;=) :: Parser a -&gt; (a -&gt; Parser b) -&gt; Parser b</span><span class="w"></span>
+<span class="w">  </span><span class="n">p</span><span class="w"> </span><span class="o">&gt;&gt;=</span><span class="w"> </span><span class="n">f</span><span class="w"> </span><span class="ow">=</span><span class="w"> </span><span class="kt">P</span><span class="w"> </span><span class="p">(</span><span class="nf">\</span><span class="n">inp</span><span class="w"> </span><span class="ow">-&gt;</span><span class="w"> </span><span class="kr">case</span><span class="w"> </span><span class="n">parse</span><span class="w"> </span><span class="n">p</span><span class="w"> </span><span class="n">inp</span><span class="w"> </span><span class="kr">of</span><span class="w"></span>
+<span class="w">                          </span><span class="kt">[]</span><span class="w">        </span><span class="ow">-&gt;</span><span class="w"> </span><span class="kt">[]</span><span class="w"></span>
+<span class="w">                          </span><span class="p">[(</span><span class="n">v</span><span class="p">,</span><span class="n">out</span><span class="p">)]</span><span class="w"> </span><span class="ow">-&gt;</span><span class="w"> </span><span class="n">parse</span><span class="w"> </span><span class="p">(</span><span class="n">f</span><span class="w"> </span><span class="n">v</span><span class="p">)</span><span class="w"> </span><span class="n">out</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>Let's take the simple example of applying <tt class="docutils literal">toUpper</tt> to <tt class="docutils literal">item</tt> again, this
+time using monadic operators:</p>
+<div class="highlight"><pre><span></span>&gt; parse (item &gt;&gt;= (\x -&gt; return $ toUpper x)) &quot;foo&quot;
+[(&#39;F&#39;,&quot;oo&quot;)]
+</pre></div>
+<p>Substituting in the definition of <tt class="docutils literal">&gt;&gt;=</tt>:</p>
+<div class="highlight"><pre><span></span>item &gt;&gt;= (\x -&gt; return $ toUpper x) =
+  P (\inp -&gt; case parse item inp of
+                []        -&gt; []
+                [(v,out)] -&gt; parse (return $ toUpper v) out)
+
+... if item succeeds, this is a parser that will always succeed with
+    the upper-cased result of item
+</pre></div>
+<p>When writing in monadic style, however, we won't typically be using the <tt class="docutils literal">&gt;&gt;=</tt>
+operator explicitly; instead, we'll use the <tt class="docutils literal">do</tt> notation. Recall that in the
+general multi-parameter case, this:</p>
+<div class="highlight"><pre><span></span>m1 &gt;&gt;= \x1 -&gt;
+  m2 &gt;&gt;= \x2 -&gt;
+    ...
+      mn &gt;&gt;= \xn -&gt; f x1 x2 ... xn
+</pre></div>
+<p>Is equivalent to this:</p>
+<div class="highlight"><pre><span></span>do x1 &lt;- m1
+   x2 &lt;- m2
+   ...
+   xn &lt;- mn
+   f x1 x2 ... xn
+</pre></div>
+<p>So we can also rewrite our example as:</p>
+<div class="highlight"><pre><span></span>&gt; parse (do x &lt;- item; return $ toUpper x) &quot;foo&quot;
+[(&#39;F&#39;,&quot;oo&quot;)]
+</pre></div>
+<p>The <tt class="docutils literal">do</tt> notation starts looking much more attractive for multiple parameters,
+however. Here's <tt class="docutils literal">dropMiddle</tt> in monadic style written directly <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>:</p>
+<div class="highlight"><pre><span></span>dropMiddleM :: Parser (Char,Char)
+dropMiddleM = item &gt;&gt;= \x -&gt;
+                item &gt;&gt;= \_ -&gt;
+                  item &gt;&gt;= \z -&gt; return (x,z)
+</pre></div>
+<p>And now rewritten using <tt class="docutils literal">do</tt>:</p>
+<div class="highlight"><pre><span></span>dropMiddleM&#39; :: Parser (Char,Char)
+dropMiddleM&#39; =
+  do  x &lt;- item
+      item
+      z &lt;- item
+      return (x,z)
+</pre></div>
+<p>Let's do a detailed breakdown of what's happening here to better understand the
+monadic sequencing mechanics. I'll be using the direct style (<tt class="docutils literal">dropMiddleM</tt>)
+to unravel the applications of <tt class="docutils literal">&gt;&gt;=</tt>:</p>
+<div class="highlight"><pre><span></span>item &gt;&gt;= \x -&gt;
+  item &gt;&gt;= \_ -&gt;
+    item &gt;&gt;= \z -&gt; return (x,z)
+
+.. applying the first &gt;&gt;=, calling the right-hand side rhsX
+
+P (\inp -&gt; case parse item inp of
+              []        -&gt; []
+              [(v,out)] -&gt; parse (rhsX v) out)
+
+.. the result of parsing the first item is passed in as the argument to rhsX,
+   which then returns the next application of &gt;&gt;=; As usual, we acknowledge
+   the error propagation and ignore it for simplicity.
+
+P (\inp -&gt; case parse item inp of
+              []        -&gt; []
+              [(v,out)] -&gt; parse (rhsY v) out)
+
+... and similarly for rhsZ; the final result is invoking &quot;parse return (x,z)&quot;
+    where x is the result of parsing the first item and z the result of
+    parsing the third.
+</pre></div>
+</div>
+<div class="section" id="a-complete-example">
+<h2>A complete example</h2>
+<p>As a complete example, I've expanded the parser grammar found in the book to
+support conditional expressions. The full example is <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/haskell-parsers/exprparser.hs">available here</a>.
+Recall that wa want to parse expressions of the form:</p>
+<div class="highlight"><pre><span></span>if &lt;expr&gt; then &lt;expr&gt; else &lt;expr&gt;
+</pre></div>
+<p>This is the monadic parser <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>:</p>
+<div class="highlight"><pre><span></span><span class="nf">ifexpr</span><span class="w"> </span><span class="ow">::</span><span class="w"> </span><span class="kt">Parser</span><span class="w"> </span><span class="kt">Int</span><span class="w"></span>
+<span class="nf">ifexpr</span><span class="w"> </span><span class="ow">=</span><span class="w"> </span><span class="kr">do</span><span class="w"> </span><span class="n">symbol</span><span class="w"> </span><span class="s">&quot;if&quot;</span><span class="w"></span>
+<span class="w">            </span><span class="n">cond</span><span class="w"> </span><span class="ow">&lt;-</span><span class="w"> </span><span class="n">expr</span><span class="w"></span>
+<span class="w">            </span><span class="n">symbol</span><span class="w"> </span><span class="s">&quot;then&quot;</span><span class="w"></span>
+<span class="w">            </span><span class="n">thenExpr</span><span class="w"> </span><span class="ow">&lt;-</span><span class="w"> </span><span class="n">expr</span><span class="w"></span>
+<span class="w">            </span><span class="n">symbol</span><span class="w"> </span><span class="s">&quot;else&quot;</span><span class="w"></span>
+<span class="w">            </span><span class="n">elseExpr</span><span class="w"> </span><span class="ow">&lt;-</span><span class="w"> </span><span class="n">expr</span><span class="w"></span>
+<span class="w">            </span><span class="n">return</span><span class="w"> </span><span class="p">(</span><span class="kr">if</span><span class="w"> </span><span class="n">cond</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="kr">then</span><span class="w"> </span><span class="n">elseExpr</span><span class="w"> </span><span class="kr">else</span><span class="w"> </span><span class="n">thenExpr</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>And this is the equivalent applicative version (<tt class="docutils literal">&lt;$&gt;</tt> is just an infix
+synonym for <tt class="docutils literal">fmap</tt>):</p>
+<div class="highlight"><pre><span></span><span class="nf">ifexpr&#39;</span><span class="w"> </span><span class="ow">::</span><span class="w"> </span><span class="kt">Parser</span><span class="w"> </span><span class="kt">Int</span><span class="w"></span>
+<span class="nf">ifexpr&#39;</span><span class="w"> </span><span class="ow">=</span><span class="w"></span>
+<span class="w">  </span><span class="n">selector</span><span class="w"> </span><span class="o">&lt;$&gt;</span><span class="w"> </span><span class="n">symbol</span><span class="w"> </span><span class="s">&quot;if&quot;</span><span class="w"> </span><span class="o">&lt;*&gt;</span><span class="w"> </span><span class="n">expr</span><span class="w"></span>
+<span class="w">           </span><span class="o">&lt;*&gt;</span><span class="w"> </span><span class="n">symbol</span><span class="w"> </span><span class="s">&quot;then&quot;</span><span class="w"> </span><span class="o">&lt;*&gt;</span><span class="w"> </span><span class="n">expr</span><span class="w"></span>
+<span class="w">           </span><span class="o">&lt;*&gt;</span><span class="w"> </span><span class="n">symbol</span><span class="w"> </span><span class="s">&quot;else&quot;</span><span class="w"> </span><span class="o">&lt;*&gt;</span><span class="w"> </span><span class="n">expr</span><span class="w"></span>
+<span class="w">  </span><span class="kr">where</span><span class="w"> </span><span class="n">selector</span><span class="w"> </span><span class="kr">_</span><span class="w"> </span><span class="n">cond</span><span class="w"> </span><span class="kr">_</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="kr">_</span><span class="w"> </span><span class="n">e</span><span class="w"> </span><span class="ow">=</span><span class="w"> </span><span class="kr">if</span><span class="w"> </span><span class="n">cond</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="kr">then</span><span class="w"> </span><span class="n">e</span><span class="w"> </span><span class="kr">else</span><span class="w"> </span><span class="n">t</span><span class="w"></span>
+</pre></div>
+<p>Which one is better? It's really a matter of personal taste. Since both the
+monadic and applicative styles deal in <tt class="docutils literal">Parser</tt>s, they can be freely mixed
+and combined.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>Failures could also be signaled by using <tt class="docutils literal">Maybe</tt>, but a list lets us
+express multiple results (for example a string that can be parsed in
+multiple ways). We're not going to be using multiple results in this
+article, but it's good to keep this option open.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>We could also use the monadic operator <tt class="docutils literal">&gt;&gt;</tt> for statements that
+don't create a new assignment, but using <tt class="docutils literal">&gt;&gt;=</tt> everywhere for
+consistency makes it a bit easier to understand.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>The return value of this parser is <tt class="docutils literal">Int</tt>, because it evaluates the
+parsed expression on the fly - this technique is called <em>Syntax Directed
+Translation</em> in the Dragon book. Note also that the conditional clauses
+are evaluated eagerly, which is valid only when no side effects are
+present.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

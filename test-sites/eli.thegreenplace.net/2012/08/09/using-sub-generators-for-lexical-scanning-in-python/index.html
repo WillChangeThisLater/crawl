@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Using sub-generators for lexical scanning in Python - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../../index.html" class="navbar-brand">
+                <img src="../../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="../using-sub-generators-for-lexical-scanning-in-python.html"
+                       rel="bookmark"
+                       title="Permalink to Using sub-generators for lexical scanning in Python">
+                        Using sub-generators for lexical scanning in Python
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> August 09, 2012 at 14:45</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../../tag/python.html">Python</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>A few days ago I watched a very <a class="reference external" href="https://www.youtube.com/watch?v=HxaD_trXwRE">interesting talk by Rob Pike</a> about writing a non-trivial lexer in Go. Rob discussed how the traditional switch-based state machine approach is cumbersome to write, because it's not really compatible with the algorithm we want to express. The main problem is that when we return a new token, a traditional state-machine structure forces us to explicitly pack up the state of where we are and return to the caller. Especially in cases where we just want to stay in the same state, this makes code unnecessarily convoluted.</p>
+<p>This struck a chord with me, because I've already written about <a class="reference external" href="../../../../2009/08/29/co-routines-as-an-alternative-to-state-machines/index.html">simplifying state machine code in Python with coroutines</a>. I couldn't help but wonder what would be an elegant Pythonic way to implement Rob's template lexer (watch the talk or <a class="reference external" href="http://rspace.googlecode.com/hg/slide/lex.html#landing-slide">take a look at his slides</a> for the syntax).</p>
+<p>What follows is my attempt, which uses the new <tt class="docutils literal">yield from</tt> syntax from <a class="reference external" href="http://www.python.org/dev/peps/pep-0380/">PEP 380</a>, and hence requires Python 3.3 (which is currently in beta, but should be released soon). I'll present the code in small chunks with explanations; the full source is <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2012/templatelexer.py">available for download here</a>. It's heavily commented, so should be easy to grok.</p>
+<p>First, some helper types and constants:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">TOK_TEXT        = <span style="color: #7f007f">&#39;TOK_TEXT&#39;</span>
+TOK_LEFT_META   = <span style="color: #7f007f">&#39;TOK_LEFT_META&#39;</span>
+TOK_RIGHT_META  = <span style="color: #7f007f">&#39;TOK_RIGHT_META&#39;</span>
+TOK_PIPE        = <span style="color: #7f007f">&#39;TOK_PIPE&#39;</span>
+TOK_NUMBER      = <span style="color: #7f007f">&#39;TOK_NUMBER&#39;</span>
+TOK_ID          = <span style="color: #7f007f">&#39;TOK_ID&#39;</span>
+
+
+<span style="color: #007f00"># A token has</span>
+<span style="color: #007f00">#   type: one of the TOK_* constants</span>
+<span style="color: #007f00">#   value: string value, as taken from input</span>
+<span style="color: #007f00">#</span>
+Token = namedtuple(<span style="color: #7f007f">&#39;Token&#39;</span>, <span style="color: #7f007f">&#39;type value&#39;</span>)
+</pre></div>
+<p>It's a shame Python still doesn't have a functional <tt class="docutils literal">enum</tt> type, isn't it? Anyway, on to the lexer class. Here's the complete public interface:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">TemplateLexer</span>(<span style="color: #00007f">object</span>):
+    <span style="color: #7f007f">&quot;&quot;&quot; A lexer for the template language. Initialize with the input</span>
+<span style="color: #7f007f">        string, and then call lex() which generates tokens. None is</span>
+<span style="color: #7f007f">        generated at EOF (and the generator expires).</span>
+<span style="color: #7f007f">    &quot;&quot;&quot;</span>
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">__init__</span>(<span style="color: #00007f">self</span>, <span style="color: #00007f">input</span>):
+        <span style="color: #00007f">self</span>.input = <span style="color: #00007f">input</span>
+        <span style="color: #007f00"># self.pos points at the current character in the input string</span>
+        <span style="color: #00007f">self</span>.pos = <span style="color: #007f7f">0</span>
+        <span style="color: #007f00"># self.tokstart points at the start of the currently processed</span>
+        <span style="color: #007f00"># token</span>
+        <span style="color: #00007f">self</span>.tokstart = <span style="color: #007f7f">0</span>
+        <span style="color: #00007f">self</span>.state = <span style="color: #00007f">self</span>._lex_text
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">lex</span>(<span style="color: #00007f">self</span>):
+        <span style="color: #007f00"># self.state is one of the _lex_* state functions. Each such</span>
+        <span style="color: #007f00"># function yields the tokens it finds and then returns the next</span>
+        <span style="color: #007f00"># state function. When EOF is encountered, None is returned as</span>
+        <span style="color: #007f00"># the new state.</span>
+        <span style="color: #00007f; font-weight: bold">while</span> <span style="color: #00007f">self</span>.state:
+            <span style="color: #00007f">self</span>.state = <span style="color: #00007f; font-weight: bold">yield</span> <span style="color: #00007f; font-weight: bold">from</span> <span style="color: #00007f">self.state</span><span style="color: #F00000; background-color: #F0A0A0">()</span>
+</pre></div>
+<p>The <tt class="docutils literal">lex</tt> method is a generator. It yields the lexed tokens one after the other, and it uses an interesting technique to do that. A technique you won't find in pre-3.3 Python, because of the lack of the <tt class="docutils literal">yield from</tt> construct. This new statement means: the following expression evaluates to a generator. Run that generator and yield the values it provides back to my caller. When the generator function returns, its return value is returned from <tt class="docutils literal">yield from</tt>.</p>
+<p>So what happens is this: <tt class="docutils literal">self.state</tt> is always a <em>function</em>. Each such function represents a state in the lexing process. It can yield one or more tokens and eventually when some input means the state should change, it returns the new state function. Let's take a look at a couple of such state functions before I go on with the explanation:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">_lex_text</span>(<span style="color: #00007f">self</span>):
+    <span style="color: #007f00"># Look for the beginning of LEFT_META</span>
+    meta_start = <span style="color: #00007f">self</span>.input.find(<span style="color: #00007f">self</span>._LEFT_META, <span style="color: #00007f">self</span>.pos)
+    <span style="color: #00007f; font-weight: bold">if</span> meta_start &gt; <span style="color: #007f7f">0</span>:
+        <span style="color: #007f00"># Found. Emit all text until then (if any) and move to the</span>
+        <span style="color: #007f00"># lex_left_meta state.</span>
+        <span style="color: #00007f">self</span>.pos = meta_start
+        <span style="color: #00007f; font-weight: bold">if</span> <span style="color: #00007f">self</span>.pos &gt; <span style="color: #00007f">self</span>.tokstart:
+            <span style="color: #00007f; font-weight: bold">yield</span> <span style="color: #00007f">self</span>._emit(TOK_TEXT)
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">self</span>._lex_left_meta
+    <span style="color: #00007f; font-weight: bold">else</span>:
+        <span style="color: #007f00"># Not found. This means we&#39;re done. There may be some text</span>
+        <span style="color: #007f00"># left until EOF, so emit it if there is.</span>
+        <span style="color: #00007f">self</span>.pos = <span style="color: #00007f">len</span>(<span style="color: #00007f">self</span>.input)
+        <span style="color: #00007f; font-weight: bold">if</span> <span style="color: #00007f">self</span>.pos &gt; <span style="color: #00007f">self</span>.tokstart:
+            <span style="color: #00007f; font-weight: bold">yield</span> <span style="color: #00007f">self</span>._emit(TOK_TEXT)
+        <span style="color: #007f00"># Yield None to mark &quot;no more tokens --&gt; EOF&quot;</span>
+        <span style="color: #007f00"># Return None to stop the main lexing loop since there is no</span>
+        <span style="color: #007f00"># next state.</span>
+        <span style="color: #00007f; font-weight: bold">yield</span> <span style="color: #00007f">None</span>
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">None</span>
+
+<span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">_lex_left_meta</span>(<span style="color: #00007f">self</span>):
+    <span style="color: #00007f">self</span>.pos += <span style="color: #00007f">len</span>(<span style="color: #00007f">self</span>._LEFT_META)
+    <span style="color: #00007f; font-weight: bold">yield</span> <span style="color: #00007f">self</span>._emit(TOK_LEFT_META)
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">self</span>._lex_inside_action
+</pre></div>
+<p>For completeness, here's the <tt class="docutils literal">_emit</tt> helper method:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">_emit</span>(<span style="color: #00007f">self</span>, toktype):
+    <span style="color: #7f007f">&quot;&quot;&quot; Emit the current token</span>
+<span style="color: #7f007f">    &quot;&quot;&quot;</span>
+    tok = Token(toktype, <span style="color: #00007f">self</span>.input[<span style="color: #00007f">self</span>.tokstart:<span style="color: #00007f">self</span>.pos])
+    <span style="color: #00007f">self</span>.tokstart = <span style="color: #00007f">self</span>.pos
+    <span style="color: #00007f; font-weight: bold">return</span> tok
+</pre></div>
+<p>Note how there are two &quot;outlets&quot; out of each state function. One is by <tt class="docutils literal">yield</tt> - execution is suspended while the new token is given back to the caller. Once it's consumed, execution proceeds right after the <tt class="docutils literal">yield</tt>. The other is a <tt class="docutils literal">return</tt> which signals that the current state has ended, and provides the next state function to the main lexing loop. The <tt class="docutils literal">else</tt> branch in <tt class="docutils literal">_lex_text</tt> shows how two tokens can be yielded one after the other, before returning. There are more examples for this in the full source code.</p>
+<p>There are two big ideas I picked up from Rob's talk:</p>
+<ol class="arabic simple">
+<li>When some state is finished, we <em>know</em> the next state, so dispatching again with a <tt class="docutils literal">switch</tt> doesn't feel right. Why not just directly say where we want to go next?</li>
+<li>When we emit a new token, do don't want to be forced to explicitly save the state, return to the caller, and then resume from a dispatcher <tt class="docutils literal">switch</tt>. We just want to say &quot;suspend here, emit this token, and then continue right after&quot;. This would not be possible in a language that does not support generators or coroutines of some kind.</li>
+</ol>
+<p>I believe the approach shown in my code addresses both ideas. Without the <tt class="docutils literal">yield from</tt> construct it would be much harder to code. <tt class="docutils literal">yield from</tt> not only allows us to call a function that acts as a sub-generator. More importantly, it allows us to both <tt class="docutils literal">yield</tt> and <tt class="docutils literal">return</tt> a value from the same function, with correct semantics (prior to Python 3.3, it's impossible to do that).</p>
+<p>It's not perfect, however. One thing I lament is that we still have a loop in <tt class="docutils literal">lex</tt>. It's much more elegant than a <tt class="docutils literal">switch</tt> dispatcher, but is it really needed? Why, instead of returning the next state function, we can't just <em>call</em> it directly from the current state? The way it is currently in my code, this would eventually blow the stack up, because none of the state functions would return from these calls before EOF is reached. Therefore, I don't think functions are the right vehicle for such a mechanism - perhaps <a class="reference external" href="http://en.wikipedia.org/wiki/Continuations">continuations</a> are needed here.</p>
+<p>Also, it's not coded as a real coroutine, although that would be possible to achieve. However, it would also impose a certain programming style on the rest of the program, which isn't always desirable. As it stands now, this lexer is nicely self-contained. The <tt class="docutils literal">lex</tt> method presents a simple, Pythonic generator interface that programmers are used to.</p>
+<p>Finally, I didn't bother researching the efficiency (speed-wise) of this approach against a classical state machine loop. Note that the code isn't terribly speed-conscious, e.g. it copies parts of the string to tokens, which is wasteful. It's definitely much more pleasant to write (and easier to modify) than a classical state machine, and this is very important.</p>
+<p>P.S. I did not attempt this code to be parallel to Rob Pike's Go code. Instead, I sought a Pythonic solution. For a more direct attempt to adapt it to Rob's Go snippets, check out <a class="reference external" href="https://gist.github.com/3298365">this set of gists by Piet Delport</a>.</p>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../../theme/js/count.js"></script>
+</body>
+</html>

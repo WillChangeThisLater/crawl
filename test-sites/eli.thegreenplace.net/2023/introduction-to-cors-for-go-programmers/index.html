@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Introduction to CORS for Go programmers - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Introduction to CORS for Go programmers">
+                        Introduction to CORS for Go programmers
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> September 09, 2023 at 05:50</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/network-programming.html">Network Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>From its inception, the Web has been a game of whackamole between people finding
+security holes and exploits, and other people plugging these holes and adding
+defensive security mechanisms.</p>
+<p>One of the busiest arenas in this struggle is the interaction between code
+running on one site (via JavaScript embedded in its page) and other sites;
+you may have heard about acronyms like XSS, CSRF, SSRF, SOP and CORS - they
+are all related to this dynamic and fascinating aspect of modern computer
+security. This post talks specifically about CORS, and what you should know
+if you're writing servers in Go.</p>
+<div class="section" id="same-origin-policy">
+<h2>Same-origin policy</h2>
+<p>Our story starts with the <a class="reference external" href="https://developer.mozilla.org/en-US/docs/Web/Security/Same-origin_policy">Same-origin policy (SOP)</a> -
+a mechanism built into browsers that prevents arbitrary access from the
+site you're currently browsing to other sites. Suppose you're browsing
+<a class="reference external" href="https://catvideos.meow">https://catvideos.meow</a>; while you're doing so, your browser will execute JS
+code from that site's pages.</p>
+<p>JS can - among other things - fetch
+resources from other domains; this is commonly used for images, stats, ads, for
+loading other JS modules from CDNs and so on.</p>
+<p>But it's also an
+inherently unsafe operation, because what if someone injects malicious code
+into catvideos.meow that sends requests to <a class="reference external" href="https://yourbank.com">https://yourbank.com</a>! Since the JS
+of catvideos.meow is executed by your browser, this is akin to you opening a
+new browser window and visiting <a class="reference external" href="https://yourbank.com">https://yourbank.com</a>, including providing any
+log-in information and cookies that may already be saved in your browser's
+session. That doesn't sound very safe!</p>
+<p>This is what the SOP was designed to prevent; generally speaking, except for a
+limited set of &quot;safe&quot; (but mostly there for historical reasons) use cases like
+fetching images, embedding and submitting a limited set of forms, JS is not
+allowed to make cross-origin requests.</p>
+<p>A request is considered cross-origin if it's made from origin A to origin B,
+and any of the following differ between the origins: protocol, domain and
+port (a default port is assumed per protocol, if not explicitly provided):</p>
+<img alt="The parts of a domain for CORS" class="align-center" src="../../images/2023/cors-domain-parts.png" />
+<p>If the protocol, domain and port match, the request is valid - the path doesn't
+matter. Naturally, this is used all the time by JS loading other resources from
+its own domain.</p>
+</div>
+<div class="section" id="local-experiment-to-observe-the-sop-in-action">
+<h2>Local experiment to observe the SOP in action</h2>
+<p>Let's try a simple experiment to see how this browser protection works;
+this only requires a couple of small HTML files with a bit of
+JS. Place two HTML files in the same directory; one should be named
+<tt class="docutils literal">page.html</tt> and its contents don't matter. The other should be named
+<tt class="docutils literal"><span class="pre">do-fetch.html</span></tt>, with these contents:</p>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">html</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">head</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">title</span><span class="p">&gt;</span>Fetch another page<span class="p">&lt;/</span><span class="nt">title</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">head</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">body</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">script</span><span class="p">&gt;</span><span class="w"></span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;http://127.0.0.1:8080/page.html&#39;</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fetch</span><span class="p">(</span><span class="nx">url</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">.</span><span class="nx">then</span><span class="p">(</span><span class="nx">response</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">response</span><span class="p">.</span><span class="nx">status</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="p">})</span><span class="w"></span>
+<span class="w">      </span><span class="p">.</span><span class="k">catch</span><span class="p">(</span><span class="nx">error</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s2">&quot;ERROR:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">error</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="p">});</span><span class="w"></span>
+<span class="w">  </span><span class="p">&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">body</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">html</span><span class="p">&gt;</span>
+</pre></div>
+<p>It attempts to load <tt class="docutils literal">page.html</tt> from a URL (which points to a local machine's
+port) via the <a class="reference external" href="https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API/Using_Fetch">fetch() API</a>.</p>
+<p><strong>First experiment</strong>: run a local static file server in the directory containing
+these two HTML files. Feel free to use my <a class="reference external" href="https://github.com/eliben/static-server">static-server</a> project, but any server will do
+<a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>:</p>
+<div class="highlight"><pre><span></span>$ go install github.com/eliben/static-server@latest
+$ ls
+do-fetch.html  page.html
+$ static-server -port 8080 .
+2023/09/03 06:02:10.111818 Serving directory &quot;.&quot; on http://127.0.0.1:8080
+</pre></div>
+<p>This serves our two HTML files on local port 8080. Now we can point our
+browser to <a class="reference external" href="http://127.0.0.1:8080/do-fetch.html">http://127.0.0.1:8080/do-fetch.html</a> and open the browser console.
+There shouldn't be errors, and we should see the printout <tt class="docutils literal">200</tt>, which is
+the successful HTTP response from attempting to load <tt class="docutils literal">page.html</tt>.
+It succeeds because this is a same-origin <tt class="docutils literal">fetch</tt>, from
+<tt class="docutils literal"><span class="pre">http://127.0.0.1:8080</span></tt> to itself.</p>
+<p><strong>Second experiment</strong>: while the static server on port 8080 is still running,
+run <em>another</em> instance of the server, serving the same directory on a different
+port - you'll want to do this in a separate terminal:</p>
+<div class="highlight"><pre><span></span>$ ls
+do-fetch.html  page.html
+$ static-server -port 9999 .
+2023/09/03 06:12:19.742790 Serving directory &quot;.&quot; on http://127.0.0.1:9999
+</pre></div>
+<p>Now, let's point the browser to <a class="reference external" href="http://127.0.0.1:9999/do-fetch.html">http://127.0.0.1:9999/do-fetch.html</a> and open
+the browser console again. The page won't load, and instead you'll see an
+error similar to:</p>
+<div class="highlight"><pre><span></span>Cross-Origin Request Blocked: The Same Origin Policy disallows reading the
+remote resource at http://127.0.0.1:8080/page.html. (Reason: CORS header
+‘Access-Control-Allow-Origin’ missing).
+</pre></div>
+<p>This is the SOP in action. Here's what's going on:</p>
+<ul class="simple">
+<li>As far as the browser is concerned, a web page at origin
+<tt class="docutils literal"><span class="pre">http://127.0.0.1:9999</span></tt> is making a <tt class="docutils literal">fetch</tt> call to origin
+<tt class="docutils literal"><span class="pre">http://127.0.0.1:8080</span></tt> (note that this destination is hard-coded in
+the source of <tt class="docutils literal"><span class="pre">do-fetch.html</span></tt>).</li>
+<li>Since the ports are different, these are considered to be
+<em>different origins</em>, and the <tt class="docutils literal">fetch</tt> is a cross-origin request.</li>
+<li>By the default SOP, cross-origin requests are blocked.</li>
+</ul>
+<p>Note that the browser also mentions a CORS header, which is a great segue to
+our next topic.</p>
+</div>
+<div class="section" id="cors">
+<h2>CORS</h2>
+<p>So what is CORS, and how can it help us make requests to different origins?
+The CORS acronym stands for Cross-Origin Resource Sharing, and this is a
+good definition <a class="reference external" href="https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS">from MDN</a>:</p>
+<blockquote>
+Cross-Origin Resource Sharing (CORS) is an HTTP-header based mechanism that
+allows a server to indicate any origins (domain, scheme, or port) other than
+its own from which a browser should permit loading resources.</blockquote>
+<p>CORS is a simple protocol between an HTTP server and a browser. When a page
+attempts to make a cross-origin request, the browser attaches a special header
+to the request with the name <tt class="docutils literal">Origin</tt>; in this header, the browser specifies
+the origin from which the request originates.</p>
+<p>We can actually observe this if we look at the debug console of the browser in
+more detail in our SOP experiment. In the <em>Network</em> tab, we can examine the
+exact HTTP request made by the browser to fetch the page from
+<tt class="docutils literal"><span class="pre">http://127.0.0.1:8080/page.html</span></tt> when <tt class="docutils literal"><span class="pre">do-fetch.html</span></tt> asked for it.
+We should see something like:</p>
+<div class="highlight"><pre><span></span>GET /page.html HTTP/1.1
+Host: 127.0.0.1:8080
+User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/117.0
+Accept: */*
+Accept-Language: en-US,en;q=0.5
+Accept-Encoding: gzip, deflate, br
+Referer: http://127.0.0.1:9999/
+Origin: http://127.0.0.1:9999
+</pre></div>
+<p>The important line here is the last one: it tells the server which origin
+the request is coming from.</p>
+<p>We can also examine the server's response, in which we'll see that the server
+does not include a special header named <tt class="docutils literal"><span class="pre">Access-Control-Allow-Origin</span></tt>. Since
+this header is not in the response, the browser assumes that the server doesn't
+support CORS from the specified origin, and this results in the error we've seen
+above.</p>
+<p>To complete a successful cross-origin request, the server has to approve the
+request explicitly by returning an <tt class="docutils literal"><span class="pre">Access-Control-Allow-Origin</span></tt> header. The
+value of the header should be either the origin named in the request's
+<tt class="docutils literal">Origin</tt> header, or the special value <tt class="docutils literal">*</tt> which means &quot;all origins
+accepted&quot;.</p>
+<img alt="Diagram illustrating the exchange of the CORS protocol" class="align-center" src="../../images/2023/cors-protocol.png" />
+<p>To see this in action, it's time for another experiment; let's write a simple
+Go server that supports cross-origin requests.</p>
+</div>
+<div class="section" id="a-sample-go-server-with-cors-support">
+<h2>A sample Go server with CORS support</h2>
+<p>Leaving static file serving behind, let's move closer towards what CORS is
+actually used for: protecting access to APIs from unknown origins. Here's a
+simple Go server that serves a very basic API endpoint at <tt class="docutils literal">/api</tt>, returning a
+hard-coded JSON value:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">apiHandler</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">r</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">w</span><span class="p">.</span><span class="nx">Header</span><span class="p">().</span><span class="nx">Set</span><span class="p">(</span><span class="s">&quot;Content-Type&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;application/json&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintln</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">`{&quot;message&quot;: &quot;hello&quot;}`</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">port</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="s">&quot;:8080&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="nx">mux</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">NewServeMux</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">mux</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/api&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">apiHandler</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">http</span><span class="p">.</span><span class="nx">ListenAndServe</span><span class="p">(</span><span class="nx">port</span><span class="p">,</span><span class="w"> </span><span class="nx">mux</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This server should be started locally; Here's a somewhat modified HTML file with
+JS making a CORS request to this endpoint, assuming the server runs on local
+port 8080:</p>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">html</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">head</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">title</span><span class="p">&gt;</span>Access API through CORS<span class="p">&lt;/</span><span class="nt">title</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">head</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">body</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">script</span><span class="p">&gt;</span><span class="w"></span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;http://localhost:8080/api&#39;</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fetch</span><span class="p">(</span><span class="nx">url</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">.</span><span class="nx">then</span><span class="p">(</span><span class="nx">response</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">response</span><span class="p">.</span><span class="nx">ok</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="k">return</span><span class="w"> </span><span class="nx">response</span><span class="p">.</span><span class="nx">json</span><span class="p">();</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s1">&#39;Failed to fetch data&#39;</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="p">})</span><span class="w"></span>
+<span class="w">      </span><span class="p">.</span><span class="nx">then</span><span class="p">(</span><span class="nx">data</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nb">document</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">innerHTML</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">message</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="p">})</span><span class="w"></span>
+<span class="w">      </span><span class="p">.</span><span class="k">catch</span><span class="p">(</span><span class="nx">error</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nb">document</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">innerHTML</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="s2">&quot;ERROR: &quot;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">error</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="p">});</span><span class="w"></span>
+<span class="w">  </span><span class="p">&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">body</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">html</span><span class="p">&gt;</span>
+</pre></div>
+<p>Assuming this code is saved locally in <tt class="docutils literal"><span class="pre">access-through-cors.html</span></tt>, we will
+serve it with <tt class="docutils literal"><span class="pre">static-server</span></tt> on port 9999, as before:</p>
+<div class="highlight"><pre><span></span>$ static-server -port 9999 .
+2023/09/03 08:01:22.413757 Serving directory &quot;.&quot; on http://127.0.0.1:9999
+</pre></div>
+<p>When we open <a class="reference external" href="http://127.0.0.1:9999/access-through-cors.html">http://127.0.0.1:9999/access-through-cors.html</a> in the browser,
+we'll see the CORS error again:</p>
+<div class="highlight"><pre><span></span>Cross-Origin Request Blocked: The Same Origin Policy disallows reading the
+remote resource at http://127.0.0.1:8080/api. (Reason: CORS header
+‘Access-Control-Allow-Origin’ missing).
+</pre></div>
+<p>Indeed, our server doesn't support CORS yet! This is an important point to
+emphasize - a server oblivious to CORS means it doesn't support it.
+In other words, CORS is &quot;opt-in&quot;. Since our server doesn't check for the
+<tt class="docutils literal">Origin</tt> header and doesn't return the expected CORS headers back to the
+client, the browser assumes that the cross-origin request is denied, and returns
+an error to the HTML page <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.</p>
+<p>Let's fix that, and implement CORS in our server. It's customary to do it
+as middleware that wraps the HTTP handler. Here's a simple approach:</p>
+<div class="highlight"><pre><span></span><span class="kd">var</span><span class="w"> </span><span class="nx">originAllowlist</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="p">[]</span><span class="kt">string</span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;http://127.0.0.1:9999&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;http://cats.com&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;http://safe.frontend.net&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">checkCORS</span><span class="p">(</span><span class="nx">next</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">Handler</span><span class="p">)</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">Handler</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">HandlerFunc</span><span class="p">(</span><span class="kd">func</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">r</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">origin</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">Header</span><span class="p">.</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;Origin&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">slices</span><span class="p">.</span><span class="nx">Contains</span><span class="p">(</span><span class="nx">originAllowlist</span><span class="p">,</span><span class="w"> </span><span class="nx">origin</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">w</span><span class="p">.</span><span class="nx">Header</span><span class="p">().</span><span class="nx">Set</span><span class="p">(</span><span class="s">&quot;Access-Control-Allow-Origin&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">origin</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="nx">w</span><span class="p">.</span><span class="nx">Header</span><span class="p">().</span><span class="nx">Add</span><span class="p">(</span><span class="s">&quot;Vary&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Origin&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">next</span><span class="p">.</span><span class="nx">ServeHTTP</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nx">r</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">})</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p><tt class="docutils literal">checkCORS</tt> is <a class="reference external" href="../../2021/rest-servers-in-go-part-5-middleware/index.html">standard Go middleware</a>.
+It wraps any HTTP handler and adds CORS logic on top; here's how it works:</p>
+<ul class="simple">
+<li>It checks if the <tt class="docutils literal">Origin</tt> header is present in the request (the header's
+<tt class="docutils literal">Get</tt> method will return an empty string for a missing header).</li>
+<li>If yes, it checks its value; if it's in an allow-list of authorized origins,
+the origin is parroted back to the client in the
+<tt class="docutils literal"><span class="pre">Access-Control-Allow-Origin</span></tt> header of the response.</li>
+<li>We also set <tt class="docutils literal">Vary: Origin</tt> in the response to avoid problems with caching
+proxies between the server and the client (see
+<a class="reference external" href="https://fetch.spec.whatwg.org/#cors-protocol-and-http-caches">this section in the fetch standard</a> for more details)</li>
+<li>If there is no <tt class="docutils literal">Origin</tt> header, or the origin value is not in our
+allow-list, the middleware doesn't change the response headers in any way.
+As we saw before, this is equivalent to saying &quot;I don't support cross-origin
+requests from that origin&quot;.</li>
+</ul>
+<p>Obviously, the allow-list solution presented here is ad-hoc, and you are free
+to implement your own. Some API endpoints want to be truly public and support
+cross-origin requests from <em>any</em> domain. In such cases, one can just hard-code
+<tt class="docutils literal"><span class="pre">Access-Control-Allow-Origin:</span> *</tt> in all responses, without additional logic.
+In this case the <tt class="docutils literal">Vary</tt> header isn't required either.</p>
+<p>Now that we have the middleware in place, we have to hook it into our server;
+let's wrap the top-level router, so <tt class="docutils literal">checkCORS</tt> applies to all endpoints we
+may add to the server in the future:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">port</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="s">&quot;:8080&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="nx">mux</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">NewServeMux</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">mux</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/api&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">apiHandler</span><span class="p">)</span><span class="w"></span>
+<span class="hll"><span class="w">  </span><span class="nx">http</span><span class="p">.</span><span class="nx">ListenAndServe</span><span class="p">(</span><span class="nx">port</span><span class="p">,</span><span class="w"> </span><span class="nx">checkCORS</span><span class="p">(</span><span class="nx">mux</span><span class="p">))</span><span class="w"></span>
+</span><span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>If we kill the old server occupying port 8080 and run this one instead,
+re-loading <tt class="docutils literal"><span class="pre">access-through-cors.html</span></tt> we'll see different results: the
+page shows &quot;hello&quot; and there are no errors in the console. The CORS request
+succeeded! Let's examine the response headers:</p>
+<div class="highlight"><pre><span></span>HTTP/1.1 200 OK
+<span class="hll">Access-Control-Allow-Origin: http://127.0.0.1:9999
+</span>Content-Type: application/json
+<span class="hll">Vary: Origin
+</span>Date: Sun, 03 Sep 2023 16:33:00 GMT
+Content-Length: 21
+</pre></div>
+<p>The custom headers set by our middleware are highlighted; the request
+was made by a page served on local port 9999, and this is in the <tt class="docutils literal">Origin</tt>
+header sent by the browser. Therefore, our response headers permit the browser
+to communicate the data back to the client code and finish without errors.
+As an exercise, modify the <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2023/cors/go-server-cors/serve-api-with-cors.go">code of our CORS middleware</a>
+to set <tt class="docutils literal">*</tt> instead of a specific origin, then re-run the server and client
+page, and examine the response header again.</p>
+</div>
+<div class="section" id="preflight-requests">
+<h2>Preflight requests</h2>
+<p>As we've seen, when a page issues a cross-origin request, the browser obliges,
+but withholds any response details from the fetching code unless the server
+explicitly agreed to receive the request via CORS. This can be worrisome,
+though; what if the request itself causes something unsafe to happen on the
+server?</p>
+<p>This is what <em>preflight</em> requests are for; for some HTTP requests that aren't
+deemed inherently safe, a browser will first send a special <tt class="docutils literal">OPTIONS</tt> request
+(called &quot;preflight&quot;) to double check that the server is ready for this kind
+of request from the specific origin. Only if answered in the affirmative, the
+browser will then send the actual HTTP request.</p>
+<p>The terminology here gets a bit confusing.
+<a class="reference external" href="https://www.w3.org/TR/2020/SPSD-cors-20200602/#simple-method">The old CORS standard</a> defines
+<em>simple requests</em> as those that don't require preflight, but the <a class="reference external" href="https://fetch.spec.whatwg.org/#cors-protocol-and-http-caches">new fetch
+standard that defines CORS</a> doesn't use
+this term. Generally, <tt class="docutils literal">GET</tt>, <tt class="docutils literal">HEAD</tt> and <tt class="docutils literal">POST</tt> requests restricted to
+certain headers and content types are considered <em>simple</em>; for the full
+definition, see the linked standards. Anything that isn't simple requires a
+preflight <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>.</p>
+<p>The protocol goes as follows:</p>
+<ul class="simple">
+<li>If the client tries to send a request that's not &quot;simple&quot;, the browser will
+first send an <tt class="docutils literal">OPTIONS</tt> request with the <tt class="docutils literal"><span class="pre">Access-Control-Request-Method</span></tt>
+header. The value of this header is the actual request method the client
+wants. The <tt class="docutils literal">OPTIONS</tt> request also carries an <tt class="docutils literal">Origin</tt> header specifying
+which origin this is coming from.</li>
+<li>If the server supports the specified method from this origin, it returns
+a successful response with the <tt class="docutils literal"><span class="pre">Access-Control-Allow-Methods</span></tt> header where
+it lists the supported methods from this origin.</li>
+<li>The browser processes the response to <tt class="docutils literal">OPTIONS</tt> and determines whether the
+request it asked to send on behalf of the origin is on the allow-list;
+if yes, it then sends the actual request the client made. Note that since HTTP
+is stateless, the actual request will also follow the CORS protocol.</li>
+</ul>
+<img alt="Diagram illustrating the exchange of the CORS protocol with preflight" class="align-center" src="../../images/2023/cors-preflight-protocol.png" />
+<p>There's another feature of preflight requests which I'm not going to cover in
+detail here,
+but it's easy enough to implement if needed: permissions for special headers.
+Preflight requests not only protect servers from potentially unsafe methods,
+but also from <a class="reference external" href="https://fetch.spec.whatwg.org/#cors-safelisted-request-header">potentially unsafe headers</a>.
+If the client tries to send a cross-origin request with such headers, the
+browser will send a preflight with the <tt class="docutils literal"><span class="pre">Access-Control-Request-Headers</span></tt> header
+listing these headers; the server has to reply with
+<tt class="docutils literal"><span class="pre">Access-Control-Allow-Headers</span></tt> in order for the protocol to succeed.</p>
+</div>
+<div class="section" id="adding-preflight-support-to-our-go-server">
+<h2>Adding preflight support to our Go server</h2>
+<p>Before working on the server's code, let's see how the browser sends preflight
+requests on behalf of a <tt class="docutils literal">fetch</tt> call. We'll update the JS code in
+our HTML page just a bit:</p>
+<div class="highlight"><pre><span></span><span class="kd">var</span><span class="w"> </span><span class="nx">url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;http://localhost:8080/api&#39;</span><span class="w"></span>
+<span class="hll"><span class="nx">fetch</span><span class="p">(</span><span class="nx">url</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="nx">method</span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;DELETE&#39;</span><span class="p">})</span><span class="w"></span>
+</span><span class="w">  </span><span class="p">.</span><span class="nx">then</span><span class="p">(</span><span class="nx">response</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">response</span><span class="p">.</span><span class="nx">ok</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">response</span><span class="p">.</span><span class="nx">json</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s1">&#39;Failed to fetch data&#39;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">})</span><span class="w"></span>
+<span class="w">  </span><span class="p">.</span><span class="nx">then</span><span class="p">(</span><span class="nx">data</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nb">document</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">innerHTML</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">message</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="p">})</span><span class="w"></span>
+<span class="w">  </span><span class="p">.</span><span class="k">catch</span><span class="p">(</span><span class="nx">error</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nb">document</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">innerHTML</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="s2">&quot;ERROR: &quot;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">error</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="p">});</span><span class="w"></span>
+</pre></div>
+<p>With the old CORS server (that doesn't support preflight requests yet) still
+running on port 8080, when we open this page in the browser served at
+127.0.0.1:9999, we'll see an error:</p>
+<div class="highlight"><pre><span></span>Cross-Origin Request Blocked: The Same Origin Policy disallows reading the
+remote resource at http://localhost:8080/api. (Reason: Did not find method in
+CORS header ‘Access-Control-Allow-Methods’).
+</pre></div>
+<p>Diving deeper, we find that the browser sent an <tt class="docutils literal">OPTIONS</tt> request to the
+server with the following relevant headers:</p>
+<div class="highlight"><pre><span></span>Access-Control-Request-Method: DELETE
+Origin: http://127.0.0.1:9999
+</pre></div>
+<p>This means &quot;hey server, some code at origin <tt class="docutils literal">127.0.0.1:9999</tt> wants to send
+you a <tt class="docutils literal">DELETE</tt> request, are you cool with that?&quot;</p>
+<p>Did our server reply? Yes, with the same response it sent for the <tt class="docutils literal">GET</tt>
+request in the previous example:</p>
+<div class="highlight"><pre><span></span>HTTP/1.1 200 OK
+Access-Control-Allow-Origin: http://127.0.0.1:9999
+Content-Type: application/json
+Vary: Origin
+Date: Sun, 03 Sep 2023 21:34:03 GMT
+Content-Length: 21
+</pre></div>
+<p>That's because we haven't actually restricted the method in our Go server: it
+answers the same response to <em>all</em> methods - in this case <tt class="docutils literal">OPTIONS</tt>! Since
+the browser sent our server a preflight for <tt class="docutils literal">DELETE</tt>, it expected the server
+to reply with <tt class="docutils literal"><span class="pre">Access-Control-Allow-Methods</span></tt> that lists <tt class="docutils literal">DELETE</tt>. The
+server didn't, so the browser aborted the procedure and returned an error to the
+client (<em>without</em> actually sending the <tt class="docutils literal">DELETE</tt> request itself).</p>
+<p>Let's now fix that, by implementing preflight in our server. We'll start with
+a helper function that reports whether the given request is a preflight request:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">isPreflight</span><span class="p">(</span><span class="nx">r</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">Method</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s">&quot;OPTIONS&quot;</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"></span>
+<span class="w">    </span><span class="nx">r</span><span class="p">.</span><span class="nx">Header</span><span class="p">.</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;Origin&quot;</span><span class="p">)</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"></span>
+<span class="w">    </span><span class="nx">r</span><span class="p">.</span><span class="nx">Header</span><span class="p">.</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;Access-Control-Request-Method&quot;</span><span class="p">)</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It's important to note that all three conditions have to be true for the
+request to be considered preflight. Next, we'll modify our <tt class="docutils literal">checkCORS</tt>
+middleware to support preflights:</p>
+<div class="highlight"><pre><span></span><span class="kd">var</span><span class="w"> </span><span class="nx">originAllowlist</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="p">[]</span><span class="kt">string</span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;http://127.0.0.1:9999&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;http://cats.com&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;http://safe.frontend.net&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">var</span><span class="w"> </span><span class="nx">methodAllowlist</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="p">[]</span><span class="kt">string</span><span class="p">{</span><span class="s">&quot;GET&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;POST&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;DELETE&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;OPTIONS&quot;</span><span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">checkCORS</span><span class="p">(</span><span class="nx">next</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">Handler</span><span class="p">)</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">Handler</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">HandlerFunc</span><span class="p">(</span><span class="kd">func</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">r</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">isPreflight</span><span class="p">(</span><span class="nx">r</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">origin</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">Header</span><span class="p">.</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;Origin&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="nx">method</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">Header</span><span class="p">.</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;Access-Control-Request-Method&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">slices</span><span class="p">.</span><span class="nx">Contains</span><span class="p">(</span><span class="nx">originAllowlist</span><span class="p">,</span><span class="w"> </span><span class="nx">origin</span><span class="p">)</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">slices</span><span class="p">.</span><span class="nx">Contains</span><span class="p">(</span><span class="nx">methodAllowlist</span><span class="p">,</span><span class="w"> </span><span class="nx">method</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">w</span><span class="p">.</span><span class="nx">Header</span><span class="p">().</span><span class="nx">Set</span><span class="p">(</span><span class="s">&quot;Access-Control-Allow-Origin&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">origin</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="nx">w</span><span class="p">.</span><span class="nx">Header</span><span class="p">().</span><span class="nx">Set</span><span class="p">(</span><span class="s">&quot;Access-Control-Allow-Methods&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">strings</span><span class="p">.</span><span class="nx">Join</span><span class="p">(</span><span class="nx">methodAllowlist</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;, &quot;</span><span class="p">))</span><span class="w"></span>
+<span class="w">        </span><span class="nx">w</span><span class="p">.</span><span class="nx">Header</span><span class="p">().</span><span class="nx">Add</span><span class="p">(</span><span class="s">&quot;Vary&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Origin&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="c1">// Not a preflight: regular request.</span><span class="w"></span>
+<span class="w">      </span><span class="nx">origin</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">Header</span><span class="p">.</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;Origin&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">slices</span><span class="p">.</span><span class="nx">Contains</span><span class="p">(</span><span class="nx">originAllowlist</span><span class="p">,</span><span class="w"> </span><span class="nx">origin</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">w</span><span class="p">.</span><span class="nx">Header</span><span class="p">().</span><span class="nx">Set</span><span class="p">(</span><span class="s">&quot;Access-Control-Allow-Origin&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">origin</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="nx">w</span><span class="p">.</span><span class="nx">Header</span><span class="p">().</span><span class="nx">Add</span><span class="p">(</span><span class="s">&quot;Vary&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Origin&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">next</span><span class="p">.</span><span class="nx">ServeHTTP</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nx">r</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">})</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>If we run this updated server on port 8080 and invoke the HTML page that
+does a <tt class="docutils literal">fetch</tt> with <tt class="docutils literal">method: 'DELETE'</tt> again, the request will be
+successful. The server now has a tailored reply for the <tt class="docutils literal">OPTIONS</tt> preflight
+request:</p>
+<div class="highlight"><pre><span></span>HTTP/1.1 200 OK
+<span class="hll">Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS
+</span><span class="hll">Access-Control-Allow-Origin: http://127.0.0.1:9999
+</span>Content-Type: application/json
+Vary: Origin
+Date: Sun, 03 Sep 2023 13:12:29 GMT
+Content-Length: 21
+</pre></div>
+<p>The browser then proceeds to send the <tt class="docutils literal">DELETE</tt> request itself:</p>
+<div class="highlight"><pre><span></span>DELETE /api HTTP/1.1
+Host: localhost:8080
+User-Agent: Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/117.0
+Accept: */*
+Accept-Language: en-US,en;q=0.5
+Accept-Encoding: gzip, deflate, br
+Referer: http://127.0.0.1:9999/
+Origin: http://127.0.0.1:9999
+</pre></div>
+<p>Which gets a successful reply:</p>
+<div class="highlight"><pre><span></span>HTTP/1.1 200 OK
+Access-Control-Allow-Origin: http://127.0.0.1:9999
+Content-Type: application/json
+Vary: Origin
+Date: Sun, 03 Sep 2023 13:12:29 GMT
+Content-Length: 21
+</pre></div>
+</div>
+<div class="section" id="cookies-and-cors">
+<h2>Cookies and CORS</h2>
+<p>At the beginning of the post we discussed how sending cookies on behalf of
+the visiting browser is one of the main security issues the SOP and CORS try
+to address. Now it's time to discuss this in more detail.</p>
+<p>Let's go back to our server and have it set a cookie when a certain path is
+accessed. Our <tt class="docutils literal">main</tt> function becomes:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">port</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="s">&quot;:8080&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="nx">mux</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">NewServeMux</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">mux</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/api&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">apiHandler</span><span class="p">)</span><span class="w"></span>
+<span class="hll"><span class="w">  </span><span class="nx">mux</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/getcookie&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">getCookieHandler</span><span class="p">)</span><span class="w"></span>
+</span><span class="w">  </span><span class="nx">http</span><span class="p">.</span><span class="nx">ListenAndServe</span><span class="p">(</span><span class="nx">port</span><span class="p">,</span><span class="w"> </span><span class="nx">checkCORS</span><span class="p">(</span><span class="nx">mux</span><span class="p">))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>And <tt class="docutils literal">getCookieHandler</tt> is:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">getCookieHandler</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">r</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">w</span><span class="p">.</span><span class="nx">Header</span><span class="p">().</span><span class="nx">Set</span><span class="p">(</span><span class="s">&quot;Set-Cookie&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;somekey=somevalue&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintln</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">`{&quot;message&quot;: &quot;you&#39;re welcome&quot;}`</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Very simple: everyone visiting the <tt class="docutils literal">/getcookie</tt> route gets a cookie! If we
+run this server on port 8080 as usual and visit <a class="reference external" href="http://http://127.0.0.1:8080/getcookie">http://http://127.0.0.1:8080/getcookie</a>,
+we should see the cookie sent in the response header:</p>
+<div class="highlight"><pre><span></span>HTTP/1.1 200 OK
+<span class="hll">Set-Cookie: somekey=somevalue
+</span>Date: Sun, 03 Sep 2023 13:25:09 GMT
+Content-Length: 30
+Content-Type: text/plain; charset=utf-8
+</pre></div>
+<p>Note: this isn't a CORS request; this is the browser accessing the server
+directly. Opening the developer console (&quot;Storage&quot; tab), we should be able to
+see this cookie is now associated with 127.0.0.1:8080, something like:</p>
+<img alt="Showing the cookie in the developer tools storage tab" class="align-center" src="../../images/2023/cors-cookie-storage.png" />
+<p>If we refresh the page, we'll notice that the browser now sends a <tt class="docutils literal">Cookie</tt>
+header with this cookie in requests to 127.0.0.1:8080 - as expected!</p>
+<p>Next, let's try to access <tt class="docutils literal">/api</tt> again from our HTML page served on a
+different origin (port 9999):</p>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">html</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">head</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">title</span><span class="p">&gt;</span>CORS with credentials<span class="p">&lt;/</span><span class="nt">title</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">head</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">body</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">script</span><span class="p">&gt;</span><span class="w"></span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;http://localhost:8080/api&#39;</span><span class="w"></span>
+<span class="hll"><span class="w">    </span><span class="nx">fetch</span><span class="p">(</span><span class="nx">url</span><span class="p">,</span><span class="w"> </span><span class="p">{</span><span class="nx">credentials</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;include&quot;</span><span class="p">})</span><span class="w"></span>
+</span><span class="w">      </span><span class="p">.</span><span class="nx">then</span><span class="p">(</span><span class="nx">response</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">response</span><span class="p">.</span><span class="nx">ok</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="k">return</span><span class="w"> </span><span class="nx">response</span><span class="p">.</span><span class="nx">json</span><span class="p">();</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="k">throw</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="ne">Error</span><span class="p">(</span><span class="s1">&#39;Failed to fetch data&#39;</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="p">})</span><span class="w"></span>
+<span class="w">      </span><span class="p">.</span><span class="nx">then</span><span class="p">(</span><span class="nx">data</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nb">document</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">innerHTML</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">message</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="p">})</span><span class="w"></span>
+<span class="w">      </span><span class="p">.</span><span class="k">catch</span><span class="p">(</span><span class="nx">error</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nb">document</span><span class="p">.</span><span class="nx">body</span><span class="p">.</span><span class="nx">innerHTML</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="s2">&quot;ERROR: &quot;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">error</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="p">});</span><span class="w"></span>
+<span class="w">  </span><span class="p">&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">body</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">html</span><span class="p">&gt;</span>
+</pre></div>
+<p>This is where things get interesting; our browser has a cookie associated
+with <tt class="docutils literal">127.0.0.1:8080</tt>, and now a different origin makes a request to this
+domain inside our browser.</p>
+<p><tt class="docutils literal">fetch</tt> won't set cookies by default, and it needs to be told to do so
+explicitly (this is yet another security mechanism). The highlighted line
+shows how to do this, by adding a <tt class="docutils literal">credentials</tt> options set to <tt class="docutils literal">true</tt>.
+When we serve this page on <a class="reference external" href="http://127.0.0.1:9999/getcookie.html">http://127.0.0.1:9999/getcookie.html</a>, we'll see
+that the cookie is sent in the request with this header:</p>
+<div class="highlight"><pre><span></span>Cookie: somekey=somevalue
+</pre></div>
+<p>But there's a CORS error in the console, and the browser returns an error
+to <tt class="docutils literal">fetch</tt>:</p>
+<div class="highlight"><pre><span></span>Cross-Origin Request Blocked: The Same Origin Policy disallows reading the
+remote resource at http://localhost:8080/api. (Reason: expected ‘true’ in CORS
+header ‘Access-Control-Allow-Credentials’).
+</pre></div>
+<p>This is because our server doesn't support credentials for CORS yet! As the
+error suggests, to signal that credentials are supported, the server has to
+set a special header named <tt class="docutils literal"><span class="pre">Access-Control-Allow-Credentials</span></tt> to <tt class="docutils literal">true</tt>:</p>
+<div class="highlight"><pre><span></span><span class="nx">w</span><span class="p">.</span><span class="nx">Header</span><span class="p">().</span><span class="nx">Set</span><span class="p">(</span><span class="s">&quot;Access-Control-Allow-Credentials&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;true&quot;</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>If we rerun the server with this header set, the CORS request with the cookie
+succeeds.</p>
+<p>Once again, note that for &quot;simple&quot; requests the browser <em>does</em> send the request
+with the cookie to the server; it just refuses to get any reply back to the
+<tt class="docutils literal">fetch</tt> unless the server explicitly accepts credentials over CORS by
+returning a special header. It's the server's job to ensure that nothing unsafe
+happens as a result of an unauthorized cross-origin request. For non-simple
+methods, the browser will expect <tt class="docutils literal"><span class="pre">Access-Control-Allow-Credentials</span></tt> to be
+set on the response to a preflight request, and the actual request won't have
+the cookie unless this condition is unsatisfied.</p>
+</div>
+<div class="section" id="next-steps">
+<h2>Next steps</h2>
+<p>This post is an introduction to CORS for Go programmers. It doesn't cover all
+the aspects and details of CORS, but should be a good foundation for finding
+out more, if desired. For additional resources:</p>
+<ul class="simple">
+<li>The <a class="reference external" href="https://fetch.spec.whatwg.org">fetch standard</a> is the authoritative
+definition of CORS.</li>
+<li><a class="reference external" href="https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS">MDN articles</a>
+are always great.</li>
+<li>The web.dev articles on <a class="reference external" href="https://web.dev/same-origin-policy/">SOP</a> and
+<a class="reference external" href="https://web.dev/cross-origin-resource-sharing/">CORS</a> are also
+recommended.</li>
+</ul>
+<p>Finally, it's unlikely that you'll have to roll your own CORS implementation.
+Popular Go web frameworks like Gin and Echo have CORS middleware built-in,
+and projects like <a class="reference external" href="https://github.com/rs/cors">rs/cors</a> provide a
+framework-agnostic solution.</p>
+</div>
+<div class="section" id="code">
+<h2>Code</h2>
+<p>All the Go and HTML code for this post's samples and experiments is available
+<a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2023/cors">on GitHub</a>.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td><p class="first">When doing experiments involving <tt class="docutils literal">fetch</tt> and other non-trivial JS,
+it's strongly recommended to actually <em>serve</em> the HTML files locally,
+rather than just opening them with <tt class="docutils literal"><span class="pre">file:///</span></tt> in the browser.
+Specifically for CORS, <tt class="docutils literal"><span class="pre">file:///</span></tt> has some additional nuances (e.g.
+the <tt class="docutils literal">Origin</tt> header is set to <tt class="docutils literal">null</tt>).</p>
+<p>Note also that having different ports on 127.0.0.1 is sufficient to
+demonstrate the topics of this post, because ports count in the
+definition of &quot;origin&quot;.</p>
+<p>An alternative is to use the system's <tt class="docutils literal">/etc/hosts</tt> configuration file
+to define domain aliases for 127.0.0.1, and run our static server with
+<tt class="docutils literal">sudo</tt> to enable serving on port 80. This provides a slightly more
+realistic emulation, like accessing <a class="reference external" href="http://foo.domain">http://foo.domain</a> from
+<a class="reference external" href="http://bar.domain">http://bar.domain</a>, since the browser is oblivious to
+domain aliases (it will even consider <tt class="docutils literal">localhost</tt> and <tt class="docutils literal">127.0.0.1</tt>
+distinct for the purposes of CORS).</p>
+<p class="last">You're free to do so as an exercise, but having different ports to
+represents different origins is generally sufficient for our needs.</p>
+</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td><p class="first">Note that our Go server still returns a valid JSON response on the
+<tt class="docutils literal">/api</tt> endpoint, and the browser gets this response back. However,
+the browser won't share it with the client <tt class="docutils literal">fetch()</tt> call, reporting
+an error instead.</p>
+<p>In fact, if we just <tt class="docutils literal">curl</tt> to <tt class="docutils literal"><span class="pre">http://127.0.0.1:8080/api</span></tt> while
+the server is running, we'll get the data back. The CORS mechanism is
+a browser feature, not part of the actual HTTP protocol.</p>
+<p>This highlights a very important point: while CORS is part of a security
+solution, it's absolutely unsuitable as the main (or only) security
+mechanism. If you expose an API endpoint on the public internet, clients
+<em>will</em> be able to access it. Browsers will block cross-origin requests
+from client-side JavaScript, but that's about it.</p>
+<p>If you're not actually interested in your endpoint
+being public, you should use a real <a class="reference external" href="../../2021/rest-servers-in-go-part-6-authentication/index.html">authentication solution</a>.</p>
+<p class="last">And if your server will dutifully execute a <tt class="docutils literal">DELETE</tt> request from
+any client on the internet and destroy critical records - you're going
+to have a bad time. Don't forget that HTTP is stateless, and the client
+is not required to send you a preflight request before a <tt class="docutils literal">DELETE</tt>;
+as a matter of fact, all these requests can be easily spoofed using
+non-browser clients.</p>
+</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>You may wonder why <tt class="docutils literal">POST</tt> is considered to be safe; unfortunately, it's
+not a good technical reason but rather
+backward-compatibility. Forms do submits via <tt class="docutils literal">POST</tt> and this is
+something that worked historically, so <tt class="docutils literal">CORS</tt> couldn't interfere
+with that. In all fairness, it's a best practice to use
+<a class="reference external" href="https://en.wikipedia.org/wiki/Cross-site_request_forgery">CSRF protection</a>
+in forms anyway, so there's already a security mechanism applied.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

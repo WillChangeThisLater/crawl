@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Measuring context switching and memory overheads for Linux threads - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Measuring context switching and memory overheads for Linux threads">
+                        Measuring context switching and memory overheads for Linux threads
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> September 04, 2018 at 05:35</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/concurrency.html">Concurrency</a>
+        ,
+    <a href="../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../tag/linux.html">Linux</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>In this post I want to explore the costs of threads on modern Linux machines,
+both in terms of time and space. The background context is designing high-load
+concurrent servers, where <a class="reference external" href="../../2017/concurrent-servers-part-2-threads/index.html">using threads is one of the common schemes</a>.</p>
+<p>Important disclaimer: it's not my goal here to provide an opinion in the threads
+vs. event-driven models debate. Ultimately, both are tools that work well in
+some scenarios and less well in others. That said, one of the major criticisms
+of a thread-based model is the cost - comments like &quot;but context switches are
+expensive!&quot; or &quot;but a thousand threads will eat up all your RAM!&quot;, and I do
+intend to study the data underlying such claims in more detail here. I'll do
+this by presenting multiple code samples and programs that make it easy to
+explore and experiment with these measurements.</p>
+<div class="section" id="linux-threads-and-nptl">
+<h2>Linux threads and NPTL</h2>
+<p>In the dark, old ages before version 2.6, the Linux kernel didn't have much
+specific support for threads, and they were more-or-less hacked on top of
+process support. Before <a class="reference external" href="../basics-of-futexes/index.html">futexes</a> there was no dedicated
+low-latency synchronization solution (it was done using signals); neither was
+there much good use of the capabilities of multi-core systems <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>.</p>
+<p>The Native POSIX Thread Library (NPTL) was proposed by Ulrich Drepper and Ingo
+Molnar from Red Hat, and integrated into the kernel in version 2.6, circa 2005.
+I warmly recommend reading its <a class="reference external" href="https://www.akkadia.org/drepper/nptl-design.pdf">design paper</a>. With NPTL, thread creation
+time became about 7x faster, and synchronization became much faster as well due
+to the use of futexes. Threads and processes became more lightweight, with
+strong emphasis on making good use of multi-core processors. This roughly
+coincided with a <a class="reference external" href="https://en.wikipedia.org/wiki/O(1)_scheduler">much more efficient scheduler</a>, which made juggling many
+threads in the Linux kernel even more efficient.</p>
+<p>Even though all of this happened 13 years ago, the spirit of NPTL is still
+easily observable in some system programming code. For example, many thread and
+synchronization-related paths in <tt class="docutils literal">glibc</tt> have <tt class="docutils literal">nptl</tt> in their name.</p>
+</div>
+<div class="section" id="threads-processes-and-the-clone-system-call">
+<h2>Threads, processes and the clone system call</h2>
+<p>This was originally meant to be a part of this larger article, but it was
+getting too long so I split off a separate post on <a class="reference external" href="../launching-linux-threads-and-processes-with-clone/index.html">launching Linux processes
+and threads with clone</a>,
+where you can learn about the <tt class="docutils literal">clone</tt> system call and some measurements of how
+expensive it is to launch new processes and threads.</p>
+<p>The rest of this post will assume this is familiar information and will focus
+on context switching and memory usage.</p>
+</div>
+<div class="section" id="what-happens-in-a-context-switch">
+<h2>What happens in a context switch?</h2>
+<p>In the Linux kernel, this question has two important parts:</p>
+<ol class="arabic simple">
+<li><em>When</em> does a kernel switch happen</li>
+<li><em>How</em> it happens</li>
+</ol>
+<p>The following deals mostly with (2), assuming the kernel has already decided to
+switch to a different user thread (for example because the currently running
+thread went to sleep waiting for I/O).</p>
+<p>The first thing that happens during a context switch is a switch to kernel mode,
+either through an explicit system call (such as <tt class="docutils literal">write</tt> to some file or pipe)
+or a timer interrupt (when the kernel preempts a user thread whose time slice
+has expired). This requires saving the user space thread's registers and
+jumping into kernel code.</p>
+<p>Next, the scheduler kicks in to figure out which thread should run next. When
+we know which thread runs next, there's the important bookkeeping of virtual
+memory to take care of; the page tables of the new thread have to be loaded into
+memory, etc.</p>
+<p>Finally, the kernel restores the new thread's registers and cedes control back
+to user space.</p>
+<p>All of this takes time, but how much time, exactly? I encourage you to read some
+additional online resources that deal with this question, and try to run
+benchmarks like <a class="reference external" href="http://www.bitmover.com/lmbench/">lm_bench</a>; what follows is
+my attempt to quantify thread switching time.</p>
+</div>
+<div class="section" id="how-expensive-are-context-switches">
+<h2>How expensive are context switches?</h2>
+<p>To measure how long it takes to switch between two threads, we need a benchmark
+that deliberatly triggers a context switch and avoids doing too much work in
+addition to that. This would be measuring just the <em>direct</em> cost of the switch,
+when in reality there is another cost - the <em>indirect</em> one, which could even
+be larger. Every thread has some working set of memory, all or some of which
+is in the cache; when we switch to another thread, all this cache data becomes
+unneeded and is slowly flushed out, replaced by the new thread's data. Frequent
+switches back and forth between the two threads will cause a lot of such
+thrashing.</p>
+<p>In my benchmarks I am not measuring this indirect cost, because it's pretty
+difficult to avoid in any form of multi-tasking. Even if we &quot;switch&quot; between
+different asynchronous event handlers within the same thread, they will likely
+have different memory working sets and will interfere with each other's cache
+usage if those sets are large enough. I strongly recommend watching <a class="reference external" href="https://youtu.be/KXuZi9aeGTw">this
+talk on fibers</a> where a Google engineer explains
+their measurement methodology and also how to avoid too much indirect switch
+costs by making sure closely related tasks run with temporal locality.</p>
+<p><a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2018/threadoverhead">These code samples</a>
+measure context switching overheads using two different techniques:</p>
+<ol class="arabic simple">
+<li>A pipe which is used by two threads to ping-pong a tiny amount of data.
+Every <tt class="docutils literal">read</tt> on the pipe blocks the reading thread, and the kernel switches
+to the writing thread, and so on.</li>
+<li>A condition variable used by two threads to signal an event to each other.</li>
+</ol>
+<img alt="Ping pong paddles and ball" class="align-center" src="../../images/2018/ping-pong.png" />
+<p>There are additional factors context switching time depends on; for example,
+on a multi-core CPU, the kernel can occasionally migrate a thread between cores
+because the core a thread has been previously using is occupied. While this
+helps utilize more cores, such switches cost more than staying on the same core
+(again, due to cache effects). Benchmarks can try to restrict this by running
+with <tt class="docutils literal">taskset</tt> pinning affinity to one core, but it's important to keep in
+mind this only models a lower bound.</p>
+<p>Using the two techniques I'm getting fairly similar results: somewhere between
+1.2 and 1.5 microseconds per context switch, accounting only for the direct
+cost, and pinning to a single core to avoid migration costs. Without pinning,
+the switch time goes up to ~2.2 microseconds <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>. These numbers are largely
+consistent with the reports in the fibers talk mentioned above, and also with
+other benchmarks found online (like <tt class="docutils literal">lat_ctx</tt> from <tt class="docutils literal">lmbench</tt>).</p>
+</div>
+<div class="section" id="what-does-this-mean-in-practice">
+<h2>What does this mean in practice?</h2>
+<p>So we have the numbers now, but what do they mean? Is 1-2 us a long time? As I
+have mentioned in <a class="reference external" href="../launching-linux-threads-and-processes-with-clone/index.html">the post on launch overheads</a>,
+a good comparison is <tt class="docutils literal">memcpy</tt>, which takes 3 us for 64 KiB on the same
+machine. In other words, a context switch is a bit quicker than copying 64 KiB
+of memory from one location to another.</p>
+<img alt="Plot of thread/process launch and context switch" class="align-center" src="../../images/2018/plot-launch-switch.png" />
+<p>1-2 us is not a long time by any measure, except when you're really trying to
+optimize for extremely low latencies or high loads.</p>
+<p>As an example of an artificially high load, <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2018/threadoverhead/thread-pipe-msgpersec.c">here is another benchmark</a>
+which writes a short message into a pipe and expects to read it from another
+pipe. On the other end of the two pipes is a thread that echoes one into the
+other.</p>
+<p>Running the benchmark on the same machine I used to measure the context switch
+times, I get ~400,000 iterations per second (this is with <tt class="docutils literal">taskset</tt> to pin
+to a single core). This makes perfect sense given the earlier measurements,
+because each iteration of this test performs two context switches, and at 1.2 us
+per switch this is 2.4 us per iteration.</p>
+<p>You could claim that the two threads compete for the same CPU, but if I don't
+pin the benchmark to a single core, the number of iterations per second
+<em>halves</em>. This is because the vast majority of time in this benchmark is spent
+in the kernel switching from one thread to the other, and the core migrations
+that occur when it's not pinned greatly ouweigh the loss of (the very minimal)
+parallelism.</p>
+<p>Just for fun, I rewrote the <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2018/threadoverhead/channel-msgpersec.go">same benchmark in Go</a>;
+two goroutines ping-ponging short message between themselves over a channel. The
+throughput this achieves is <em>dramatically</em> higher - around 2.8 million
+iterations per second, which leads to an estimate of ~170 ns switching between
+goroutines <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>. Since switching between goroutines doesn't require an actual
+kernel context switch (or even a system call), this isn't too surprising. For
+comparison, <a class="reference external" href="https://youtu.be/KXuZi9aeGTw">Google's fibers</a> use a new Linux
+system call that can switch between two tasks in about the same time,
+<em>including</em> the kernel time.</p>
+<p>A word of caution: benchmarks tend to be taken too seriously. Please take this
+one only for what it demonstrates - a largely synthetical workload used to
+poke into the cost of some fundamental concurrency primitives.</p>
+<p>Remember - it's quite unlikely that the actual workload of your task will be
+negligible compared to the 1-2 us context switch; as we've seen, even a modest
+<tt class="docutils literal">memcpy</tt> takes longer. Any sort of server logic such as parsing headers,
+updating state, etc. is likely to take orders of magnitude longer. If there's
+one takeaway to remember from these sections is that context switching on modern
+Linux systems is <em>super fast</em>.</p>
+</div>
+<div class="section" id="memory-usage-of-threads">
+<h2>Memory usage of threads</h2>
+<p>Now it's time to discuss the other overhead of a large number of threads -
+memory. Even though all threads in a process share their, there are
+still areas of memory that aren't shared. In the <a class="reference external" href="../launching-linux-threads-and-processes-with-clone/index.html">post about clone</a>
+we've mentioned <em>page tables</em> in the kernel, but these are comparatively small.
+A much larger memory area that it private to each thread is the <em>stack</em>.</p>
+<p>The default per-thread stack size on Linux is usually 8 MiB, and we can check
+what it is by invoking <tt class="docutils literal">ulimit</tt>:</p>
+<div class="highlight"><pre><span></span>$ ulimit -s
+8192
+</pre></div>
+<p>To see this in action, let's start a large number of threads and observe the
+process's memory usage. <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2018/threadoverhead/threadspammer.c">This sample</a>
+launches 10,000 threads and sleeps for a bit to let us observe its memory usage
+with external tools. Using tools like <tt class="docutils literal">top</tt> (or preferably <tt class="docutils literal">htop</tt>) we see
+that the process uses ~80 GiB of <em>virtual</em> memory, with about 80 MiB of
+<em>resident</em> memory. What is the difference, and how can it use 80 GiB of memory
+on a machine that only has 16 available?</p>
+</div>
+<div class="section" id="virtual-vs-resident-memory">
+<h2>Virtual vs. Resident memory</h2>
+<p>A short interlude on what virtual memory means. When a Linux program allocates
+memory (with <tt class="docutils literal">malloc</tt>) or otherwise, this memory initially doesn't really
+exist - it's just an entry in a table the OS keeps. Only when the program
+actually accesses the memory is the backing RAM for it found; this is what
+virtual memory is all about.</p>
+<p>Therefore, the &quot;memory usage&quot; of a process can mean two things - how much
+<em>virtual</em> memory it uses overall, and how much <em>actual</em> memory it uses. While
+the former can grow almost without bounds - the latter is obviously limited to
+the system's RAM capacity (with swapping to disk being the other mechanism of
+virtual memory to assist here if usage grows above the side of physical memory).
+The actual physical memory on Linux is called &quot;resident&quot; memory, because it's
+actually resident in RAM.</p>
+<p>There's a <a class="reference external" href="https://stackoverflow.com/q/7880784">good StackOverflow discussion</a>
+of this topic; here I'll just limit myself to a simple example:</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="o">**</span><span class="w"> </span><span class="n">argv</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">report_memory</span><span class="p">(</span><span class="s">&quot;started&quot;</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">N</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">100</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1024</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kt">int</span><span class="o">*</span><span class="w"> </span><span class="n">m</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">malloc</span><span class="p">(</span><span class="n">N</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="kt">int</span><span class="p">));</span><span class="w"></span>
+<span class="w">  </span><span class="n">escape</span><span class="p">(</span><span class="n">m</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">report_memory</span><span class="p">(</span><span class="s">&quot;after malloc&quot;</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">N</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">m</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">i</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="n">report_memory</span><span class="p">(</span><span class="s">&quot;after touch&quot;</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;press ENTER</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="kt">void</span><span class="p">)</span><span class="n">fgetc</span><span class="p">(</span><span class="n">stdin</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This program starts by allocating 400 MiB of memory (assuming an <tt class="docutils literal">int</tt> size of
+4) with <tt class="docutils literal">malloc</tt>, and later &quot;touches&quot; this memory by writing a number into
+every element of the allocated array. It reports its own memory usage at every
+step - see <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2018/threadoverhead/malloc-memusage.c">the full code sample</a>
+for the reporting code <a class="footnote-reference" href="index.html#footnote-4" id="footnote-reference-4">[4]</a>. Here's the output from a sample run:</p>
+<div class="highlight"><pre><span></span>$ ./malloc-memusage
+started: max RSS = 4780 kB; vm size = 6524 kB
+after malloc: max RSS = 4780 kB; vm size = 416128 kB
+after touch: max RSS = 410916 kB; vm size = 416128 kB
+</pre></div>
+<p>The most interesting thing to note is how <tt class="docutils literal">vm size</tt> remains the same between
+the second and third steps, while <tt class="docutils literal">max RSS</tt> grows from the initial value to
+400 MiB. This is precisely because until we touch the memory, it's fully
+&quot;virtual&quot; and isn't actually counted for the process's RAM usage.</p>
+<p>Therefore, distinguishing between virtual memory and RSS in realistic usage is
+very important - this is why the thread launching sample from the previous section
+could &quot;allocate&quot; 80 GiB of virtual memory while having only 80 MiB of resident
+memory.</p>
+</div>
+<div class="section" id="back-to-memory-overhead-for-threads">
+<h2>Back to memory overhead for threads</h2>
+<p>As we've seen, a new thread on Linux is created with 8 MiB of stack space, but
+this is virtual memory until the thread actually uses it. If the thread actually
+uses its stack, resident memory usage goes up dramatically for a large number of
+threads. I've added a configuration option to the sample program that launches a
+large number of threads; with it enabled, the thread function actually <em>uses</em>
+stack memory and from the RSS report it is easy to observe the effects.
+Curiously, if I make each of 10,000 threads use 400 KiB of memory, the total RSS
+is not 4 GiB but around 2.6 GiB <a class="footnote-reference" href="index.html#footnote-5" id="footnote-reference-5">[5]</a>.</p>
+<p>How to we control the stack size of threads? One option is using the <tt class="docutils literal">ulimit</tt>
+command, but a better option is with the <tt class="docutils literal">pthread_attr_setstacksize</tt> API. The
+latter is invoked programatically and populates a <tt class="docutils literal">pthread_attr_t</tt> structure
+that's passed to thread creation. The more interesting question is - what should
+the stack size be set to?</p>
+<p>As we have seen above, just creating a large stack for a thread doesn't
+automatically eat up all the machine's memory - not before the stack is
+being used. If our threads actually <em>use</em> large amounts of stack memory, this is
+a problem, because this severely limits the number of threads we can run
+concurrently. Note that this is not really a problem with threads - but with
+concurrency; if our program uses some event-driven approach to concurrency and
+each handler uses a large amount of memory, we'd still have the same problem.</p>
+<p>If the task doesn't actually use a lot of memory, what should we set the stack
+size to? Small stacks keep the OS safe - a deviant program may get into an
+infinite recursion and a small stack will make sure it's killed early. Moreover,
+virtual memory is large but not unlimited; especially on 32-bit OSes, we might
+not have 80 GiB of virtual address space for the process, so a 8 MiB stack for
+10,000 threads makes no sense. There's a tradeoff here, and the default chosen
+by 32-bit Linux is 2 MiB; the maximal virtual address space available is 3 GiB,
+so this imposes a limit of ~1500 threads with the default settings. On 64-bit
+Linux the virtual address space is vastly larger, so this limitation is less
+serious (though other limits kick in - on my machine the maximal number of
+threads the OS lets one process start is about 32K).</p>
+<p>Therefore I think it's more important to focus on how much actual memory each
+concurrent task is using than on the OS stack size limit, as the latter is
+simply a safety measure.</p>
+</div>
+<div class="section" id="conclusion">
+<h2>Conclusion</h2>
+<p>The numbers reported here paint an interesting picture on the state of Linux
+multi-threaded performance in 2018. I would say that the limits still
+exist - running a million threads is probably not going to make sense; however,
+the limits have definitely shifted since the past, and a lot of folklore from
+the early 2000s doesn't apply today. On a beefy multi-core machine with lots
+of RAM we can easily run 10,000 threads in a single process today, in
+production. As I've mentioned above, it's highly recommended to watch Google's
+<a class="reference external" href="https://youtu.be/KXuZi9aeGTw">talk on fibers</a>; through careful tuning of
+the kernel (and setting smaller default stacks) Google is able to run an order
+of magnitude more threads in parallel.</p>
+<p>Whether this is sufficient concurrency for your application is very obviously
+project-specific, but I'd say that for higher concurrencies you'd probably want
+to mix in some asynchronous processing. If 10,000 threads can provide sufficient
+concurrency - you're in luck, as this is a much simpler model - all the code
+within the threads is serial, there are no issues with blocking, etc.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>For example, in order to implement POSIX semantics properly, a
+single thread was designated as a &quot;manager&quot; and managed operations like
+&quot;create a new thread&quot;. This created an unfortunate serialization point
+and a bottleneck.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>These numbers also vary greatly between CPUs. The numbers reported herein
+are on my Haswell i7-4771. On a different contemporary machine (a low-end
+Xeon) I measured switch times that were about 50-75% longer.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>Curiously, pinning the Go program to a single core (by means of
+setting <tt class="docutils literal">GOMAXPROCS=1</tt> and running with <tt class="docutils literal">taskset</tt>) increases the
+throughput by only by 10% or so. The Go scheduler is not optimized for
+this strange use case of endless hammering between two goroutine, but it
+performs very well regardless.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-4">[4]</a></td><td>Note that while for resident memory there's a convenient <tt class="docutils literal">getrusage</tt>
+API, to report virtual memory size we have to parse <tt class="docutils literal">/proc/PID/status</tt>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-5">[5]</a></td><td>According to Tom Dryer, recent Linux version only approximate this usage,
+which could explain the discrepancy - see <a class="reference external" href="https://gist.github.com/tdryer/7ef02a89169252552978b6773c731109">this explanation</a>.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

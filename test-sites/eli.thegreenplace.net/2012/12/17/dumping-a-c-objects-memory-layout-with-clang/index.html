@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Dumping a C++ object's memory layout with Clang - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../../index.html" class="navbar-brand">
+                <img src="../../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="../dumping-a-c-objects-memory-layout-with-clang.html"
+                       rel="bookmark"
+                       title="Permalink to Dumping a C++ object's memory layout with Clang">
+                        Dumping a C++ object's memory layout with Clang
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> December 17, 2012 at 05:25</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../../../tag/llvm-clang.html">LLVM & Clang</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>When one wants to understand the memory layout of structures and classes, the C/C++ operators <tt class="docutils literal">sizeof</tt> and <tt class="docutils literal">offsetof</tt> are very useful. However, when large C++ class hierarchies are involved, using these operators becomes tedious. Luckily, Clang has a very handly command-line flag to dump object layouts in a useful manner. This flag is somewhat hidden since it's only accepted by the Clang front-end (the one you get when you pass <tt class="docutils literal"><span class="pre">-cc1</span></tt> to <tt class="docutils literal">clang</tt>) and not the gcc-compatible compiler driver (the one you get when simply executing <tt class="docutils literal">clang</tt>).</p>
+<p>Consider this code, for example:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">Base</span> {
+<span style="color: #00007f; font-weight: bold">protected</span>:
+  <span style="color: #00007f; font-weight: bold">int</span> foo;
+<span style="color: #00007f; font-weight: bold">public</span>:
+  <span style="color: #00007f; font-weight: bold">int</span> method(<span style="color: #00007f; font-weight: bold">int</span> p) {
+    <span style="color: #00007f; font-weight: bold">return</span> foo + p;
+  }
+};
+
+<span style="color: #00007f; font-weight: bold">struct</span> Point {
+  <span style="color: #00007f; font-weight: bold">double</span> cx, cy;
+};
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">Derived</span> : <span style="color: #00007f; font-weight: bold">public</span> Base {
+<span style="color: #00007f; font-weight: bold">public</span>:
+  <span style="color: #00007f; font-weight: bold">int</span> method(<span style="color: #00007f; font-weight: bold">int</span> p) {
+    <span style="color: #00007f; font-weight: bold">return</span> foo + bar + p;
+  }
+<span style="color: #00007f; font-weight: bold">protected</span>:
+  <span style="color: #00007f; font-weight: bold">int</span> bar, baz;
+  Point a_point;
+  <span style="color: #00007f; font-weight: bold">char</span> c;
+};
+
+<span style="color: #00007f; font-weight: bold">int</span> main(<span style="color: #00007f; font-weight: bold">int</span> argc, <span style="color: #00007f; font-weight: bold">char</span>** argv) {
+  <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f; font-weight: bold">sizeof</span>(Derived);
+}
+</pre></div>
+<p>To see the layout, run <tt class="docutils literal">clang <span class="pre">-cc1</span> <span class="pre">-fdump-record-layouts</span> myfile.cpp</tt>. It will produce a separate report for each class and struct defined, but the most interesting one is for <tt class="docutils literal">class Derived</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">*** Dumping AST Record Layout
+   0 | class Derived
+   0 |   class Base (base)
+   0 |     int foo
+   4 |   int bar
+   8 |   int baz
+  16 |   struct Point a_point
+  16 |     double cx
+  24 |     double cy
+     |   [sizeof=16, dsize=16, align=8
+     |    nvsize=16, nvalign=8]
+
+  32 |   char c
+     | [sizeof=40, dsize=33, align=8
+     |  nvsize=33, nvalign=8]
+</pre></div>
+<p>(the above is the output of Clang 3.2 running on 64-bit Linux)</p>
+<p>We can see the layout of <tt class="docutils literal">Derived</tt> objects, with the offset of every field (including the fields coming from base classes) in the left-most column. Some additional information is printed in the bottom - for example, sizeof - the total size, and dsize - data size without tail padding.</p>
+<p>If we make <tt class="docutils literal">method</tt> virtual in the <tt class="docutils literal">Base</tt> and <tt class="docutils literal">Derived</tt> classes, the size of the virtual-table pointer is also accounted for:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">*** Dumping AST Record Layout
+   0 | class Derived
+   0 |   class Base (primary base)
+   0 |     (Base vtable pointer)
+   0 |     (Base vftable pointer)
+   8 |     int foo
+  12 |   int bar
+  16 |   int baz
+  24 |   struct Point a_point
+  24 |     double cx
+  32 |     double cy
+     |   [sizeof=16, dsize=16, align=8
+     |    nvsize=16, nvalign=8]
+
+  40 |   char c
+     | [sizeof=48, dsize=41, align=8
+     |  nvsize=41, nvalign=8]
+</pre></div>
+<p>I'll wrap up with a tip about using <tt class="docutils literal">clang <span class="pre">-cc1</span></tt>. Since this isn't the compiler driver, it won't go look for standard headers in the expected places, so using it on realistic source files can be a pain. The easiest way to do it, IMHO, is to run it on preprocessed source. How your source gets preprocessed depends on your build process, but it's usually something like:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">clang -E [your -I flags] myfile.cpp &gt; myfile_pp.cpp
+</pre></div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../../theme/js/count.js"></script>
+</body>
+</html>

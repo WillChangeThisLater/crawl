@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Co-routines as an alternative to state machines - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="co-routines-as-an-alternative-to-state-machines.html"
+                       rel="bookmark"
+                       title="Permalink to Co-routines as an alternative to state machines">
+                        Co-routines as an alternative to state machines
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> August 29, 2009 at 14:32</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/python.html">Python</a>
+        ,
+    <a href="../../../tag/serial-port.html">Serial port</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <div class="section" id="jib">
+<p>Observation:</p>
+<blockquote>
+Co-routines are to state machines what recursion is to stacks</blockquote>
+<p>When you have to traverse some sort of a nested data structure (say, a binary tree), one approach is to create a stack that remembers where in the tree you are. Another, much more elegant approach, is to write the function recursively. A recursive function employs the machine stack used to implicitly implement function calls - you get the benefits of the stack without paying the cost of reduced readability.</p>
+<p>In this article I'll try to show, using a simple, yet very realistic example why co-routines do the same to state machines.</p>
+<div class="section" id="the-problem-serial-framing">
+<h4>The problem - serial framing</h4>
+<p>I've written a detailed <a class="reference external" href="../12/framing-in-serial-communications/index.html">article</a> about framing earlier this month. The simple summary is: we have an endless incoming stream of bytes, from which we need to deduce structured data frames. That is, we have to find where a frame starts, where it ends and what is the data it carries. For this purpose we use a special header value, footer value and an escape byte (DLE).</p>
+<p>A complete Python implementation is described <a class="reference external" href="../20/frames-and-protocols-for-the-serial-port-in-python/index.html">here</a>, but in this article I will present the solution in a simplified manner, keeping all irrelevant details out.</p>
+</div>
+<div class="section" id="the-state-machine">
+<h4>The state machine</h4>
+<p>Given a stream and receiving one byte at a time, here is the state machine that describes the framing process:</p>
+<img class="align-center" style="width: 285px;" src="../../../images/2009/08/statemachine1_framing.png" />
+<p>Only inputs and state transitions are shown. The framing process outputs complete frames when moving from the <tt class="docutils literal"><span class="pre">IN_MSG</span></tt> state to the <tt class="docutils literal"><span class="pre">WAIT_HEADER</span></tt> stage (this happens when a footer is received) <a class="footnote-reference" href="co-routines-as-an-alternative-to-state-machines.html#id4" id="id1">[1]</a></p>
+</div>
+<div class="section" id="implementing-the-state-machine">
+<h4>Implementing the state machine</h4>
+<p>Here's an implementation of this state machine in Python. The internal state is kept in an object:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">ProtocolWrapper</span>(<span style="color: #00007f">object</span>):
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">__init__</span>(<span style="color: #00007f">self</span>,
+            header=<span style="color: #7f007f">&#39;\x61&#39;</span>,
+            footer=<span style="color: #7f007f">&#39;\x62&#39;</span>,
+            dle=<span style="color: #7f007f">&#39;\xAB&#39;</span>,
+            after_dle_func=<span style="color: #00007f; font-weight: bold">lambda</span> x: x):
+        <span style="color: #00007f">self</span>.header = header
+        <span style="color: #00007f">self</span>.footer = footer
+        <span style="color: #00007f">self</span>.dle = dle
+        <span style="color: #00007f">self</span>.after_dle_func = after_dle_func
+
+        <span style="color: #00007f">self</span>.state = <span style="color: #00007f">self</span>.WAIT_HEADER
+        <span style="color: #00007f">self</span>.frame = <span style="color: #7f007f">&#39;&#39;</span>
+
+    <span style="color: #007f00"># internal state</span>
+    (WAIT_HEADER, IN_MSG, AFTER_DLE) = <span style="color: #00007f">range</span>(<span style="color: #007f7f">3</span>)
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">input</span>(<span style="color: #00007f">self</span>, byte):
+        <span style="color: #7f007f">&quot;&quot;&quot; Receive a byte.</span>
+<span style="color: #7f007f">            If this byte completes a frame, the</span>
+<span style="color: #7f007f">            frame is returned. Otherwise, None</span>
+<span style="color: #7f007f">            is returned.</span>
+<span style="color: #7f007f">        &quot;&quot;&quot;</span>
+        <span style="color: #00007f; font-weight: bold">if</span> <span style="color: #00007f">self</span>.state == <span style="color: #00007f">self</span>.WAIT_HEADER:
+            <span style="color: #00007f; font-weight: bold">if</span> byte == <span style="color: #00007f">self</span>.header:
+                <span style="color: #00007f">self</span>.state = <span style="color: #00007f">self</span>.IN_MSG
+                <span style="color: #00007f">self</span>.frame = <span style="color: #7f007f">&#39;&#39;</span>
+
+            <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">None</span>
+        <span style="color: #00007f; font-weight: bold">elif</span> <span style="color: #00007f">self</span>.state == <span style="color: #00007f">self</span>.IN_MSG:
+            <span style="color: #00007f; font-weight: bold">if</span> byte == <span style="color: #00007f">self</span>.footer:
+                <span style="color: #00007f">self</span>.state = <span style="color: #00007f">self</span>.WAIT_HEADER
+                <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">self</span>.frame
+            <span style="color: #00007f; font-weight: bold">elif</span> byte == <span style="color: #00007f">self</span>.dle:
+                <span style="color: #00007f">self</span>.state = <span style="color: #00007f">self</span>.AFTER_DLE
+            <span style="color: #00007f; font-weight: bold">else</span>:
+                <span style="color: #00007f">self</span>.frame += byte
+            <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">None</span>
+        <span style="color: #00007f; font-weight: bold">elif</span> <span style="color: #00007f">self</span>.state == <span style="color: #00007f">self</span>.AFTER_DLE:
+            <span style="color: #00007f">self</span>.frame += <span style="color: #00007f">self</span>.after_dle_func(byte)
+            <span style="color: #00007f">self</span>.state = <span style="color: #00007f">self</span>.IN_MSG
+            <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">None</span>
+        <span style="color: #00007f; font-weight: bold">else</span>:
+            <span style="color: #00007f; font-weight: bold">raise</span> AssertionError()
+</pre></div>
+<p>Note that the code of the <tt class="docutils literal"><span class="pre">input</span></tt> method closely follows the state diagram. This is how implementations of state machines are - it's generally difficult to understand what's going on in the code without having some sort of a state diagram in front of your eyes. In this case the state machine has just 3 states, but it can be easily 20 for more complex needs. Understanding such a state function with 20 states is impossible without a diagram.</p>
+<p>Anyhow, here's some test code that simulates a stream of data with a couple of frames and invalid data in between:</p>
+<div class="highlight"><pre>bytes = <span style="color: #7f007f">&#39;&#39;</span>.join(<span style="color: #00007f">chr</span>(b) <span style="color: #00007f; font-weight: bold">for</span> b <span style="color: #0000aa">in</span>
+            [<span style="color: #007f7f">0</span>x70, <span style="color: #007f7f">0</span>x24,
+             <span style="color: #007f7f">0</span>x61, <span style="color: #007f7f">0</span>x99, <span style="color: #007f7f">0</span>xAF, <span style="color: #007f7f">0</span>xD1, <span style="color: #007f7f">0</span>x62,
+             <span style="color: #007f7f">0</span>x56, <span style="color: #007f7f">0</span>x62,
+             <span style="color: #007f7f">0</span>x61, <span style="color: #007f7f">0</span>xAB, <span style="color: #007f7f">0</span>xAB, <span style="color: #007f7f">0</span>x14, <span style="color: #007f7f">0</span>x62,
+             <span style="color: #007f7f">0</span>x7
+            ])
+
+pw = ProtocolWrapper()
+
+<span style="color: #00007f; font-weight: bold">for</span> byte <span style="color: #0000aa">in</span> bytes:
+    frame = pw.input(byte)
+    <span style="color: #00007f; font-weight: bold">if</span> frame:
+        <span style="color: #00007f; font-weight: bold">print</span> <span style="color: #7f007f">&#39;Got frame:&#39;</span>, frame.encode(<span style="color: #7f007f">&#39;hex&#39;</span>)
+</pre></div>
+<p>This prints:</p>
+<div class="highlight"><pre>Got frame: 99afd1
+Got frame: ab14
+</pre></div>
+</div>
+<div class="section" id="co-routines">
+<h4>Co-routines</h4>
+<p>I don't intend to teach the theory behind co-routines here, and I'll assume at least a basic familiarity with the concept. My goal is to show a real-life, relevant example that demonstrates how co-routines relate to state machines.</p>
+<p><a class="reference external" href="http://www.chiark.greenend.org.uk/~sgtatham/coroutines.html">This link</a> is a good tutorial on co-routines (in C, of all languages), and there's of course <a class="reference external" href="http://en.wikipedia.org/wiki/Coroutines">Wikipedia</a> and <a class="reference external" href="http://www.c2.com/cgi/wiki?CoRoutine">C2</a>. But the <strong>absolutely best</strong> tutorial, with focus on Python, is David Beazley's presentation from this year's PyCon: <a class="reference external" href="http://www.dabeaz.com/coroutines/index.html">A curious course on coroutines and concurrency</a>. It is while reading this tutorial that the connection finally 'clicked' in my head. It is most highly recommended <a class="footnote-reference" href="co-routines-as-an-alternative-to-state-machines.html#id5" id="id2">[2]</a>.</p>
+<p>If there's one description of co-routines you should remember while reading this article and later, it is that co-routines save the control state of a function between calls. Kinda like recursion - you know exactly where are you going to return after a function call.</p>
+<p>When you call a co-routine, it doesn't start all over from the beginning. Rather, it starts from right after where it returned (yielded control) the previous time it was called.</p>
+<p>This also explains why co-routines can replace state machines. The <tt class="docutils literal"><span class="pre">input</span></tt> method of <tt class="docutils literal"><span class="pre">ProtocolWrapper</span></tt> is invoked multiple times. Since it's a &quot;normal&quot; function, it begins running from its first line for each invocation. This is why it needs to keep a state machine - to know it's current &quot;place in the world&quot; when the next byte is received. With co-routines this isn't necessary - co-routines start exactly where they stopped the previous time they were called - so no state keeping is required!</p>
+</div>
+<div class="section" id="using-co-routines-for-framing">
+<h4>Using co-routines for framing</h4>
+<p>Without further ado, here is the co-routine implementation of the framing problem:</p>
+<div class="highlight"><pre>@coroutine
+<span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">unwrap_protocol</span>(header=<span style="color: #7f007f">&#39;\x61&#39;</span>,
+                    footer=<span style="color: #7f007f">&#39;\x62&#39;</span>,
+                    dle=<span style="color: #7f007f">&#39;\xAB&#39;</span>,
+                    after_dle_func=<span style="color: #00007f; font-weight: bold">lambda</span> x: x,
+                    target=<span style="color: #00007f">None</span>):
+    <span style="color: #7f007f">&quot;&quot;&quot; Simplified framing (protocol unwrapping)</span>
+<span style="color: #7f007f">        co-routine.</span>
+<span style="color: #7f007f">    &quot;&quot;&quot;</span>
+    <span style="color: #007f00"># Outer loop looking for a frame header</span>
+    <span style="color: #007f00">#</span>
+    <span style="color: #00007f; font-weight: bold">while</span> <span style="color: #00007f">True</span>:
+        byte = (<span style="color: #00007f; font-weight: bold">yield</span>)
+        frame = <span style="color: #7f007f">&#39;&#39;</span>
+
+        <span style="color: #00007f; font-weight: bold">if</span> byte == header:
+            <span style="color: #007f00"># Capture the full frame</span>
+            <span style="color: #007f00">#</span>
+            <span style="color: #00007f; font-weight: bold">while</span> <span style="color: #00007f">True</span>:
+                byte = (<span style="color: #00007f; font-weight: bold">yield</span>)
+                <span style="color: #00007f; font-weight: bold">if</span> byte == footer:
+                    target.send(frame)
+                    <span style="color: #00007f; font-weight: bold">break</span>
+                <span style="color: #00007f; font-weight: bold">elif</span> byte == dle:
+                    byte = (<span style="color: #00007f; font-weight: bold">yield</span>)
+                    frame += after_dle_func(byte)
+                <span style="color: #00007f; font-weight: bold">else</span>:
+                    frame += byte
+</pre></div>
+<p>Look how simple and elegant it is. You can tell immediately what it does just by looking at the source code - no state diagrams are needed.</p>
+<p>We loop over frames. A frame starts with a header byte. After a header byte has been received, we accumulate the bytes of the frame until a footer is encountered. The <tt class="docutils literal"><span class="pre">(yield)</span></tt> calls is where the magic is. The function suspends at these points until it is called again <a class="footnote-reference" href="co-routines-as-an-alternative-to-state-machines.html#id6" id="id3">[3]</a>. Then, the value passed in the new call is returned from <tt class="docutils literal"><span class="pre">(yield)</span></tt> and the co-routine proceeds from the same place.</p>
+<p>Note how the state machine is <em>implicitly</em> embedded in this code. It's there, but you don't see it - it's hiding in the control structures (the IFs, ELSEs and the WHILEs) of the function.</p>
+<p>When a complete frame is received, it is sent to the <tt class="docutils literal"><span class="pre">target</span></tt> of the co-routine, which may process it at will. After executing <tt class="docutils literal"><span class="pre">send</span></tt>, the co-routine breaks out of the inner loop and suspends waiting for a new header in the outer loop.</p>
+<p>The <tt class="docutils literal"><span class="pre">&#64;coroutine</span></tt> decorator is a simple utility required for Python co-routines:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">coroutine</span>(func):
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">start</span>(*args,**kwargs):
+        cr = func(*args,**kwargs)
+        cr.next()
+        <span style="color: #00007f; font-weight: bold">return</span> cr
+    <span style="color: #00007f; font-weight: bold">return</span> start
+</pre></div>
+<p>This is needed to bring a co-routine to its first <tt class="docutils literal"><span class="pre">yield</span></tt> and suspend there. You can just use this decorator without worrying about the details, until you become more comfortable with the concept to understand the exact inner workings described in PEP 342.</p>
+<p>To test this co-routine implementation we also need a simple &quot;sink&quot; co-routine (using Dave Beazley's terminology from his presentation). This will be the receiver of the <tt class="docutils literal"><span class="pre">send</span></tt> calls made by our co-routine:</p>
+<div class="highlight"><pre>@coroutine
+<span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">frame_receiver</span>():
+    <span style="color: #7f007f">&quot;&quot;&quot; A simple co-routine &quot;sink&quot; for receiving</span>
+<span style="color: #7f007f">        full frames.</span>
+<span style="color: #7f007f">    &quot;&quot;&quot;</span>
+    <span style="color: #00007f; font-weight: bold">while</span> <span style="color: #00007f">True</span>:
+        frame = (<span style="color: #00007f; font-weight: bold">yield</span>)
+        <span style="color: #00007f; font-weight: bold">print</span> <span style="color: #7f007f">&#39;Got frame:&#39;</span>, frame.encode(<span style="color: #7f007f">&#39;hex&#39;</span>)
+
+bytes = <span style="color: #7f007f">&#39;&#39;</span>.join(<span style="color: #00007f">chr</span>(b) <span style="color: #00007f; font-weight: bold">for</span> b <span style="color: #0000aa">in</span>
+            [<span style="color: #007f7f">0</span>x70, <span style="color: #007f7f">0</span>x24,
+             <span style="color: #007f7f">0</span>x61, <span style="color: #007f7f">0</span>x99, <span style="color: #007f7f">0</span>xAF, <span style="color: #007f7f">0</span>xD1, <span style="color: #007f7f">0</span>x62,
+             <span style="color: #007f7f">0</span>x56, <span style="color: #007f7f">0</span>x62,
+             <span style="color: #007f7f">0</span>x61, <span style="color: #007f7f">0</span>xAB, <span style="color: #007f7f">0</span>xAB, <span style="color: #007f7f">0</span>x14, <span style="color: #007f7f">0</span>x62,
+             <span style="color: #007f7f">0</span>x7
+            ])
+
+unwrapper = unwrap_protocol(
+                target=frame_receiver())
+
+<span style="color: #00007f; font-weight: bold">for</span> byte <span style="color: #0000aa">in</span> bytes:
+    unwrapper.send(byte)
+</pre></div>
+<p>Prints:</p>
+<div class="highlight"><pre>Got frame: 99afd1
+Got frame: ab14
+</pre></div>
+</div>
+<div class="section" id="conclusion">
+<h4>Conclusion</h4>
+<p>I'll repeat the quote from the beginning of the article:</p>
+<blockquote>
+Co-routines are to state machines what recursion is to stacks</blockquote>
+<p>Recursion helps process nested data structures without employing explicit stacks.</p>
+<p>Similarly, co-routines help solve problems involving state, without using explicit state machines. The resulting code is not centered on the states, but rather on the logic of the tasks, which makes it much simpler to understand.</p>
+<p>Co-routines are a useful tool to have in one's toolbox. It is worthwhile to spend some time getting acquainted with them.</p>
+<div align="center" class="align-center"><img class="align-center" src="../../../images/hline.jpg" style="width: 320px; height: 5px;" /></div>
+<table class="docutils footnote" frame="void" id="id4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="co-routines-as-an-alternative-to-state-machines.html#id1">[1]</a></td><td>Such a state machine is called a <a class="reference external" href="http://en.wikipedia.org/wiki/Mealy">Mealy machine</a> - it generates output based on the current state <em>and</em> input. Most state machines implemented in software are of this type.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="co-routines-as-an-alternative-to-state-machines.html#id2">[2]</a></td><td>For Python there's also PEP 342 - but I recommend going over it only after you've read Dave's tutorial.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id6" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="co-routines-as-an-alternative-to-state-machines.html#id3">[3]</a></td><td>Technically, a co-routine is created once by calling it. Then, we have a &quot;co-routine object&quot; on which we can execute <tt class="docutils literal"><span class="pre">send</span></tt> methods, passing the arguments to <tt class="docutils literal"><span class="pre">yield</span></tt> via <tt class="docutils literal"><span class="pre">send</span></tt>. This is how co-routines are implemented in Python. It might look different in another language, but the concept stays the same.</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="co-routines-as-an-alternative-to-state-machines.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

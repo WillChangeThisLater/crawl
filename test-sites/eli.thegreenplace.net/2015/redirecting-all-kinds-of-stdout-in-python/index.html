@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Redirecting all kinds of stdout in Python - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Redirecting all kinds of stdout in Python">
+                        Redirecting all kinds of stdout in Python
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> February 20, 2015 at 05:46</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/python.html">Python</a>
+        ,
+    <a href="../../tag/linux.html">Linux</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>A common task in Python (especially while testing or debugging) is
+to redirect <tt class="docutils literal">sys.stdout</tt> to a stream or a file while executing some piece of
+code. However, simply &quot;redirecting <tt class="docutils literal">stdout</tt>&quot; is sometimes not as easy as one
+would expect; hence the slightly strange title of this post. In
+particular, things become interesting when you want C code running within your
+Python process (including, but not limited to, Python modules implemented as C
+extensions) to also have its <tt class="docutils literal">stdout</tt> redirected according to your wish. This
+turns out to be tricky and leads us into the interesting world of file
+descriptors, buffers and system calls.</p>
+<p>But let's start with the basics.</p>
+<div class="section" id="pure-python">
+<h2>Pure Python</h2>
+<p>The simplest case arises when the underlying Python code writes to <tt class="docutils literal">stdout</tt>,
+whether by calling <tt class="docutils literal">print</tt>, <tt class="docutils literal">sys.stdout.write</tt> or some equivalent method. If
+the code you have does all its printing from Python, redirection is very easy.
+With Python 3.4 we even have a built-in tool in the standard library for this
+purpose - <tt class="docutils literal">contextlib.redirect_stdout</tt>. Here's how to use it:</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">contextlib</span> <span class="kn">import</span> <span class="n">redirect_stdout</span>
+
+<span class="n">f</span> <span class="o">=</span> <span class="n">io</span><span class="o">.</span><span class="n">StringIO</span><span class="p">()</span>
+<span class="k">with</span> <span class="n">redirect_stdout</span><span class="p">(</span><span class="n">f</span><span class="p">):</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;foobar&#39;</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="mi">12</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="s1">&#39;Got stdout: &quot;</span><span class="si">{0}</span><span class="s1">&quot;&#39;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">f</span><span class="o">.</span><span class="n">getvalue</span><span class="p">()))</span>
+</pre></div>
+<p>When this code runs, the actual <tt class="docutils literal">print</tt> calls within the <tt class="docutils literal">with</tt> block don't
+emit anything to the screen, and you'll see their output captured by in the
+stream <tt class="docutils literal">f</tt>. Incidentally, note how perfect the <tt class="docutils literal">with</tt> statement is for this
+goal - everything within the block gets redirected; once the block is done,
+things are cleaned up for you and redirection stops.</p>
+<p>If you're stuck on an older and uncool Python, prior to 3.4 <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>, what then?
+Well, <tt class="docutils literal">redirect_stdout</tt> is really easy to implement on your own. I'll change
+its name slightly to avoid confusion:</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">contextlib</span> <span class="kn">import</span> <span class="n">contextmanager</span>
+
+<span class="nd">@contextmanager</span>
+<span class="k">def</span> <span class="nf">stdout_redirector</span><span class="p">(</span><span class="n">stream</span><span class="p">):</span>
+    <span class="n">old_stdout</span> <span class="o">=</span> <span class="n">sys</span><span class="o">.</span><span class="n">stdout</span>
+    <span class="n">sys</span><span class="o">.</span><span class="n">stdout</span> <span class="o">=</span> <span class="n">stream</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">yield</span>
+    <span class="k">finally</span><span class="p">:</span>
+        <span class="n">sys</span><span class="o">.</span><span class="n">stdout</span> <span class="o">=</span> <span class="n">old_stdout</span>
+</pre></div>
+<p>So we're back in the game:</p>
+<div class="highlight"><pre><span></span><span class="n">f</span> <span class="o">=</span> <span class="n">io</span><span class="o">.</span><span class="n">StringIO</span><span class="p">()</span>
+<span class="k">with</span> <span class="n">stdout_redirector</span><span class="p">(</span><span class="n">f</span><span class="p">):</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;foobar&#39;</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="mi">12</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="s1">&#39;Got stdout: &quot;</span><span class="si">{0}</span><span class="s1">&quot;&#39;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">f</span><span class="o">.</span><span class="n">getvalue</span><span class="p">()))</span>
+</pre></div>
+</div>
+<div class="section" id="redirecting-c-level-streams">
+<h2>Redirecting C-level streams</h2>
+<p>Now, let's take our shiny redirector for a more challenging ride:</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">ctypes</span>
+<span class="n">libc</span> <span class="o">=</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">CDLL</span><span class="p">(</span><span class="kc">None</span><span class="p">)</span>
+
+<span class="n">f</span> <span class="o">=</span> <span class="n">io</span><span class="o">.</span><span class="n">StringIO</span><span class="p">()</span>
+<span class="k">with</span> <span class="n">stdout_redirector</span><span class="p">(</span><span class="n">f</span><span class="p">):</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;foobar&#39;</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="mi">12</span><span class="p">)</span>
+    <span class="n">libc</span><span class="o">.</span><span class="n">puts</span><span class="p">(</span><span class="sa">b</span><span class="s1">&#39;this comes from C&#39;</span><span class="p">)</span>
+    <span class="n">os</span><span class="o">.</span><span class="n">system</span><span class="p">(</span><span class="s1">&#39;echo and this is from echo&#39;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="s1">&#39;Got stdout: &quot;</span><span class="si">{0}</span><span class="s1">&quot;&#39;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">f</span><span class="o">.</span><span class="n">getvalue</span><span class="p">()))</span>
+</pre></div>
+<p>I'm using <tt class="docutils literal">ctypes</tt> to directly invoke the C library's <tt class="docutils literal">puts</tt> function <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.
+This simulates what happens when C code called from within our Python code
+prints to <tt class="docutils literal">stdout</tt> - the same would apply to a Python module using a C
+extension. Another addition is the <tt class="docutils literal">os.system</tt> call to invoke a subprocess
+that also prints to <tt class="docutils literal">stdout</tt>. What we get from this is:</p>
+<div class="highlight"><pre><span></span>this comes from C
+and this is from echo
+Got stdout: &quot;foobar
+12
+&quot;
+</pre></div>
+<p>Err... no good. The <tt class="docutils literal">print</tt>s got redirected as expected, but the output from
+<tt class="docutils literal">puts</tt> and <tt class="docutils literal">echo</tt> flew right past our redirector and ended up in the
+terminal without being caught. What gives?</p>
+<p>To grasp why this didn't work, we have to first understand what <tt class="docutils literal">sys.stdout</tt>
+actually is in Python.</p>
+</div>
+<div class="section" id="detour-on-file-descriptors-and-streams">
+<h2>Detour - on file descriptors and streams</h2>
+<p>This section dives into some internals of the operating system, the C library,
+and Python <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>. If you just want to know how to properly redirect printouts
+from C in Python, you can safely skip to the next section (though understanding
+<em>how</em> the redirection works will be difficult).</p>
+<p>Files are opened by the OS, which keeps a system-wide table of open files, some
+of which may point to the same underlying disk data (two processes can have the
+same file open at the same time, each reading from a different place, etc.)</p>
+<p><em>File descriptors</em> are another abstraction, which is managed per-process. Each
+process has its own table of open file descriptors that point into the
+system-wide table. Here's a schematic, taken from <em>The Linux Programming
+Interface</em>:</p>
+<img alt="File descriptor diagram" class="align-center" src="../../images/2015/fd-inode-diagram.png" />
+<p>File descriptors allow sharing open files between processes (for example when
+creating child processes with <tt class="docutils literal">fork</tt>). They're also useful for redirecting
+from one entry to another, which is relevant to this post. Suppose that we make
+file descriptor 5 a copy of file descriptor 4. Then all writes to 5 will behave
+in the same way as writes to 4. Coupled with the fact that the standard output
+is just another file descriptor on Unix (usually index 1), you can see where
+this is going. The full code is given in the next section.</p>
+<p>File descriptors are not the end of the story, however. You can read and write
+to them with the <tt class="docutils literal">read</tt> and <tt class="docutils literal">write</tt> system calls, but this is not the way
+things are typically done. The C runtime library provides a convenient
+abstraction around file descriptors - streams. These are exposed to the
+programmer as the opaque <tt class="docutils literal">FILE</tt> structure with a set of functions that act on
+it (for example <tt class="docutils literal">fprintf</tt> and <tt class="docutils literal">fgets</tt>).</p>
+<p><tt class="docutils literal">FILE</tt> is a fairly complex structure, but the most important things to know
+about it is that it holds a file descriptor to which the actual system calls are
+directed, and it provides <em>buffering</em>, to ensure that the system call (which is
+expensive) is not called too often. Suppose you emit stuff to a binary file, a
+byte or two at a time. Unbuffered writes to the file descriptor with <tt class="docutils literal">write</tt>
+would be quite expensive because each write invokes a system call. On the other
+hand, using <tt class="docutils literal">fwrite</tt> is much cheaper because the typical call to this
+function just copies your data into its internal buffer and advances a pointer.
+Only occasionally (depending on the buffer size and flags) will an actual
+<tt class="docutils literal">write</tt> system call be issued.</p>
+<p>With this information in hand, it should be easy to understand what <tt class="docutils literal">stdout</tt>
+actually is for a C program. <tt class="docutils literal">stdout</tt> is a global <tt class="docutils literal">FILE</tt> object kept for us
+by the C library, and it buffers output to file descriptor number 1. Calls to
+functions like <tt class="docutils literal">printf</tt> and <tt class="docutils literal">puts</tt> add data into this buffer. <tt class="docutils literal">fflush</tt>
+forces its flushing to the file descriptor, and so on.</p>
+<p>But we're talking about Python here, not C. So how does Python translate calls
+to <tt class="docutils literal">sys.stdout.write</tt> to actual output?</p>
+<p>Python uses its own abstraction over the underlying file descriptor - a <a class="reference external" href="https://docs.python.org/dev/glossary.html#term-file-object">file
+object</a>. Moreover,
+in Python 3 this file object is further wrapped in an <tt class="docutils literal">io.TextIOWrapper</tt>,
+because what we pass to <tt class="docutils literal">print</tt> is a Unicode string, but the underlying
+<tt class="docutils literal">write</tt> system calls accept binary data, so encoding has to happen en route.</p>
+<p>The important take-away from this is: Python and a C extension loaded by it
+(this is similarly relevant to C code invoked via <tt class="docutils literal">ctypes</tt>) run in the same
+process, and share the underlying file descriptor for standard output. However,
+while Python has its own high-level wrapper around it - <tt class="docutils literal">sys.stdout</tt>, the C
+code uses its own <tt class="docutils literal">FILE</tt> object. Therefore, simply replacing <tt class="docutils literal">sys.stdout</tt>
+cannot, in principle, affect output from C code. To make the replacement deeper,
+we have to touch something shared by the Python and C runtimes - the file
+descriptor.</p>
+</div>
+<div class="section" id="redirecting-with-file-descriptor-duplication">
+<h2>Redirecting with file descriptor duplication</h2>
+<p>Without further ado, here is an improved <tt class="docutils literal">stdout_redirector</tt> that also
+redirects output from C code <a class="footnote-reference" href="index.html#footnote-4" id="footnote-reference-4">[4]</a>:</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">contextlib</span> <span class="kn">import</span> <span class="n">contextmanager</span>
+<span class="kn">import</span> <span class="nn">ctypes</span>
+<span class="kn">import</span> <span class="nn">io</span>
+<span class="kn">import</span> <span class="nn">os</span><span class="o">,</span> <span class="nn">sys</span>
+<span class="kn">import</span> <span class="nn">tempfile</span>
+
+<span class="n">libc</span> <span class="o">=</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">CDLL</span><span class="p">(</span><span class="kc">None</span><span class="p">)</span>
+<span class="n">c_stdout</span> <span class="o">=</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">c_void_p</span><span class="o">.</span><span class="n">in_dll</span><span class="p">(</span><span class="n">libc</span><span class="p">,</span> <span class="s1">&#39;stdout&#39;</span><span class="p">)</span>
+
+<span class="nd">@contextmanager</span>
+<span class="k">def</span> <span class="nf">stdout_redirector</span><span class="p">(</span><span class="n">stream</span><span class="p">):</span>
+    <span class="c1"># The original fd stdout points to. Usually 1 on POSIX systems.</span>
+    <span class="n">original_stdout_fd</span> <span class="o">=</span> <span class="n">sys</span><span class="o">.</span><span class="n">stdout</span><span class="o">.</span><span class="n">fileno</span><span class="p">()</span>
+
+    <span class="k">def</span> <span class="nf">_redirect_stdout</span><span class="p">(</span><span class="n">to_fd</span><span class="p">):</span>
+        <span class="sd">&quot;&quot;&quot;Redirect stdout to the given file descriptor.&quot;&quot;&quot;</span>
+        <span class="c1"># Flush the C-level buffer stdout</span>
+        <span class="n">libc</span><span class="o">.</span><span class="n">fflush</span><span class="p">(</span><span class="n">c_stdout</span><span class="p">)</span>
+        <span class="c1"># Flush and close sys.stdout - also closes the file descriptor (fd)</span>
+        <span class="n">sys</span><span class="o">.</span><span class="n">stdout</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+        <span class="c1"># Make original_stdout_fd point to the same file as to_fd</span>
+        <span class="n">os</span><span class="o">.</span><span class="n">dup2</span><span class="p">(</span><span class="n">to_fd</span><span class="p">,</span> <span class="n">original_stdout_fd</span><span class="p">)</span>
+        <span class="c1"># Create a new sys.stdout that points to the redirected fd</span>
+        <span class="n">sys</span><span class="o">.</span><span class="n">stdout</span> <span class="o">=</span> <span class="n">io</span><span class="o">.</span><span class="n">TextIOWrapper</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">fdopen</span><span class="p">(</span><span class="n">original_stdout_fd</span><span class="p">,</span> <span class="s1">&#39;wb&#39;</span><span class="p">))</span>
+
+    <span class="c1"># Save a copy of the original stdout fd in saved_stdout_fd</span>
+    <span class="n">saved_stdout_fd</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">dup</span><span class="p">(</span><span class="n">original_stdout_fd</span><span class="p">)</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="c1"># Create a temporary file and redirect stdout to it</span>
+        <span class="n">tfile</span> <span class="o">=</span> <span class="n">tempfile</span><span class="o">.</span><span class="n">TemporaryFile</span><span class="p">(</span><span class="n">mode</span><span class="o">=</span><span class="s1">&#39;w+b&#39;</span><span class="p">)</span>
+        <span class="n">_redirect_stdout</span><span class="p">(</span><span class="n">tfile</span><span class="o">.</span><span class="n">fileno</span><span class="p">())</span>
+        <span class="c1"># Yield to caller, then redirect stdout back to the saved fd</span>
+        <span class="k">yield</span>
+        <span class="n">_redirect_stdout</span><span class="p">(</span><span class="n">saved_stdout_fd</span><span class="p">)</span>
+        <span class="c1"># Copy contents of temporary file to the given stream</span>
+        <span class="n">tfile</span><span class="o">.</span><span class="n">flush</span><span class="p">()</span>
+        <span class="n">tfile</span><span class="o">.</span><span class="n">seek</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">io</span><span class="o">.</span><span class="n">SEEK_SET</span><span class="p">)</span>
+        <span class="n">stream</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">tfile</span><span class="o">.</span><span class="n">read</span><span class="p">())</span>
+    <span class="k">finally</span><span class="p">:</span>
+        <span class="n">tfile</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+        <span class="n">os</span><span class="o">.</span><span class="n">close</span><span class="p">(</span><span class="n">saved_stdout_fd</span><span class="p">)</span>
+</pre></div>
+<p>There are a lot of details here (such as managing the temporary file into which
+output is redirected) that may obscure the key approach: using <tt class="docutils literal">dup</tt> and
+<tt class="docutils literal">dup2</tt> to manipulate file descriptors. These functions let us duplicate file
+descriptors and make any descriptor point at any file. I won't spend more time
+on them - go ahead and read their documentation, if you're interested. The
+detour section should provide enough background to understand it.</p>
+<p>Let's try this:</p>
+<div class="highlight"><pre><span></span><span class="n">f</span> <span class="o">=</span> <span class="n">io</span><span class="o">.</span><span class="n">BytesIO</span><span class="p">()</span>
+
+<span class="k">with</span> <span class="n">stdout_redirector</span><span class="p">(</span><span class="n">f</span><span class="p">):</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;foobar&#39;</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="mi">12</span><span class="p">)</span>
+    <span class="n">libc</span><span class="o">.</span><span class="n">puts</span><span class="p">(</span><span class="sa">b</span><span class="s1">&#39;this comes from C&#39;</span><span class="p">)</span>
+    <span class="n">os</span><span class="o">.</span><span class="n">system</span><span class="p">(</span><span class="s1">&#39;echo and this is from echo&#39;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="s1">&#39;Got stdout: &quot;</span><span class="si">{0}</span><span class="s1">&quot;&#39;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">f</span><span class="o">.</span><span class="n">getvalue</span><span class="p">()</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="s1">&#39;utf-8&#39;</span><span class="p">)))</span>
+</pre></div>
+<p>Gives us:</p>
+<div class="highlight"><pre><span></span>Got stdout: &quot;and this is from echo
+this comes from C
+foobar
+12
+&quot;
+</pre></div>
+<p>Success! A few things to note:</p>
+<ol class="arabic simple">
+<li>The output order may not be what we expected. This is due to buffering. If
+it's important to preserve order between different kinds of output (i.e.
+between C and Python), further work is required to disable buffering on all
+relevant streams.</li>
+<li>You may wonder why the output of <tt class="docutils literal">echo</tt> was redirected at all? The answer
+is that file descriptors are <em>inherited</em> by subprocesses. Since we rigged fd
+1 to point to our file instead of the standard output prior to forking to
+<tt class="docutils literal">echo</tt>, this is where its output went.</li>
+<li>We use a <tt class="docutils literal">BytesIO</tt> here. This is because on the lowest level, the file
+descriptors are binary. It may be possible to do the decoding when copying
+from the temporary file into the given stream, but that can hide problems.
+Python has its in-memory understanding of Unicode, but who knows what is the
+right encoding for data printed out from underlying C code? This is why this
+particular redirection approach leaves the decoding to the caller.</li>
+<li>The above also makes this code specific to Python 3. There's no magic
+involved, and porting to Python 2 is trivial, but some assumptions made here
+don't hold (such as <tt class="docutils literal">sys.stdout</tt> being a <tt class="docutils literal">io.TextIOWrapper</tt>).</li>
+</ol>
+</div>
+<div class="section" id="redirecting-the-stdout-of-a-child-process">
+<h2>Redirecting the stdout of a child process</h2>
+<p>We've just seen that the file descriptor duplication approach lets us grab the
+output from child processes as well. But it may not always be the most
+convenient way to achieve this task. In the general case, you typically use the
+<tt class="docutils literal">subprocess</tt> module to launch child processes, and you may launch several such
+processes either in a pipe or separately. Some programs will even juggle
+multiple subprocesses launched this way in different threads. Moreover, while
+these subprocesses are running you may want to emit something to <tt class="docutils literal">stdout</tt> and
+you don't want this output to be captured.</p>
+<p>So, managing the <tt class="docutils literal">stdout</tt> file descriptor in the general case can be messy;
+it is also unnecessary, because there's a much simpler way.</p>
+<p>The <tt class="docutils literal">subprocess</tt> module's swiss knife <tt class="docutils literal">Popen</tt> class (which serve as the
+basis for much of the rest of the module) accepts a <tt class="docutils literal">stdout</tt> parameter, which
+we can use to ask it to get access to the child's stdout:</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">subprocess</span>
+
+<span class="n">echo_cmd</span> <span class="o">=</span> <span class="p">[</span><span class="s1">&#39;echo&#39;</span><span class="p">,</span> <span class="s1">&#39;this&#39;</span><span class="p">,</span> <span class="s1">&#39;comes&#39;</span><span class="p">,</span> <span class="s1">&#39;from&#39;</span><span class="p">,</span> <span class="s1">&#39;echo&#39;</span><span class="p">]</span>
+<span class="n">proc</span> <span class="o">=</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">Popen</span><span class="p">(</span><span class="n">echo_cmd</span><span class="p">,</span> <span class="n">stdout</span><span class="o">=</span><span class="n">subprocess</span><span class="o">.</span><span class="n">PIPE</span><span class="p">)</span>
+<span class="n">output</span> <span class="o">=</span> <span class="n">proc</span><span class="o">.</span><span class="n">communicate</span><span class="p">()[</span><span class="mi">0</span><span class="p">]</span>
+<span class="nb">print</span><span class="p">(</span><span class="s1">&#39;Got stdout:&#39;</span><span class="p">,</span> <span class="n">output</span><span class="p">)</span>
+</pre></div>
+<p>The <tt class="docutils literal">subprocess.PIPE</tt> argument can be used to set up actual child process
+pipes (a la the shell), but in its simplest incarnation it captures the
+process's output.</p>
+<p>If you only launch a single child process at a time and are interested in its
+output, there's an even simpler way:</p>
+<div class="highlight"><pre><span></span><span class="n">output</span> <span class="o">=</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">check_output</span><span class="p">(</span><span class="n">echo_cmd</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="s1">&#39;Got stdout:&#39;</span><span class="p">,</span> <span class="n">output</span><span class="p">)</span>
+</pre></div>
+<p><tt class="docutils literal">check_output</tt> will capture and return the child's standard output to you; it
+will also raise an exception if the child exist with a non-zero return code.</p>
+</div>
+<div class="section" id="conclusion">
+<h2>Conclusion</h2>
+<p>I hope I covered most of the common cases where &quot;stdout redirection&quot; is needed
+in Python. Naturally, all of the same applies to the other standard output
+stream - <tt class="docutils literal">stderr</tt>. Also, I hope the background on file descriptors was
+sufficiently clear to explain the redirection code; squeezing this topic in such
+a short space is challenging. Let me know if any questions remain or if there's
+something I could have explained better.</p>
+<p>Finally, while it is conceptually simple, the code for the redirector is quite
+long; I'll be happy to hear if you find a shorter way to achieve the same
+effect.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>Do not despair. As of February 2015, a sizable chunk of the worldwide
+Python programmers are in the same boat.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>Note that <em>bytes</em> passed to <tt class="docutils literal">puts</tt>. This being Python 3, we have to be
+careful since <tt class="docutils literal">libc</tt> doesn't understand Python's unicode strings.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td><p class="first">The following description focuses on Unix/POSIX systems; also, it's
+necessarily partial. Large book chapters have been written on this
+topic - I'm just trying to present some key concepts relevant to stream
+redirection.</p>
+<p class="last">For a variant that works on Windows, take a look at
+<a class="reference external" href="https://gist.github.com/natedileas/8eb31dc03b76183c0211cdde57791005">this gist</a>.</p>
+</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-4">[4]</a></td><td>The approach taken here is inspired by
+<a class="reference external" href="http://stackoverflow.com/a/17954769/8206">this Stack Overflow answer</a>.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

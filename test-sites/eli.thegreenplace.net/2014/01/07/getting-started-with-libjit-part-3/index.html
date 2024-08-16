@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Getting started with libjit - part 3 - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../../index.html" class="navbar-brand">
+                <img src="../../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="../getting-started-with-libjit-part-3.html"
+                       rel="bookmark"
+                       title="Permalink to Getting started with libjit - part 3">
+                        Getting started with libjit - part 3
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> January 07, 2014 at 06:00</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../../tag/assembly.html">Assembly</a>
+        ,
+    <a href="../../../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../../../tag/code-generation.html">Code generation</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>This is part 3 in a series of articles on libjit. <a class="reference external" href="../../../../2013/10/17/getting-started-with-libjit-part-1/index.html">Part 1</a> served as a basic introduction to the library and showed how to get started, along with some simple performance measurements. <a class="reference external" href="../../../../2013/11/12/getting-started-with-libjit-part-2/index.html">Part 2</a> peered deeper into the capabilities of libjit, focusing on interface between native and JITed code. In this part, I'm switching gears and looking at the internals of libjit. I'll follow through the compilation of a simple function with libjit, highlighting some interesting aspects of libjit's design on the way.</p>
+<div class="section" id="input-code">
+<h3>Input code</h3>
+<p>I'll reuse the iterative GCD example from part 1. The equivalent C code is:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">gcd_iter</span>(<span style="color: #00007f; font-weight: bold">int</span> u, <span style="color: #00007f; font-weight: bold">int</span> v) {
+  <span style="color: #00007f; font-weight: bold">int</span> t;
+  <span style="color: #00007f; font-weight: bold">while</span> (v) {
+    t = u;
+    u = v;
+    v = t % v;
+  }
+  <span style="color: #00007f; font-weight: bold">return</span> u &lt; <span style="color: #007f7f">0</span> ? -u : u; <span style="color: #007f00">/* abs(u) */</span>
+}
+</pre></div>
+<p>Take a look at <a class="reference external" href="../../../../2013/10/17/getting-started-with-libjit-part-1/index.html">part 1</a> (or the <tt class="docutils literal">gcd_iter.c</tt> sample in <a class="reference external" href="https://github.com/eliben/libjit-samples">the repository</a>) for details on the libjit calls required to emulate this function.</p>
+</div>
+<div class="section" id="libjit-ir">
+<h3>libjit IR</h3>
+<p>The libjit API includes <tt class="docutils literal">jit_dump_function</tt>, which can dump the contents of a <tt class="docutils literal">jit_function_t</tt> for us. It has two modes of operation. Before the function is compiled to native code, the libjit IR will be dumped. If the function has already been compiled (with <tt class="docutils literal">jit_function_compile</tt>), the produced machine code is disassembled <a class="footnote-reference" href="index.html#id7" id="id2">[1]</a> and the assembly is dumped. In this article we'll be looking at both dumps, starting with the &quot;uncompiled&quot; libjit IR.</p>
+<p>Before I show the IR dump, a short introduction to how libjit does things. Internally, the IR is divided into <a class="reference external" href="http://en.wikipedia.org/wiki/Basic_block">basic blocks</a>, which is a convenient abstraction often used by compilers to represent intermediate code. Basic blocks may serve as targets of braches (<tt class="docutils literal">goto</tt> instructions in libjit IR); therefore, each may have one or more labels referring to it. The libjit API has functions that explicitly create basic blocks, but the functions I used do so implicitly. This is more convenient. For example, <tt class="docutils literal">jit_insn_branch_if</tt> both ends the current basic block (because it's an exit point) and may create an additional basic block at its destination (unless it already exists).</p>
+<p>Another thing to note is that while C code that uses the libjit API has named variables for values and labels, libjit is oblivious to it. Unlike LLVM, libjit does not have a way to give meaningful names to values and labels, so it just generates numbered names. However, even so the correspondence between libjit API calls and the IR is very obvious and easy to follow, as the following annotated dump shows. I'm using some of the nomenclature (such as label names) from the API calls in the comments to help pinpoint the correspondence between them.</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">function</span> gcd [uncompiled](i1 : <span style="color: #00007f; font-weight: bold">int</span>, i2 : <span style="color: #00007f; font-weight: bold">int</span>) : <span style="color: #00007f; font-weight: bold">int</span>
+      <span style="color: #007f00">// Note that some ABI details are exposed here. This is built on</span>
+      <span style="color: #007f00">// a x64 Linux machine, where the first two integer arguments to</span>
+      <span style="color: #007f00">// a function are passed in rdi and rsi</span>
+      incoming_reg(i1, rdi)
+      incoming_reg(i2, rsi)
+      <span style="color: #007f00">// label_while:</span>
+.L0:
+      <span style="color: #007f00">// if (v == 0) goto label_after_while</span>
+      <span style="color: #007f00">// libjit folds a comparison instruction into a branch - hence it</span>
+      <span style="color: #007f00">// seems that i7 is not necessary and can be optimized away as</span>
+      <span style="color: #007f00">// dead code</span>
+      i7 = i2 == <span style="color: #007f7f">0</span>
+      <span style="color: #00007f; font-weight: bold">if</span> i2 == <span style="color: #007f7f">0</span> then <span style="color: #00007f; font-weight: bold">goto</span> .L1
+.L:
+      <span style="color: #007f00">// t &lt;- u</span>
+      i5 = i1
+      <span style="color: #007f00">// u &lt;- v</span>
+      i1 = i2
+      <span style="color: #007f00">// v &lt;- t % v via a temporary</span>
+      i8 = i5 % i2
+      i2 = i8 i7 = i2 == <span style="color: #007f7f">0</span>
+      <span style="color: #00007f; font-weight: bold">if</span> i2 == <span style="color: #007f7f">0</span> then <span style="color: #00007f; font-weight: bold">goto</span> .L2
+
+      <span style="color: #007f00">// goto label_while</span>
+      <span style="color: #00007f; font-weight: bold">goto</span> .L0
+      <span style="color: #007f00">// ends_in_dead is a marker libjit places on blocks that don&#39;t</span>
+      <span style="color: #007f00">// have a fall-through edge. These are blocks that end with</span>
+      <span style="color: #007f00">// unconditional branches, returns, etc.</span>
+      ends_in_dead
+.L1:
+      i9 = i1 &gt;= <span style="color: #007f7f">0</span>
+      <span style="color: #007f00">// if (u &gt;= 0) then goto label_pos</span>
+      <span style="color: #00007f; font-weight: bold">if</span> i1 &gt;= <span style="color: #007f7f">0</span> then <span style="color: #00007f; font-weight: bold">goto</span> .L2
+.L:
+      <span style="color: #007f00">// return -u</span>
+      i10 = -i1
+      return_int(i10)
+      ends_in_dead
+.L2:
+      <span style="color: #007f00">// label_pos: return u</span>
+      return_int(i1)
+      ends_in_dead
+.L:
+.L:
+end
+</pre></div>
+<p>The most important thing to remember about this IR dump is that it's very closely parallel to the libjit API calls used to create it. In this respect, libjit is very much like LLVM: the IR is directly created by the builder API. An important difference is that unlike LLVM, where a textual representation of the IR is a language that can be used for full serialization (and even directly programmed in), in the case of libjit no such representation exists. The above is just a dump for debugging purposes.</p>
+<p>I still think it's pretty useful for verifying that the code created by the API calls makes sense. While less important when the API calls are made manually, as they were here, it becomes crucial when the calls are generated programmatically - such as by a front-end that compiles some language to libjit.</p>
+</div>
+<div class="section" id="from-libjit-ir-to-machine-code">
+<h3>From libjit IR to machine code</h3>
+<p>Now it's time to examine the machine code produced by libjit for <tt class="docutils literal">gcd_iter</tt> on my x64 machine. The following is an annotated disassembly dump, which I'll then use as a springboard to dive into some of the internal workings of libjit.</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">                  <span style="color: #007f00">// Prologue</span>
+<span style="color: #007f7f">7</span>f940058713f:     push   %rbp
+<span style="color: #007f7f">7</span>f9400587140:     mov    %rsp,%rbp
+<span style="color: #007f7f">7</span>f9400587143:     sub    $0x20,%rsp
+                  <span style="color: #007f00">// r14 and r15 are callee-saved; save them since</span>
+                  <span style="color: #007f00">// we&#39;ll use them</span>
+<span style="color: #007f7f">7</span>f9400587147:     mov    %r14,(%rsp)
+<span style="color: #007f7f">7</span>f940058714b:     mov    %r15,<span style="color: #007f7f">0x8</span>(%rsp)
+                  <span style="color: #007f00">// rdi holds u, rsi holds v. Put them in r15 and r14</span>
+                  <span style="color: #007f00">// respectively</span>
+<span style="color: #007f7f">7</span>f9400587150:     mov    %rdi,%r15
+<span style="color: #007f7f">7</span>f9400587153:     mov    %rsi,%r14
+
+                  <span style="color: #007f00">// label_while:</span>
+                  <span style="color: #007f00">// if (v == 0) goto after_while</span>
+<span style="color: #007f7f">7</span>f9400587156:     test   %r14d,%r14d
+<span style="color: #007f7f">7</span>f9400587159:     je     <span style="color: #007f7f">0x7f94005871ab</span>
+
+                  <span style="color: #007f00">// .. otherwise</span>
+                  <span style="color: #007f00">// t &lt;- u</span>
+<span style="color: #007f7f">7</span>f940058715f:     mov    %r15d,%eax
+                  <span style="color: #007f00">// u &lt;- v</span>
+<span style="color: #007f7f">7</span>f9400587162:     mov    %r14d,%r15d
+                  <span style="color: #007f00">// save t on the stack</span>
+<span style="color: #007f7f">7</span>f9400587165:     mov    %eax,-<span style="color: #007f7f">0x8</span>(%rbp)
+                  <span style="color: #007f00">// if (v != 0) goto v_nonzero</span>
+<span style="color: #007f7f">7</span>f9400587168:     test   %r14d,%r14d
+<span style="color: #007f7f">7</span>f940058716b:     jne    <span style="color: #007f7f">0x7f9400587181</span>
+
+                  <span style="color: #007f00">// .. otherwise call</span>
+                  <span style="color: #007f00">// jit_exception_builtin(JIT_RESULT_DIVISION_BY_ZERO)</span>
+<span style="color: #007f7f">7</span>f940058716d:     mov    $0xfffffffe,%edi
+<span style="color: #007f7f">7</span>f9400587172:     mov    $0x8,%eax
+<span style="color: #007f7f">7</span>f9400587177:     mov    $0x4060ea,%r11
+<span style="color: #007f7f">7</span>f940058717e:     callq  *%r11
+
+                  <span style="color: #007f00">// v_nonzero:</span>
+                  <span style="color: #007f00">// if (v != -1) godo ready_for_rem</span>
+<span style="color: #007f7f">7</span>f9400587181:     cmp    $0xffffffff,%r14d
+<span style="color: #007f7f">7</span>f9400587185:     jne    <span style="color: #007f7f">0x7f94005871a2</span>
+
+                  <span style="color: #007f00">// .. otherwise</span>
+                  <span style="color: #007f00">// if (t != -2**32) goto ready_for_rem</span>
+<span style="color: #007f7f">7</span>f9400587187:     cmp    $0x80000000,%eax
+<span style="color: #007f7f">7</span>f940058718c:     jne    <span style="color: #007f7f">0x7f94005871a2</span>
+
+                  <span style="color: #007f00">// .. otherwise call</span>
+                  <span style="color: #007f00">// jit_exception_builtin(JIT_RESULT_ARITHMETIC)</span>
+                  <span style="color: #007f00">// Because a minimum signed number is divided by -1;</span>
+                  <span style="color: #007f00">// the quotient is then an arithmetic overflow.</span>
+                  <span style="color: #007f00">// [-2^32 is representable in 2s complement 32-bit, but</span>
+                  <span style="color: #007f00">//  not 2^32]</span>
+<span style="color: #007f7f">7</span>f940058718e:     mov    $0xffffffff,%edi
+<span style="color: #007f7f">7</span>f9400587193:     mov    $0x8,%eax
+<span style="color: #007f7f">7</span>f9400587198:     mov    $0x4060ea,%r11
+<span style="color: #007f7f">7</span>f940058719f:     callq  *%r11
+
+                  <span style="color: #007f00">// ready_for_rem:</span>
+                  <span style="color: #007f00">// sign-extend t (eax) into (edx) for division and</span>
+                  <span style="color: #007f00">// perform signed division. Remainder is in rdx,</span>
+                  <span style="color: #007f00">// which is moved to r14, so v &lt;- t % u</span>
+                  <span style="color: #007f00">// then goto label_while</span>
+<span style="color: #007f7f">7</span>f94005871a2:     cltd
+<span style="color: #007f7f">7</span>f94005871a3:     idiv   %r14d
+<span style="color: #007f7f">7</span>f94005871a6:     mov    %rdx,%r14
+<span style="color: #007f7f">7</span>f94005871a9:     jmp    <span style="color: #007f7f">0x7f9400587156</span>
+
+                  <span style="color: #007f00">// after_while:</span>
+                  <span style="color: #007f00">// if (u &gt;= 0) goto u_nonnegative</span>
+<span style="color: #007f7f">7</span>f94005871ab:     test   %r15d,%r15d
+<span style="color: #007f7f">7</span>f94005871ae:     jge    <span style="color: #007f7f">0x7f94005871be</span>
+
+                  <span style="color: #007f00">// ... otherwise place u into the return register</span>
+                  <span style="color: #007f00">// and negate it, then goto epilogue</span>
+<span style="color: #007f7f">7</span>f94005871b4:     mov    %r15d,%eax
+<span style="color: #007f7f">7</span>f94005871b7:     neg    %eax
+<span style="color: #007f7f">7</span>f94005871b9:     jmpq   <span style="color: #007f7f">0x7f94005871c1</span>
+
+                  <span style="color: #007f00">// u_nonnegative:</span>
+                  <span style="color: #007f00">// Place u into the return register rax</span>
+<span style="color: #007f7f">7</span>f94005871be:     mov    %r15d,%eax
+
+                  <span style="color: #007f00">// epilogue:</span>
+                  <span style="color: #007f00">// Restore saved regs &amp; epilogue</span>
+<span style="color: #007f7f">7</span>f94005871c1:     mov    (%rsp),%r14
+<span style="color: #007f7f">7</span>f94005871c5:     mov    <span style="color: #007f7f">0x8</span>(%rsp),%r15
+<span style="color: #007f7f">7</span>f94005871ca:     mov    %rbp,%rsp
+<span style="color: #007f7f">7</span>f94005871cd:     pop    %rbp
+<span style="color: #007f7f">7</span>f94005871ce:     retq
+</pre></div>
+<p>While in general the control flow here is very similar to the IR version and hence easy to understand, there's a bunch of error checking going on before the remainder operation is performed, and this complicates matters. libjit turns out to be very meticulous about arithmetic errors and implants runtime checks against two situations that are undefined by the C standard.</p>
+<p>The easier one is division by zero. When <tt class="docutils literal">v</tt> is zero, the operation <tt class="docutils literal">t % v</tt> has undefined behavior. libjit inserts a runtime check comparing the divisor to zero and calling an exception function <a class="footnote-reference" href="index.html#id8" id="id3">[2]</a>.</p>
+<p>The more complex error case arises in division by -1. Since integers are represented in 2s complement, there is a single negative number (-2^32 for 32-bit <tt class="docutils literal">int</tt>s) that does not have a positive mirror. If this negative number is divided by -1, the result is arithmetic overflow, which is also undefined behavior. Here again, libjit inserts the requisite runtime checks that ensure this case gets caught and properly reported <a class="footnote-reference" href="index.html#id10" id="id4">[3]</a>.</p>
+</div>
+<div class="section" id="instruction-selection">
+<h3>Instruction selection</h3>
+<p>The code generated for the remainder operation is a great opportunity to peer into the innards of libjit. What defines such complex behavior - generating a whole code sequence with multiple checks and calls, for a single operation? After all, on the libjit IR level, the remainder is just the <tt class="docutils literal">%</tt> operator.</p>
+<p>The following is a fast paced quest through the source code of libjit. Code references are typically made to function names and files relative to the root directory of a libjit source snapshot.</p>
+<p>We'll start by looking into <tt class="docutils literal">jit_insn_rem</tt>, which creates the remainder operation. Together with the other instruction creation APIs of libjit, this function lives in <tt class="docutils literal"><span class="pre">jit/jit-insn.c</span></tt>. <tt class="docutils literal">jit_insn_rem</tt> adds an <em>instruction description entry</em> to the function - an instance of the <tt class="docutils literal">jit_opcode_descr</tt> structure.</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">jit_value_t <span style="color: #00007f">jit_insn_rem</span>
+              (jit_function_t func, jit_value_t value1, jit_value_t value2)
+{
+      <span style="color: #00007f; font-weight: bold">static</span> jit_opcode_descr <span style="color: #00007f; font-weight: bold">const</span> rem_descr = {
+              JIT_OP_IREM,
+              JIT_OP_IREM_UN,
+              JIT_OP_LREM,
+              JIT_OP_LREM_UN,
+              JIT_OP_FREM,
+              JIT_OP_DREM,
+              JIT_OP_NFREM,
+              jit_intrinsic(jit_int_rem, descr_e_pi_ii),
+              jit_intrinsic(jit_uint_rem, descr_e_pI_II),
+              jit_intrinsic(jit_long_rem, descr_e_pl_ll),
+              jit_intrinsic(jit_ulong_rem, descr_e_pL_LL),
+              jit_intrinsic(jit_float32_rem, descr_f_ff),
+              jit_intrinsic(jit_float64_rem, descr_d_dd),
+              jit_intrinsic(jit_nfloat_rem, descr_D_DD)
+      };
+      <span style="color: #00007f; font-weight: bold">return</span> apply_arith(func, &amp;rem_descr, value1, value2, <span style="color: #007f7f">0</span>, <span style="color: #007f7f">0</span>, <span style="color: #007f7f">0</span>);
+}
+</pre></div>
+<p>The most interesting part of this entry for us at this point is the opcode; <tt class="docutils literal">JIT_OP_IREM</tt> is the signed integer remainder opcode.</p>
+<p>There are many entries in the <tt class="docutils literal">jit_opcode_descr</tt> structure - per type of operands. Some of the entries are filled with intrinsics rather than opcodes, because libjit needs an intrinsic for architectures on which the opcode is not supported natively.</p>
+<p><tt class="docutils literal">jit_function_compile</tt> initiates the IR -&gt; native compilation sequence in libjit. You can trace it through in the libjit code - the code is quite easy to follow. Eventually <tt class="docutils literal">compile_block</tt>, which is responsible for generating code for a single basic block, calls <tt class="docutils literal">_jit_gen_insn</tt> per instruction. This is the point when libjit switches from a target-independent code generation algorithm to a target-specific backend, that knows how to lower libjit IR instructions to actual native instructions. This part has to be implemented per backend (target architecture). I'll follow through the flow of the x86-64 backend. The meat of <tt class="docutils literal">_jit_gen_insn</tt> in <tt class="docutils literal"><span class="pre">jit/jit-rules-x86-64.c</span></tt> is:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">switch</span>(insn-&gt;opcode)
+{
+<span style="color: #007f00">#define JIT_INCLUDE_RULES</span>
+<span style="color: #007f00">#include &quot;jit-rules-x86-64.inc&quot;</span>
+<span style="color: #007f00">#undef JIT_INCLUDE_RULES</span>
+</pre></div>
+<p>The <tt class="docutils literal">.inc</tt> file being included into the <tt class="docutils literal">switch</tt> statement is auto-generated in libjit from a corresponding <tt class="docutils literal">.ins</tt> file <a class="footnote-reference" href="index.html#id11" id="id5">[4]</a>. The <tt class="docutils literal">.ins</tt> file is an instruction selector, written in a libjit-specific DSL. It contains &quot;rules&quot; for generating code per IR opcode. Before we look at the complex remainder opcode, let's start with something simpler to get a feel for how the thing works:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">JIT_OP_PUSH_INT: note
+      [imm] -&gt; {
+        x86_64_push_imm(inst, $1);
+        gen-&gt;stack_changed = 1;
+      }
+      [local] -&gt; {
+        x86_64_push_membase_size(inst, X86_64_RBP, $1, 4);
+        gen-&gt;stack_changed = 1;
+      }
+      [reg] -&gt; {
+        x86_64_push_reg_size(inst, $1, 4);
+        gen-&gt;stack_changed = 1;
+      }
+</pre></div>
+<p>This rule tells the code generator how to handle the <tt class="docutils literal">JIT_OP_PUSH_INT</tt> (push an integer onto the stack) opcode for x86-64. Notice that there are separate rules based on whether the argument of the opcode is an immediate, a reference to a label or a register. For example, when it's a register, the rule says to call <tt class="docutils literal">x86_64_push_reg_size</tt>. This is a macro defined thus:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">#define x86_64_push_reg_size(inst, reg, size) \</span>
+<span style="color: #007f00">      do { \</span>
+<span style="color: #007f00">              if((size) == 2) \</span>
+<span style="color: #007f00">              { \</span>
+<span style="color: #007f00">                      *(inst)++ = (unsigned char)0x66; \</span>
+<span style="color: #007f00">              } \</span>
+<span style="color: #007f00">              x86_64_rex_emit64((inst), (size), 0, 0, (reg)); \</span>
+<span style="color: #007f00">              *(inst)++ = (unsigned char)0x50 + ((reg) &amp; 0x7); \</span>
+<span style="color: #007f00">      } while(0)</span>
+</pre></div>
+<p>At this point, if you really want to verify this, it's time to look into the Intel Architecture Manual, volume 2 (the instruction set reference). Enjoy :-)</p>
+<p>Now, back to our remainder. <tt class="docutils literal">JIT_OP_IREM</tt> has the following entry:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">JIT_OP_IREM: more_space
+      [any, immzero] -&gt; {
+        inst = throw_builtin(inst, func, JIT_RESULT_DIVISION_BY_ZERO);
+      }
+      [reg, imm, if(&quot;$2 == 1&quot;)] -&gt; {
+        x86_64_clear_reg(inst, $1);
+      }
+      [reg, imm, if(&quot;$2 == -1&quot;)] -&gt; {
+        /* Dividing by -1 gives an exception if the argument
+           is minint, or simply gives a remainder of zero */
+        jit_int min_int = jit_min_int;
+        unsigned char *patch;
+        x86_64_cmp_reg_imm_size(inst, $1, min_int, 4);
+        patch = inst;
+        x86_branch8(inst, X86_CC_NE, 0, 0);
+        inst = throw_builtin(inst, func, JIT_RESULT_ARITHMETIC);
+        x86_patch(patch, inst);
+        x86_64_clear_reg(inst, $1);
+      }
+      [=reg(&quot;rdx&quot;), *reg(&quot;rax&quot;), imm, scratch dreg, scratch reg(&quot;rdx&quot;)] -&gt; {
+        x86_64_mov_reg_imm_size(inst, $4, $3, 4);
+        x86_64_cdq(inst);
+        x86_64_idiv_reg_size(inst, $4, 4);
+      }
+      [=reg(&quot;rdx&quot;), *reg(&quot;rax&quot;), dreg, scratch reg(&quot;rdx&quot;)] -&gt; {
+        jit_int min_int = jit_min_int;
+        unsigned char *patch, *patch2;
+#ifndef JIT_USE_SIGNALS
+        x86_64_test_reg_reg_size(inst, $3, $3, 4);
+        patch = inst;
+        x86_branch8(inst, X86_CC_NE, 0, 0);
+        inst = throw_builtin(inst, func, JIT_RESULT_DIVISION_BY_ZERO);
+        x86_patch(patch, in have ast);
+#endif
+        x86_64_cmp_reg_imm_size(inst, $3, -1, 4); part 2
+        patch = inst;
+        x86_branch8(inst, X86_CC_NE, 0, 0);
+</pre></div>
+<p>It's kind-of long, but most of it describes some special cases when one of the operands is constant. For example, the second code block describes the case where the divisor is a constant 1. In this case, the remainder is always 0 so the target register is just cleared. The most interesting case is the most general one - the last, where division is done between two registers. In this case, you'll see that the rule is just a template for generate code - it's very similar to the machine code we've seen in the disassembly above. It checks for a zero divisor, and then for arithmetic error. Macros are used to actually generate the machine code, as demonstrated above with <tt class="docutils literal">x86_64_push_reg_size</tt>.</p>
+</div>
+<div class="section" id="liveness-analysis-and-register-allocation">
+<h3>Liveness analysis and register allocation</h3>
+<p>Another important mechanism in libjit I want to take a look at is liveness analysis (together with related target-independent optimizations) and register allocation. Since covering these topics in detail would require a book or two, I'll only skim through them on a high level, trusting the reader has some knowledge of compiler backends (or at least the will to dive deeper wherever necessary).</p>
+<p>libjit's rule-based code generation machinery already knows which registers values live in. A brief look at the machine code it generates immediately suggests that some sort of register allocation happened - there are almost no unnecessary stack spills. This happens in the <tt class="docutils literal">codegen_prepare</tt> function, which runs liveness analysis followed by register allocation.</p>
+<p>The liveness analysis done by libjit seems pretty standard. It places its results in the <tt class="docutils literal">flags</tt> field of each instruction. It also runs some simple optimizations - forward and backward copy propagations. For example, recall that in the IR we had:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">.L0:
+      <span style="color: #007f00">// if (v == 0) goto label_after_while</span>
+      <span style="color: #007f00">// libjit folds a comparison instruction into a branch - hence it</span>
+      <span style="color: #007f00">// seems that i7 is not necessary and can be optimized away as</span>
+      <span style="color: #007f00">// dead code</span>
+    i7 = i2 == <span style="color: #007f7f">0</span>
+    <span style="color: #00007f; font-weight: bold">if</span> i2 == <span style="color: #007f7f">0</span> then <span style="color: #00007f; font-weight: bold">goto</span> .L1
+</pre></div>
+<p>Now it's time to explain how the &quot;optimized away as dead code&quot; part happened. When liveness analysis gets to the <tt class="docutils literal">i7 = i2 == 0</tt> instruction, it notices that he destination value is not live - nothing uses it. The instruction is then replaced with a <tt class="docutils literal">JIT_OP_NOP</tt>, which is simply ignored during code generation.</p>
+<p>A more sophisticated analysis enables libjit to replace the second instruction in the pair <a class="footnote-reference" href="index.html#id12" id="id6">[5]</a>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">i8 = i5 % i2
+i2 = i8
+</pre></div>
+<p>Since <tt class="docutils literal">i8</tt> is not used anywhere else, backward copy propagation simply replaces the first assignment by <tt class="docutils literal">i2 = i5 % i2</tt> and the second becomes dead code, which is replaced with a <tt class="docutils literal">JIT_OP_NOP</tt>.</p>
+<p>Register allocation happens in two stages. First, a simplistic global register allocation is done right after liveness analysis. All the values in the function are ordered from most to least used, and registers are allocated to the most used values. While not as optimal as graph coloring, this is a relatively cheap and simple heuristic that ensures, in most cases, that the hottest values remain in registers across basic blocks and not too many spills are generated.</p>
+<p>The second stage happens as each instruction gets generated - this is local register allocation within a block. <tt class="docutils literal">_jit_regs_assign</tt> in <tt class="docutils literal"><span class="pre">jit/jit-reg-alloc.c</span></tt> is the function to look out for. Calls to it are automatically created in the <tt class="docutils literal">.inc</tt> file. This stage is tasked with the detailed allocation of registers to instructions that require registers, spilling of existing values from registers (if the required registers are occupied), and so on.</p>
+<p>On a high level, this code is a classical low-level register allocator with a lot of careful bookkeeping (such as ABI constraints and instructions that force special registers). It keeps track of the values contained in each register and uses liveness analysis to try to spill registers with the minimal cost, when spilling is required. It also uses the global register information computed during global allocation, so it's not completely blind to what's going on outside the basic block.</p>
+</div>
+<div class="section" id="optimization">
+<h3>Optimization</h3>
+<p>Apart from the copy propagations and dead code elimination mentioned above, libjit doesn't come with a lot of optimizations built in. It has the scaffolding ready to set custom optimization levels on each function, but these don't do much today. Perhaps it was added for future needs or for custom backends that may do more optimization during instruction selection, etc.</p>
+<p>The only other target-independent optimization (which runs by default, unless you explicitly set the optimization level to 0) is an attempt to simplify the control-flow graph of functions. This happens in the <tt class="docutils literal">optimize</tt> function, which first builds the CFG with <tt class="docutils literal">_jit_block_build_cfg</tt> and then optimizes it with <tt class="docutils literal">_jit_block_clean_cfg</tt>. According to comments in the code, it's based on the &quot;Clean&quot; algorithm from <a class="reference external" href="http://www.cs.princeton.edu/~ras/clean.ps">this paper</a>.</p>
+</div>
+<div class="section" id="conclusion">
+<h3>Conclusion</h3>
+<p>While the first two parts in this series concentrated on how to use libjit, this part focuses on how libjit works under the hood. It's an audacious goal to try to cover such an intricate piece of software in a single article, so my attempt should be considered at most a high-level overview with a bit of in-depth focus here and there. I hope people who find libjit interesting and wonder how it works will find it useful; it can also be useful just to students of compilers that look for additional real-world examples to study. Software projects rarely have their internals documented, and being presented with a large lump of code is daunting. Perhaps this article can soften the learning curve.</p>
+<img class="align-center" src="../../../../images/hline.jpg" style="width: 320px; height: 5px;" />
+<table class="docutils footnote" frame="void" id="id7" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id2">[1]</a></td><td>There's no magic here - libjit doesn't carry a disassembler of its own. It simply dumps the raw binary code into a temporary files and runs it through <tt class="docutils literal">objdump</tt>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id8" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id3">[2]</a></td><td><tt class="docutils literal">jit_exception_builtin</tt> lives in host code, and the host-JIT interface was explained in detail in <a class="reference external" href="../../../../2013/11/12/getting-started-with-libjit-part-2/index.html">part 2</a>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id10" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id4">[3]</a></td><td>By the way, this behavior is documented in the libjit API for <tt class="docutils literal">jit_insn_div</tt> and <tt class="docutils literal">jit_insn_rem</tt>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id11" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id5">[4]</a></td><td>I'll leave the details of this auto-generated instruction selection out of this article, but it's pretty standard in compilers. LLVM has an elaborate auto-generation framework based on TableGen. libjit has a simpler home-cooked solution. It's pretty easy to find out how it works by tracing the flow in the Makefile and looking at the <tt class="docutils literal">tools/</tt> directory.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id12" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id6">[5]</a></td><td>I found the <tt class="docutils literal">_JIT_COMPILE_DEBUG</tt> flag very useful when looking at this. Turn it on in <tt class="docutils literal"><span class="pre">jit/jit-config.h</span></tt>. Similarly, <tt class="docutils literal">JIT_REG_DEBUG</tt> helps observe the inner workings of the register allocator.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../../theme/js/count.js"></script>
+</body>
+</html>

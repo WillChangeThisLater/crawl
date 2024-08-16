@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Parsing expressions by precedence climbing - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="parsing-expressions-by-precedence-climbing.html"
+                       rel="bookmark"
+                       title="Permalink to Parsing expressions by precedence climbing">
+                        Parsing expressions by precedence climbing
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> August 02, 2012 at 05:48</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/compilation.html">Compilation</a>
+        ,
+    <a href="../../../tag/recursive-descent-parsing.html">Recursive descent parsing</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>I've written <a class="reference external" href="../../../2009/03/14/some-problems-of-recursive-descent-parsers/index.html">previously</a> about the problem recursive descent parsers have with expressions, especially when the language has multiple levels of operator precedence.</p>
+<p>There are several ways to attack this problem. The Wikipedia article on <a class="reference external" href="http://en.wikipedia.org/wiki/Operator-precedence_parser">operator-precedence parsers</a> mentions three algorithms: Shunting Yard, top-down operator precedence (TDOP) and precedence climbing. I have already covered <a class="reference external" href="../../../2009/03/20/a-recursive-descent-parser-with-an-infix-expression-evaluator/index.html">Shunting Yard</a> and <a class="reference external" href="../../../2010/01/02/top-down-operator-precedence-parsing/index.html">TDOP</a> in this blog. Here I aim to present the third method (and the one that actually ends up being used a lot in practice) - precedence climbing.</p>
+<div class="section" id="precedence-climbing-what-it-aims-to-achieve">
+<h3>Precedence climbing - what it aims to achieve</h3>
+<p>It's not necessary to be familiar with the other algorithms for expression parsing in order to understand precedence climbing. In fact, I think that precedence climbing is the simplest of them all. To explain it, I want to first present what the algorithm is trying to achieve. After this, I will explain how it does this, and finally will present a fully functional implementation in Python.</p>
+<p>So the basic goal of the algorithm is the following: treat an expression as a bunch of nested sub-expressions, where each sub-expression has in common the lowest precedence level of the the operators it contains.</p>
+<p>Here's a simple example:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">2 + 3 * 4 * 5 - 6
+</pre></div>
+<p>Assuming that the precedence of <tt class="docutils literal">+</tt> (and <tt class="docutils literal">-</tt>) is 1 and the precedence of <tt class="docutils literal">*</tt> (and <tt class="docutils literal">/</tt>) is 2, we have:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">2 + 3 * 4 * 5 - 6
+
+|---------------|   : prec 1
+    |-------|       : prec 2
+</pre></div>
+<p>The sub-expression multiplying the three numbers has a minimal precedence of 2. The sub-expression spanning the whole original expression has a minimal precedence of 1.</p>
+<p>Here's a more complex example, adding a power operator <tt class="docutils literal">^</tt> with precedence 3:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">2 + 3 ^ 2 * 3 + 4
+
+|---------------|   : prec 1
+    |-------|       : prec 2
+    |---|           : prec 3
+</pre></div>
+<div class="section" id="associativity">
+<h4>Associativity</h4>
+<p>Binary operators, in addition to precedence, also have the concept of <em>associativity</em>. Simply put, <em>left associative</em> operators stick to the left stronger than to the right; <em>right associative</em> operators vice versa.</p>
+<p>Some examples. Since addition is left associative, this:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">2 + 3 + 4
+</pre></div>
+<p>Is equivalent to this:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">(2 + 3) + 4
+</pre></div>
+<p>On the other hand, power (exponentiation) is right associative. This:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">2 ^ 3 ^ 4
+</pre></div>
+<p>Is equivalent to this:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">2 ^ (3 ^ 4)
+</pre></div>
+<p>The precedence climbing algorithm also needs to handle associativity correctly.</p>
+</div>
+<div class="section" id="nested-parenthesized-sub-expressions">
+<h4>Nested parenthesized sub-expressions</h4>
+<p>Finally, we all know that parentheses can be used to explicitly group sub-expressions, beating operator precedence. So the following expression computes the addition <em>before</em> the multiplication:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">2 * (3 + 5) * 7
+</pre></div>
+<p>As we'll see, the algorithm has a special provision to cleverly handle nested sub-expressions.</p>
+</div>
+</div>
+<div class="section" id="precedence-climbing-how-it-actually-works">
+<h3>Precedence climbing - how it actually works</h3>
+<p>First let's define some terms. <em>Atoms</em> are either numbers or parenthesized expressions. <em>Expressions</em> consist of atoms connected by binary operators <a class="footnote-reference" href="parsing-expressions-by-precedence-climbing.html#id4" id="id1">[1]</a>. Note how these two terms are mutually dependent. This is normal in the land of grammars and parsers.</p>
+<p>The algorithm is <em>operator-guided</em>. Its fundamental step is to consume the next atom and look at the operator following it. If the operator has precedence lower than the lowest acceptable for the current step, the algorithm returns. Otherwise, it calls itself in a loop to handle the sub-expression. In pseudo-code, it looks like this <a class="footnote-reference" href="parsing-expressions-by-precedence-climbing.html#id5" id="id2">[2]</a>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">compute_expr(min_prec):
+  result = compute_atom()
+
+  while cur token is a binary operator with precedence &gt;= min_prec:
+    prec, assoc = precedence and associativity of current token
+    if assoc is left:
+      next_min_prec = prec + 1
+    else:
+      next_min_prec = prec
+    rhs = compute_expr(next_min_prec)
+    result = compute operator(result, rhs)
+
+  return result
+</pre></div>
+<p>Each recursive call here handles a sequence of operator-connected atoms sharing the same minimal precedence.</p>
+<div class="section" id="an-example">
+<h4>An example</h4>
+<p>To get a feel for how the algorithm works, let's start with an example:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">2 + 3 ^ 2 * 3 + 4
+</pre></div>
+<p>It's recommended to follow the execution of the algorithm through this expression with, on paper. The computation is kicked off by calling <tt class="docutils literal">compute_expr(1)</tt>, because 1 is the minimal operator precedence among all operators we've defined. Here is the &quot;call tree&quot; the algorithm produces for this expression:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">* compute_expr(1)                # Initial call on the whole expression
+  * compute_atom() --&gt; 2
+  * compute_expr(2)              # Loop entered, operator &#39;+&#39;
+    * compute_atom() --&gt; 3
+    * compute_expr(3)
+      * compute_atom() --&gt; 2
+      * result --&gt; 2             # Loop not entered for &#39;*&#39; (prec &lt; &#39;^&#39;)
+    * result = 3 ^ 2 --&gt; 9
+    * compute_expr(3)
+      * compute_atom() --&gt; 3
+      * result --&gt; 3             # Loop not entered for &#39;+&#39; (prec &lt; &#39;*&#39;)
+    * result = 9 * 3 --&gt; 27
+  * result = 2 + 27 --&gt; 29
+  * compute_expr(2)              # Loop entered, operator &#39;+&#39;
+    * compute_atom() --&gt; 4
+    * result --&gt; 4               # Loop not entered - end of expression
+  * result = 29 + 4 --&gt; 33
+</pre></div>
+</div>
+<div class="section" id="handling-precedence">
+<h4>Handling precedence</h4>
+<p>Note that the algorithm makes one recursive call per binary operator. Some of these calls are short lived - they will only consume an atom and return it because the <tt class="docutils literal">while</tt> loop is not entered (this happens on the second 2, as well as on the second 3 in the example expression above). Some are longer lived. The initial call to <tt class="docutils literal">compute_expr</tt> will compute the whole expression.</p>
+<p>The <tt class="docutils literal">while</tt> loop is the essential ingredient here. It's the thing that makes sure that the current <tt class="docutils literal">compute_expr</tt> call handles all consecutive operators with the given minimal precedence before exiting.</p>
+</div>
+<div class="section" id="handling-associativity">
+<h4>Handling associativity</h4>
+<p>In my opinion, one of the coolest aspects of this algorithm is the simple and elegant way it handles associativity. It's all in that condition that either sets the minimal precedence for the next call to the current one, or current one plus one.</p>
+<p>Here's how this works. Assume we have this sub-expression somewhere:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">8 * 9 * 10
+
+  ^
+  |
+</pre></div>
+<p>The arrow marks where the <tt class="docutils literal">compute_expr</tt> call is, having entered the <tt class="docutils literal">while</tt> loop. <tt class="docutils literal">prec</tt> is 2. Since the associativity of <tt class="docutils literal">*</tt> is left, <tt class="docutils literal">next_min_prec</tt> is set to 3. The recursive call to <tt class="docutils literal">compute_expr(3)</tt>, after consuming an atom, sees the next <tt class="docutils literal">*</tt> token:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">8 * 9 * 10
+
+      ^
+      |
+</pre></div>
+<p>Since the precedence of <tt class="docutils literal">*</tt> is 2, while <tt class="docutils literal">min_prec</tt> is 3, the <tt class="docutils literal">while</tt> loop never runs and the call returns. So the original <tt class="docutils literal">compute_expr</tt> will get to handle the second multiplication, not the internal call. Essentially, this means that the expression is grouped as follows:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">(8 * 9) * 10
+</pre></div>
+<p>Which is exactly what we want from left associativity.</p>
+<p>In contrast, for this expression:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">8 ^ 9 ^ 10
+</pre></div>
+<p>The precedence of <tt class="docutils literal">^</tt> is 3, and since it's right associative, the <tt class="docutils literal">min_prec</tt> for the recursive call stays 3. This will mean that the recursive call <em>will</em> consume the next <tt class="docutils literal">^</tt> operator before returning to the original <tt class="docutils literal">compute_expr</tt>, grouping the expression as follows:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">8 ^ (9 ^ 10)
+</pre></div>
+</div>
+<div class="section" id="handling-sub-expressions">
+<h4>Handling sub-expressions</h4>
+<p>The algorithm pseudo-code presented above doesn't explain how parenthesized sub-expressions are handled. Consider this expression:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">2000 * (4 - 3) / 100
+</pre></div>
+<p>It's not clear how the <tt class="docutils literal">while</tt> loop can handle this. The answer is <tt class="docutils literal">compute_atom</tt>. When it sees a left paren, it knows that a sub-expression will follow, so it calls <tt class="docutils literal">compute_expr</tt> on the sub expression (which lasts until the matching right paren), and returns its result as the result of the atom. So <tt class="docutils literal">compute_expr</tt> is oblivious to the existence of sub-expressions.</p>
+<p>Finally, in order to stay short the pseudo-code leaves some interesting details out. What follows is a full implementation of the algorithm that fills all the gaps.</p>
+</div>
+</div>
+<div class="section" id="a-python-implementation">
+<h3>A Python implementation</h3>
+<p>Here is a Python implementation of expression parsing by precedence climbing. It's kept short for simplicity, but can be be easily expanded to cover a more real-world language of expressions. The following sections present the code in small chunks. The whole code is <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2012/rd_infix_precedence.py">available here</a>.</p>
+<p>I'll start with a small tokenizer class that breaks text into tokens and keeps a state. The grammar is very simple: numeric expressions, the basic arithmetic operators <tt class="docutils literal">+, <span class="pre">-,</span> *, /, ^</tt> and parens - <tt class="docutils literal">(, )</tt>.</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">Tok = namedtuple(<span style="color: #7f007f">&#39;Tok&#39;</span>, <span style="color: #7f007f">&#39;name value&#39;</span>)
+
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">Tokenizer</span>(<span style="color: #00007f">object</span>):
+    <span style="color: #7f007f">&quot;&quot;&quot; Simple tokenizer object. The cur_token attribute holds the current</span>
+<span style="color: #7f007f">        token (Tok). Call get_next_token() to advance to the</span>
+<span style="color: #7f007f">        next token. cur_token is None before the first token is</span>
+<span style="color: #7f007f">        taken and after the source ends.</span>
+<span style="color: #7f007f">    &quot;&quot;&quot;</span>
+    TOKPATTERN = re.compile(<span style="color: #7f007f">&quot;\s*(?:(\d+)|(.))&quot;</span>)
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">__init__</span>(<span style="color: #00007f">self</span>, source):
+        <span style="color: #00007f">self</span>._tokgen = <span style="color: #00007f">self</span>._gen_tokens(source)
+        <span style="color: #00007f">self</span>.cur_token = <span style="color: #00007f">None</span>
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">get_next_token</span>(<span style="color: #00007f">self</span>):
+        <span style="color: #7f007f">&quot;&quot;&quot; Advance to the next token, and return it.</span>
+<span style="color: #7f007f">        &quot;&quot;&quot;</span>
+        <span style="color: #00007f; font-weight: bold">try</span>:
+            <span style="color: #00007f">self</span>.cur_token = <span style="color: #00007f">self</span>._tokgen.next()
+        <span style="color: #00007f; font-weight: bold">except</span> StopIteration:
+            <span style="color: #00007f">self</span>.cur_token = <span style="color: #00007f">None</span>
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">self</span>.cur_token
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">_gen_tokens</span>(<span style="color: #00007f">self</span>, source):
+        <span style="color: #00007f; font-weight: bold">for</span> number, operator <span style="color: #0000aa">in</span> <span style="color: #00007f">self</span>.TOKPATTERN.findall(source):
+            <span style="color: #00007f; font-weight: bold">if</span> number:
+                <span style="color: #00007f; font-weight: bold">yield</span> Tok(<span style="color: #7f007f">&#39;NUMBER&#39;</span>, number)
+            <span style="color: #00007f; font-weight: bold">elif</span> operator == <span style="color: #7f007f">&#39;(&#39;</span>:
+                <span style="color: #00007f; font-weight: bold">yield</span> Tok(<span style="color: #7f007f">&#39;LEFTPAREN&#39;</span>, <span style="color: #7f007f">&#39;(&#39;</span>)
+            <span style="color: #00007f; font-weight: bold">elif</span> operator == <span style="color: #7f007f">&#39;)&#39;</span>:
+                <span style="color: #00007f; font-weight: bold">yield</span> Tok(<span style="color: #7f007f">&#39;RIGHTPAREN&#39;</span>, <span style="color: #7f007f">&#39;)&#39;</span>)
+            <span style="color: #00007f; font-weight: bold">else</span>:
+                <span style="color: #00007f; font-weight: bold">yield</span> Tok(<span style="color: #7f007f">&#39;BINOP&#39;</span>, operator)
+</pre></div>
+<p>Next, <tt class="docutils literal">compute_atom</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">compute_atom</span>(tokenizer):
+    tok = tokenizer.cur_token
+    <span style="color: #00007f; font-weight: bold">if</span> tok.name == <span style="color: #7f007f">&#39;LEFTPAREN&#39;</span>:
+        tokenizer.get_next_token()
+        val = compute_expr(tokenizer, <span style="color: #007f7f">1</span>)
+        <span style="color: #00007f; font-weight: bold">if</span> tokenizer.cur_token.name != <span style="color: #7f007f">&#39;RIGHTPAREN&#39;</span>:
+            parse_error(<span style="color: #7f007f">&#39;unmatched &quot;(&quot;&#39;</span>)
+        tokenizer.get_next_token()
+        <span style="color: #00007f; font-weight: bold">return</span> val
+    <span style="color: #00007f; font-weight: bold">elif</span> tok <span style="color: #0000aa">is</span> <span style="color: #00007f">None</span>:
+            parse_error(<span style="color: #7f007f">&#39;source ended unexpectedly&#39;</span>)
+    <span style="color: #00007f; font-weight: bold">elif</span> tok.name == <span style="color: #7f007f">&#39;BINOP&#39;</span>:
+        parse_error(<span style="color: #7f007f">&#39;expected an atom, not an operator &quot;%s&quot;&#39;</span> % tok.value)
+    <span style="color: #00007f; font-weight: bold">else</span>:
+        <span style="color: #00007f; font-weight: bold">assert</span> tok.name == <span style="color: #7f007f">&#39;NUMBER&#39;</span>
+        tokenizer.get_next_token()
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">int</span>(tok.value)
+</pre></div>
+<p>It handles true atoms (numbers in our case), as well as parenthesized sub-expressions.</p>
+<p>Here is <tt class="docutils literal">compute_expr</tt> itself, which is very close to the pseudo-code shown above:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00"># For each operator, a (precedence, associativity) pair.</span>
+OpInfo = namedtuple(<span style="color: #7f007f">&#39;OpInfo&#39;</span>, <span style="color: #7f007f">&#39;prec assoc&#39;</span>)
+
+OPINFO_MAP = {
+    <span style="color: #7f007f">&#39;+&#39;</span>:    OpInfo(<span style="color: #007f7f">1</span>, <span style="color: #7f007f">&#39;LEFT&#39;</span>),
+    <span style="color: #7f007f">&#39;-&#39;</span>:    OpInfo(<span style="color: #007f7f">1</span>, <span style="color: #7f007f">&#39;LEFT&#39;</span>),
+    <span style="color: #7f007f">&#39;*&#39;</span>:    OpInfo(<span style="color: #007f7f">2</span>, <span style="color: #7f007f">&#39;LEFT&#39;</span>),
+    <span style="color: #7f007f">&#39;/&#39;</span>:    OpInfo(<span style="color: #007f7f">2</span>, <span style="color: #7f007f">&#39;LEFT&#39;</span>),
+    <span style="color: #7f007f">&#39;^&#39;</span>:    OpInfo(<span style="color: #007f7f">3</span>, <span style="color: #7f007f">&#39;RIGHT&#39;</span>),
+}
+
+<span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">compute_expr</span>(tokenizer, min_prec):
+    atom_lhs = compute_atom(tokenizer)
+
+    <span style="color: #00007f; font-weight: bold">while</span> <span style="color: #00007f">True</span>:
+        cur = tokenizer.cur_token
+        <span style="color: #00007f; font-weight: bold">if</span> (cur <span style="color: #0000aa">is</span> <span style="color: #00007f">None</span> <span style="color: #0000aa">or</span> cur.name != <span style="color: #7f007f">&#39;BINOP&#39;</span>
+                        <span style="color: #0000aa">or</span> OPINFO_MAP[cur.value].prec &lt; min_prec):
+            <span style="color: #00007f; font-weight: bold">break</span>
+
+        <span style="color: #007f00"># Inside this loop the current token is a binary operator</span>
+        <span style="color: #00007f; font-weight: bold">assert</span> cur.name == <span style="color: #7f007f">&#39;BINOP&#39;</span>
+
+        <span style="color: #007f00"># Get the operator&#39;s precedence and associativity, and compute a</span>
+        <span style="color: #007f00"># minimal precedence for the recursive call</span>
+        op = cur.value
+        prec, assoc = OPINFO_MAP[op]
+        next_min_prec = prec + <span style="color: #007f7f">1</span> <span style="color: #00007f; font-weight: bold">if</span> assoc == <span style="color: #7f007f">&#39;LEFT&#39;</span> <span style="color: #00007f; font-weight: bold">else</span> prec
+
+        <span style="color: #007f00"># Consume the current token and prepare the next one for the</span>
+        <span style="color: #007f00"># recursive call</span>
+        tokenizer.get_next_token()
+        atom_rhs = compute_expr(tokenizer, next_min_prec)
+
+        <span style="color: #007f00"># Update lhs with the new value</span>
+        atom_lhs = compute_op(op, atom_lhs, atom_rhs)
+
+    <span style="color: #00007f; font-weight: bold">return</span> atom_lhs
+</pre></div>
+<p>The only difference is that this code makes token handling more explicit. It basically follows the usual &quot;recursive-descent protocol&quot;. Each recursive call has the current token available in <tt class="docutils literal">tokenizer.cur_tok</tt>, and makes sure to consume all the tokens it has handled (by calling <tt class="docutils literal">tokenizer.get_next_token()</tt>).</p>
+<p>One additional small piece is missing. <tt class="docutils literal">compute_op</tt> simply performs the arithmetic computation for the supported binary operators:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">compute_op</span>(op, lhs, rhs):
+    lhs = <span style="color: #00007f">int</span>(lhs); rhs = <span style="color: #00007f">int</span>(rhs)
+    <span style="color: #00007f; font-weight: bold">if</span> op == <span style="color: #7f007f">&#39;+&#39;</span>:   <span style="color: #00007f; font-weight: bold">return</span> lhs + rhs
+    <span style="color: #00007f; font-weight: bold">elif</span> op == <span style="color: #7f007f">&#39;-&#39;</span>: <span style="color: #00007f; font-weight: bold">return</span> lhs - rhs
+    <span style="color: #00007f; font-weight: bold">elif</span> op == <span style="color: #7f007f">&#39;*&#39;</span>: <span style="color: #00007f; font-weight: bold">return</span> lhs * rhs
+    <span style="color: #00007f; font-weight: bold">elif</span> op == <span style="color: #7f007f">&#39;/&#39;</span>: <span style="color: #00007f; font-weight: bold">return</span> lhs / rhs
+    <span style="color: #00007f; font-weight: bold">elif</span> op == <span style="color: #7f007f">&#39;^&#39;</span>: <span style="color: #00007f; font-weight: bold">return</span> lhs ** rhs
+    <span style="color: #00007f; font-weight: bold">else</span>:
+        parse_error(<span style="color: #7f007f">&#39;unknown operator &quot;%s&quot;&#39;</span> % op)
+</pre></div>
+</div>
+<div class="section" id="in-the-real-world-clang">
+<h3>In the real world - Clang</h3>
+<p>Precedence climbing is being used in real world tools. One example is <a class="reference external" href="http://clang.llvm.org/">Clang</a>, the C/C++/ObjC front-end. Clang's parser is hand-written recursive descent, and it uses precedence climbing for efficient parsing of expressions. If you're interested to see the code, it's <tt class="docutils literal"><span class="pre">Parser::ParseExpression</span></tt> in <tt class="docutils literal">lib/Parse/ParseExpr.cpp</tt> <a class="footnote-reference" href="parsing-expressions-by-precedence-climbing.html#id6" id="id3">[3]</a>. This method plays the role of <tt class="docutils literal">compute_expr</tt>. The role of <tt class="docutils literal">compute_atom</tt> is played by <tt class="docutils literal"><span class="pre">Parser::ParseCastExpression</span></tt>.</p>
+</div>
+<div class="section" id="other-resources">
+<h3>Other resources</h3>
+<p>Here are some resources I found useful while writing this article:</p>
+<ul class="simple">
+<li>The Wikipedia page for <a class="reference external" href="http://en.wikipedia.org/wiki/Operator-precedence_parser">Operator-precedence parsing</a>.</li>
+<li>The <a class="reference external" href="http://antlr.org/papers/Clarke-expr-parsing-1986.pdf">article by Keith Clarke</a> (PDF), one of the early inventors of the technique.</li>
+<li><a class="reference external" href="http://www.engr.mun.ca/~theo/Misc/exp_parsing.htm">This page</a> by Theodore Norvell, about parsing expressions by recursive descent.</li>
+<li>The Clang source code (exact locations given in the previous section).</li>
+</ul>
+<p>
+<i><b>Update (2016-11-02):</b> Andy Chu <a href="http://www.oilshell.org/blog/2016/11/01.html">notes</a>
+that precedence climbing and <a href="../../../2010/01/02/top-down-operator-precedence-parsing.html">TDOP</a>
+are pretty much the same algorithm, formulated a bit differently. I tend to agree,
+and also note that <a href="../../../2009/03/20/a-recursive-descent-parser-with-an-infix-expression-evaluator.html">Shunting Yard</a>
+is again the same algorithm, except that the explicit recursion is replaced by
+a stack.</i>
+</p>
+<img class="align-center" src="../../../images/hline.jpg" style="width: 320px; height: 5px;" />
+<table class="docutils footnote" frame="void" id="id4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="parsing-expressions-by-precedence-climbing.html#id1">[1]</a></td><td>There are a couple of simplifications made here on purpose. First, I assume only numeric expressions. Identifiers that represent variables can also be viewed as atoms. Second, I ignore unary operators. These are quite easy to incorporate into the algorithm by also treating them as atoms. I leave them out for succinctness.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="parsing-expressions-by-precedence-climbing.html#id2">[2]</a></td><td>In this article I present a parser that computes the result of a numeric expression on-the-fly. Modifying it for accumulating the result into some kind of a parse tree is trivial.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id6" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="parsing-expressions-by-precedence-climbing.html#id3">[3]</a></td><td>Clang's source code is constantly in flow. This information is correct at least for the date the article was written.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="parsing-expressions-by-precedence-climbing.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

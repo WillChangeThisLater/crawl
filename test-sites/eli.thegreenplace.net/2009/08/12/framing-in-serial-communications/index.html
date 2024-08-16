@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Framing in serial communications - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../../index.html" class="navbar-brand">
+                <img src="../../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="../framing-in-serial-communications.html"
+                       rel="bookmark"
+                       title="Permalink to Framing in serial communications">
+                        Framing in serial communications 
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> August 12, 2009 at 05:16</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../../tag/ee-embedded.html">EE & Embedded</a>
+        ,
+    <a href="../../../../tag/serial-port.html">Serial port</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <div class="section" id="introduction">
+<h3>Introduction</h3>
+<p>In the <a class="reference external" href="../../07/a-live-data-monitor-with-python-pyqt-and-pyserial/index.html">previous post</a> we've seen how to send and receive data on the serial port with Python and plot it live using a pretty GUI.</p>
+<p>Notice that the sender script (sender_sim.py) is just sending one byte at a time. The &quot;chunks&quot; of data in the protocol between the sender and receiver are single bytes. This is simple and convenient, but hardly sufficient in the general sense. We want to be able to send multiple-byte data frames between the communicating parties.</p>
+<p>However, there are some challenges that arise immediately:</p>
+<ul class="simple">
+<li>The receiver is just receiving a stream of bytes from the serial port. How does it know when a message begins or ends? How does it know how long the message is?</li>
+<li>Even more seriously, we can not assume a noise-free channel. This is real, physical hardware stuff. Bytes and whole chunks can and will be lost due to electrical noise. Worse, other bytes will be distorted (say, a single bit can be flipped due to noise).</li>
+</ul>
+<p>To see how this can be done in a safe and tested manner, we first have to learn about the basics of the Data Link Layer in computer networks.</p>
+</div>
+<div class="section" id="data-link-layer">
+<h3>Data Link Layer</h3>
+<p>Given a physical layer that can transmit signals between devices, the job of the Data Link Layer <a class="footnote-reference" href="index.html#id9" id="id1">[1]</a> is (roughly stated) to transmit whole frames of data, with some means of assuring the integrity of the data (lack of errors). When we use sockets to communicate over TCP or UDP on the internet, the framing is taken care of deep in the hardware, and we don't even feel it. On the serial port, however, we must take care of the framing and error handling ourselves <a class="footnote-reference" href="index.html#id10" id="id2">[2]</a>.</p>
+<div class="section" id="framing">
+<h4>Framing</h4>
+<p>In chapter 3 of his <a class="reference external" href="../../08/book-review-computer-networks-4th-edition-by-andrew-tanenbaum/index.html">&quot;Computer Networks&quot;</a> textbook, Tanenbaum defines the following methods of framing:</p>
+<ol class="arabic simple">
+<li>Inserting time gaps between frames</li>
+<li>Physical layer coding violations</li>
+<li>Character count</li>
+<li>Flag bytes with byte stuffing</li>
+<li>Flag bytes with bit stuffing</li>
+</ol>
+<p>Methods (1) and (2) are only suitable for a hardware-implemented data link layer <a class="footnote-reference" href="index.html#id11" id="id3">[3]</a>. It is very difficult (read: impossible) to ensure timing when multiple layers of software (running on Windows!) are involved. (2) is an interesting hardware method - but out of the scope of this article.</p>
+<p>Method (3) means specifying in the frame header the number of bytes in the frame. The trouble with this is that the count can be garbled by a transmission error. In such a case, it's very difficult to &quot;resynchronize&quot;. This method is rarely used.</p>
+<p>Methods (4) and (5) are somewhat similar. In this article I'll focus on (4), as (5) is not suitable for serial port communications.</p>
+</div>
+<div class="section" id="flag-bytes-with-byte-stuffing">
+<h4>Flag bytes with byte stuffing</h4>
+<p>Let's begin with a simple idea and develop it into a full, robust scheme.</p>
+<p><em>Flag bytes</em> are special byte values that denote when a frame begins and ends. Suppose that we want to be able to send frames of arbitrary length. A special start flag byte will denote the beginning of the frame, and an end flag byte will denote its end.</p>
+<img src="../../../../images/2009/08/flags_data.png" />
+<p>A question arises, however. Suppose that the value of the end flag is 0x98. What if the value 0x98 appears somewhere in the data? The protocol will get confused and end the message.</p>
+<p>There is a simple solution to this problem that will be familiar to all programmers who know about escaping quotes and special characters in strings. It is called <em>byte stuffing</em>, or <em>octet stuffing</em>, or simply <em>escaping</em> <a class="footnote-reference" href="index.html#id12" id="id4">[4]</a>. The scheme goes as follows:</p>
+<ul class="simple">
+<li>Whenever a flag (start or end) byte appears in the data, we shall insert a special escape byte (ESC) before it. When the receiver sees an ESC, it knows to ignore it and not insert it into the actual data received (de-stuffing).</li>
+<li>Whenever ESC itself has to appear in the data, another ESC is prepended to it. The receiver removes the first one but keeps the second one <a class="footnote-reference" href="index.html#id13" id="id5">[5]</a>.</li>
+</ul>
+<p>Here are a few examples:</p>
+<img src="../../../../images/2009/08/escaping.png" />
+<p>Note that we didn't specify what the data is - it's arbitrary and up the the protocol to decide. The only really required part of the data is some kind of error checking - a checksum, or better yet a CRC. This is customarily the last byte (or last word) of the frame, referring to all the bytes in the frame (in its un-stuffed form).</p>
+<p>This scheme is quite robust: any lost byte (be it a flag, an escape, a data byte or a checksum byte) will cause the receiver to lose just one frame, after which it will resynchronize onto the start flag byte of the next one.</p>
+</div>
+<div class="section" id="ppp">
+<h4>PPP</h4>
+<p>As a matter of fact, this method is a slight simplification of the <a class="reference external" href="http://en.wikipedia.org/wiki/Point-to-Point_Protocol">Point-to-Point Protocol</a> (PPP) which is used by most ISPs for providing ADSL internet to home users, so there's a good chance you're using it now to surf the net and read this article! The framing of PPP is defined in <a class="reference external" href="http://tools.ietf.org/html/rfc1662">RFC 1662</a>.</p>
+<p>In particular, PPP does the following:</p>
+<ul class="simple">
+<li>Both the start and end flag bytes are 0x7E (they shouldn't really be different, if you think about it)</li>
+<li>The escape byte is 0x7D</li>
+<li>Whenever a flag or escape byte appears in the message, it is escaped by 0x7D and the byte itself is XOR-ed with 0x20. So, for example 0x7E becomes 0x7D 0x5E. Similarly 0x7D becomes 0x7D 0x5D. The receiver unsuffs the escape byte and XORs the next byte with 0x20 again to get the original <a class="footnote-reference" href="index.html#id14" id="id6">[6]</a>.</li>
+</ul>
+</div>
+</div>
+<div class="section" id="an-example">
+<h3>An example</h3>
+<p>Let's now see a completely worked-out example that demonstrates how this works.</p>
+<p>Suppose we define the following protocol:</p>
+<ul class="simple">
+<li>Start flag: 0x12</li>
+<li>End flag: 0x13</li>
+<li>Escape (DLE): 0x7D</li>
+</ul>
+<p>And the sender wants to send the following data message (let's ignore its contents for the sake of the example - they're really not that important). The original data is in <strong>(a)</strong>:</p>
+<img src="../../../../images/2009/08/example1.png" />
+<p>The data contains two flags that need to be escaped - an end flag at position 2 (counting from 0, of course!), and a DLE at position 4.</p>
+<p>The sender's data link layer <a class="footnote-reference" href="index.html#id15" id="id7">[7]</a> turns the data into the frame shown in <strong>(b)</strong> - start and end flags are added, and in-message flags are escaped.</p>
+<p>Let's see how the receiver handles such a frame. For demonstration, assume that the first byte the receiver draws from the serial port is not a real part of the message (we want to see how it handles this). In the following diagram, 'Receiver state' is the state of the receiver <em>after</em> the received byte. 'Data buffer' is the currently accumulated message buffer to pass to an upper level:</p>
+<img src="../../../../images/2009/08/example1_rcv.png" />
+<p>A few things to note:</p>
+<ul class="simple">
+<li>The &quot;stray&quot; byte before the header is ignored: according to the protocol each frame has to start with a header, so this isn't part of the frame.</li>
+<li>The start and end flags are not inserted into the data buffer</li>
+<li>Escapes (DLEs) are correctly handled by a special state</li>
+<li>When the frame is finished with an end flag, the receiver has a frame ready to pass to an upper level, and comes back waiting for a header - a new frame.</li>
+</ul>
+<p>Finally, we see that the message received is exactly the message sent. All the protocol details (flags, escapes and so on) were transparently handled by the data link layer <a class="footnote-reference" href="index.html#id16" id="id8">[8]</a>.</p>
+</div>
+<div class="section" id="conclusion">
+<h3>Conclusion</h3>
+<p>There are several methods of handling framing in communications, although most are unsuitable to be used on top of the serial port. Among the ones that are suitable, the most commonly used is <em>byte stuffing</em>. By defining a couple of &quot;magic value&quot; flags and careful rules of escaping, this framing methods is both robust and easy to implement as a software layer. It is also widely used as PPP depends on it.</p>
+<p>Finally, it's important to remember that for a high level of robustness, it's required to add some kind of error checking into the protocol - such as computing a CRC on the message and appending it as the last word of the message, which the receiver can verify before deciding that the message is valid.</p>
+<div align="center" class="align-center"><img class="align-center" src="../../../../images/hline.jpg" style="width: 320px; height: 5px;" /></div>
+<table class="docutils footnote" frame="void" id="id9" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id1">[1]</a></td><td>The Data Link Layer is layer 2 in the <a class="reference external" href="http://en.wikipedia.org/wiki/OSI_model">OSI model</a>. In the <a class="reference external" href="http://en.wikipedia.org/wiki/TCP/IP_model">TCP/IP model</a> it's simply called the &quot;link layer&quot;.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id10" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id2">[2]</a></td><td>The serial port can be configured to add parity bits to bytes. These days, this option is rarely used, because:</td></tr>
+</tbody>
+</table>
+<ul class="simple">
+<li>A single parity bit isn't a very strong means of detecting errors. 2-bit errors fool it.</li>
+<li>Error handling is usually done by stronger means at a higher level.</li>
+</ul>
+<table class="docutils footnote" frame="void" id="id11" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id3">[3]</a></td><td>For example Ethernet (802.3) uses 12 octets of idle characters between frames.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id12" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id4">[4]</a></td><td>You might run into the term DLE - Data Link Escape, which means the same thing. I will use the acronyms DLE and ESC interchangeably.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id13" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id5">[5]</a></td><td>Just like quotes and escape characters in strings! In C: <tt class="docutils literal"><span class="pre">&quot;I</span> <span class="pre">say</span> <span class="pre">\&quot;Hello\&quot;&quot;</span></tt>. To escape the escape, repeat it: <tt class="docutils literal"><span class="pre">&quot;Here</span> <span class="pre">comes</span> <span class="pre">the</span> <span class="pre">backslash:</span> <span class="pre">\\</span> <span class="pre">-</span> <span class="pre">seen</span> <span class="pre">it?&quot;</span></tt></td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id14" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id6">[6]</a></td><td>I'd love to hear why this XOR-ing is required. One simple reason I can think of is to prevent the flag and escape bytes appearing &quot;on the line&quot; even after they're escaped. Presumably this improves resynchronization if the escape byte is lost?</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id15" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id7">[7]</a></td><td>Which is just a fancy way to say &quot;a protocol wrapping function&quot;, since the layer is implemented in software.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id16" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id8">[8]</a></td><td>Such transparency is one of the greatest ideas of layered network protocols. So when we implement protocols in software, it's a good thing to keep in mind - transparency aids modularity and decoupling, it's a <em>good thing</em>.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../../theme/js/count.js"></script>
+</body>
+</html>

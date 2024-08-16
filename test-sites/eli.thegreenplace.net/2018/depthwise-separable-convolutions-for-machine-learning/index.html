@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Depthwise separable convolutions for machine learning - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Depthwise separable convolutions for machine learning">
+                        Depthwise separable convolutions for machine learning
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> April 04, 2018 at 06:21</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/math.html">Math</a>
+        ,
+    <a href="../../tag/machine-learning.html">Machine Learning</a>
+        ,
+    <a href="../../tag/python.html">Python</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>Convolutions are an important tool in modern deep neural networks (DNNs). This
+post is going to discuss some common types of convolutions, specifically
+regular and depthwise separable convolutions. My focus will be on the
+implementation of these operation, showing from-scratch Numpy-based code to
+compute them and diagrams that explain how things work.</p>
+<p>Note that my main goal here is to explain how depthwise separable convolutions
+differ from regular ones; if you're completely new to convolutions I suggest
+reading some more introductory resources first.</p>
+<p>The code here is compatible with TensorFlow's definition of convolutions in
+the <a class="reference external" href="https://www.tensorflow.org/api_docs/python/tf/nn">tf.nn</a> module. After
+reading this post, the documentation of TensorFlow's convolution ops should be
+easy to decipher.</p>
+<div class="section" id="basic-2d-convolution">
+<h2>Basic 2D convolution</h2>
+<p>The basic idea behind a 2D convolution is sliding a small window (usually called
+a &quot;filter&quot;) over a larger 2D array, and performing a dot product between the
+filter elements and the corresponding input array elements at every position.</p>
+<p>Here's a diagram demonstrating the application of a 3x3 convolution filter to
+a 6x6 array, in 3 different positions. <tt class="docutils literal">W</tt> is the filter, and the yellow-ish
+array on the right is the result; the red square shows which element in the
+result array is being computed.</p>
+<object class="align-center" data="../../images/2018/conv2d-single-block.svg" style="width: 400px;" type="image/svg+xml">Single-channel 2D convolution</object>
+<p>The topmost diagram shows the important concept of <em>padding</em>: what should we do
+when the window goes &quot;out of bounds&quot; on the input array. There are several
+options, with the following two being most common in DNNs:</p>
+<ul class="simple">
+<li><em>Valid</em> padding: in which only valid, in-bounds windows are considered. This
+also makes the output smaller than the input, because border elements can't be
+in the center of a filter (unless the filter is 1x1).</li>
+<li><em>Same</em> padding: in which we assume there's some constant value outside the
+bounds of the input (usually 0) and the filter is applied to every element.
+In this case the output array has the same size as the input array. The
+diagrams above depict same padding, which I'll keep using throughout the post.</li>
+</ul>
+<p>There are other options for the basic 2D convolution case. For example, the
+filter can be moving over the input in jumps of more than 1, thus not centering
+on all elements. This is called <em>stride</em>, and in this post I'm always using
+stride of 1. Convolutions can also be dilated (or <em>atrous</em>), wherein the
+filter is expanded with gaps between every element. In this post I'm not going
+to discuss dilated convolutions and other options - there are plenty of
+resources on these topics online.</p>
+</div>
+<div class="section" id="implementing-the-2d-convolution">
+<h2>Implementing the 2D convolution</h2>
+<p>Here is a full Python implementation of the simple 2D convolution. It's called
+&quot;single channel&quot; to distinguish it from the more general case in which the input
+has more than two dimensions; we'll get to that shortly.</p>
+<p>This implementation is fully self-contained, and only needs Numpy to work. All
+the loops are fully explicit - I specifically avoided vectorizing them for
+efficiency to maintain clarity:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">conv2d_single_channel</span><span class="p">(</span><span class="nb">input</span><span class="p">,</span> <span class="n">w</span><span class="p">):</span>
+    <span class="sd">&quot;&quot;&quot;Two-dimensional convolution of a single channel.</span>
+
+<span class="sd">    Uses SAME padding with 0s, a stride of 1 and no dilation.</span>
+
+<span class="sd">    input: input array with shape (height, width)</span>
+<span class="sd">    w: filter array with shape (fd, fd) with odd fd.</span>
+
+<span class="sd">    Returns a result with the same shape as input.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">assert</span> <span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="ow">and</span> <span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">%</span> <span class="mi">2</span> <span class="o">==</span> <span class="mi">1</span>
+
+    <span class="c1"># SAME padding with zeros: creating a new padded array to simplify index</span>
+    <span class="c1"># calculations and to avoid checking boundary conditions in the inner loop.</span>
+    <span class="c1"># padded_input is like input, but padded on all sides with</span>
+    <span class="c1"># half-the-filter-width of zeros.</span>
+    <span class="n">padded_input</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">pad</span><span class="p">(</span><span class="nb">input</span><span class="p">,</span>
+                          <span class="n">pad_width</span><span class="o">=</span><span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">//</span> <span class="mi">2</span><span class="p">,</span>
+                          <span class="n">mode</span><span class="o">=</span><span class="s1">&#39;constant&#39;</span><span class="p">,</span>
+                          <span class="n">constant_values</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+
+    <span class="n">output</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="nb">input</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">output</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]):</span>
+        <span class="k">for</span> <span class="n">j</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">output</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]):</span>
+            <span class="c1"># This inner double loop computes every output element, by</span>
+            <span class="c1"># multiplying the corresponding window into the input with the</span>
+            <span class="c1"># filter.</span>
+            <span class="k">for</span> <span class="n">fi</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]):</span>
+                <span class="k">for</span> <span class="n">fj</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]):</span>
+                    <span class="n">output</span><span class="p">[</span><span class="n">i</span><span class="p">,</span> <span class="n">j</span><span class="p">]</span> <span class="o">+=</span> <span class="n">padded_input</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="n">fi</span><span class="p">,</span> <span class="n">j</span> <span class="o">+</span> <span class="n">fj</span><span class="p">]</span> <span class="o">*</span> <span class="n">w</span><span class="p">[</span><span class="n">fi</span><span class="p">,</span> <span class="n">fj</span><span class="p">]</span>
+    <span class="k">return</span> <span class="n">output</span>
+</pre></div>
+</div>
+<div class="section" id="convolutions-in-3-and-4-dimensions">
+<h2>Convolutions in 3 and 4 dimensions</h2>
+<p>The convolution computed above works in two dimensions; yet, most convolutions
+used in DNNs are 4-dimensional. For example, TensorFlow's <tt class="docutils literal">tf.nn.conv2d</tt> op
+takes a 4D input tensor and a 4D filter tensor. How come?</p>
+<p>The two additional dimensions in the input tensor are <em>channel</em> and <em>batch</em>. A
+canonical example of channels is color images in RGB format. Each pixel has a
+value for red, green and blue - three channels overall. So instead of seeing it
+as a matrix of triples, we can see it as a 3D tensor where one dimension is
+height, another width and another channel (also called the <em>depth</em> dimension).</p>
+<p>Batch is somewhat different. ML training - with stochastic gradient descent -
+is often done in batches for performance; we train the model not on a single
+sample at a time, but a &quot;batch&quot; of samples, usually some power of two.
+Performing all the operations in tandem on a batch of data makes it easier to
+leverage the SIMD capabilities of modern processors. So it doesn't have any
+mathematical significance here - it can be seen as an outer loop over all
+operations, performing them for a set of inputs and producing a corresponding
+set of outputs.</p>
+<p>For filters, the 4 dimensions are height, width, input channel and output
+channel. Input channel is the same as the input tensor's; output channel
+collects multiple filters, each of which can be different.</p>
+<p>This can be slightly difficult to grasp from text, so here's a diagram:</p>
+<object class="align-center" data="../../images/2018/conv2d-3d.svg" style="width: 300px;" type="image/svg+xml">Multi-channel 2D convolution</object>
+<p>In the diagram and the implementation I'm going to ignore the batch dimension,
+since it's not really mathematically interesting. So the input image has three
+dimensions - in this diagram height and width are 8 and depth is 3. The filter
+is 3x3 with depth 3. In each step, the filter is slid over the input <em>in two
+dimensions</em>, and all of its elements are multiplied with the corresponding
+elements in the input. That's 3x3x3=27 multiplications added into the output
+element.</p>
+<p>Note that this is different from a 3D convolution, where a filter is moved
+across the input in all 3 dimensions; true 3D convolutions are not widely used
+in DNNs at this time.</p>
+<p>So, to reitarate, to compute the multi-channel convolution as shown in the
+diagram above, we compute each of the 64 output elements by a dot-product of the
+filter with the relevant parts of the input tensor. This produces a single
+output channel. To produce additional output channels, we perform the
+convolution with additional filters. So if our filter has dimensions (3, 3, 3,
+4) this means 4 different 3x3x3 filters. The output will thus have dimensions
+8x8 for the spatials and 4 for depth.</p>
+<p>Here's the Numpy implementation of this algorithm:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">conv2d_multi_channel</span><span class="p">(</span><span class="nb">input</span><span class="p">,</span> <span class="n">w</span><span class="p">):</span>
+    <span class="sd">&quot;&quot;&quot;Two-dimensional convolution with multiple channels.</span>
+
+<span class="sd">    Uses SAME padding with 0s, a stride of 1 and no dilation.</span>
+
+<span class="sd">    input: input array with shape (height, width, in_depth)</span>
+<span class="sd">    w: filter array with shape (fd, fd, in_depth, out_depth) with odd fd.</span>
+<span class="sd">       in_depth is the number of input channels, and has the be the same as</span>
+<span class="sd">       input&#39;s in_depth; out_depth is the number of output channels.</span>
+
+<span class="sd">    Returns a result with shape (height, width, out_depth).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">assert</span> <span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="ow">and</span> <span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">%</span> <span class="mi">2</span> <span class="o">==</span> <span class="mi">1</span>
+
+    <span class="n">padw</span> <span class="o">=</span> <span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">//</span> <span class="mi">2</span>
+    <span class="n">padded_input</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">pad</span><span class="p">(</span><span class="nb">input</span><span class="p">,</span>
+                          <span class="n">pad_width</span><span class="o">=</span><span class="p">((</span><span class="n">padw</span><span class="p">,</span> <span class="n">padw</span><span class="p">),</span> <span class="p">(</span><span class="n">padw</span><span class="p">,</span> <span class="n">padw</span><span class="p">),</span> <span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)),</span>
+                          <span class="n">mode</span><span class="o">=</span><span class="s1">&#39;constant&#39;</span><span class="p">,</span>
+                          <span class="n">constant_values</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+
+    <span class="n">height</span><span class="p">,</span> <span class="n">width</span><span class="p">,</span> <span class="n">in_depth</span> <span class="o">=</span> <span class="nb">input</span><span class="o">.</span><span class="n">shape</span>
+    <span class="k">assert</span> <span class="n">in_depth</span> <span class="o">==</span> <span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span>
+    <span class="n">out_depth</span> <span class="o">=</span> <span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">3</span><span class="p">]</span>
+    <span class="n">output</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="n">height</span><span class="p">,</span> <span class="n">width</span><span class="p">,</span> <span class="n">out_depth</span><span class="p">))</span>
+
+    <span class="k">for</span> <span class="n">out_c</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">out_depth</span><span class="p">):</span>
+        <span class="c1"># For each output channel, perform 2d convolution summed across all</span>
+        <span class="c1"># input channels.</span>
+        <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">height</span><span class="p">):</span>
+            <span class="k">for</span> <span class="n">j</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">width</span><span class="p">):</span>
+                <span class="c1"># Now the inner loop also works across all input channels.</span>
+                <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">in_depth</span><span class="p">):</span>
+                    <span class="k">for</span> <span class="n">fi</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]):</span>
+                        <span class="k">for</span> <span class="n">fj</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]):</span>
+                            <span class="n">w_element</span> <span class="o">=</span> <span class="n">w</span><span class="p">[</span><span class="n">fi</span><span class="p">,</span> <span class="n">fj</span><span class="p">,</span> <span class="n">c</span><span class="p">,</span> <span class="n">out_c</span><span class="p">]</span>
+                            <span class="n">output</span><span class="p">[</span><span class="n">i</span><span class="p">,</span> <span class="n">j</span><span class="p">,</span> <span class="n">out_c</span><span class="p">]</span> <span class="o">+=</span> <span class="p">(</span>
+                                <span class="n">padded_input</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="n">fi</span><span class="p">,</span> <span class="n">j</span> <span class="o">+</span> <span class="n">fj</span><span class="p">,</span> <span class="n">c</span><span class="p">]</span> <span class="o">*</span> <span class="n">w_element</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">output</span>
+</pre></div>
+<p>An interesting point to note here w.r.t. TensorFlow's <tt class="docutils literal">tf.nn.conv2d</tt> op. If
+you read its semantics you'll see discussion of <em>layout</em> or <em>data format</em>, which
+is <tt class="docutils literal">NHWC</tt> by default. NHWC simply means the order of dimensions in a 4D
+tensor is:</p>
+<ul class="simple">
+<li><strong>N</strong>: batch</li>
+<li><strong>H</strong>: height (spatial dimension)</li>
+<li><strong>W</strong>: width (spatial dimension)</li>
+<li><strong>C</strong>: channel (depth)</li>
+</ul>
+<p><tt class="docutils literal">NHWC</tt> is the default layout for TensorFlow; another commonly used layout is
+<tt class="docutils literal">NCHW</tt>, because it's the format preferred by NVIDIA's DNN libraries. The code
+samples here follow the default.</p>
+</div>
+<div class="section" id="depthwise-convolution">
+<h2>Depthwise convolution</h2>
+<p>Depthwise convolutions are a variation on the operation discussed so far. In the
+regular 2D convolution performed over multiple input channels, the filter is as
+deep as the input and lets us freely mix channels to generate each element in
+the output. Depthwise convolutions don't do that - each channel is kept separate
+- hence the name <em>depthwise</em>. Here's a diagram to help explain how that works:</p>
+<object class="align-center" data="../../images/2018/conv2d-depthwise.svg" style="width: 500px;" type="image/svg+xml">Depthwise 2D convolution</object>
+<p>There are three conceptual stages here:</p>
+<ol class="arabic simple">
+<li>Split the input into channels, and split the filter into channels (the number
+of channels between input and filter must match).</li>
+<li>For each of the channels, convolve the input with the corresponding filter,
+producing an output tensor (2D).</li>
+<li>Stack the output tensors back together.</li>
+</ol>
+<p>Here's the code implementing it:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">depthwise_conv2d</span><span class="p">(</span><span class="nb">input</span><span class="p">,</span> <span class="n">w</span><span class="p">):</span>
+    <span class="sd">&quot;&quot;&quot;Two-dimensional depthwise convolution.</span>
+
+<span class="sd">    Uses SAME padding with 0s, a stride of 1 and no dilation. A single output</span>
+<span class="sd">    channel is used per input channel (channel_multiplier=1).</span>
+
+<span class="sd">    input: input array with shape (height, width, in_depth)</span>
+<span class="sd">    w: filter array with shape (fd, fd, in_depth)</span>
+
+<span class="sd">    Returns a result with shape (height, width, in_depth).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">assert</span> <span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">==</span> <span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="ow">and</span> <span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">%</span> <span class="mi">2</span> <span class="o">==</span> <span class="mi">1</span>
+
+    <span class="n">padw</span> <span class="o">=</span> <span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">//</span> <span class="mi">2</span>
+    <span class="n">padded_input</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">pad</span><span class="p">(</span><span class="nb">input</span><span class="p">,</span>
+                          <span class="n">pad_width</span><span class="o">=</span><span class="p">((</span><span class="n">padw</span><span class="p">,</span> <span class="n">padw</span><span class="p">),</span> <span class="p">(</span><span class="n">padw</span><span class="p">,</span> <span class="n">padw</span><span class="p">),</span> <span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">)),</span>
+                          <span class="n">mode</span><span class="o">=</span><span class="s1">&#39;constant&#39;</span><span class="p">,</span>
+                          <span class="n">constant_values</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+
+    <span class="n">height</span><span class="p">,</span> <span class="n">width</span><span class="p">,</span> <span class="n">in_depth</span> <span class="o">=</span> <span class="nb">input</span><span class="o">.</span><span class="n">shape</span>
+    <span class="k">assert</span> <span class="n">in_depth</span> <span class="o">==</span> <span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span>
+    <span class="n">output</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="n">height</span><span class="p">,</span> <span class="n">width</span><span class="p">,</span> <span class="n">in_depth</span><span class="p">))</span>
+
+    <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">in_depth</span><span class="p">):</span>
+        <span class="c1"># For each input channel separately, apply its corresponsing filter</span>
+        <span class="c1"># to the input.</span>
+        <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">height</span><span class="p">):</span>
+            <span class="k">for</span> <span class="n">j</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">width</span><span class="p">):</span>
+                <span class="k">for</span> <span class="n">fi</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]):</span>
+                    <span class="k">for</span> <span class="n">fj</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">w</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]):</span>
+                        <span class="n">w_element</span> <span class="o">=</span> <span class="n">w</span><span class="p">[</span><span class="n">fi</span><span class="p">,</span> <span class="n">fj</span><span class="p">,</span> <span class="n">c</span><span class="p">]</span>
+                        <span class="n">output</span><span class="p">[</span><span class="n">i</span><span class="p">,</span> <span class="n">j</span><span class="p">,</span> <span class="n">c</span><span class="p">]</span> <span class="o">+=</span> <span class="p">(</span>
+                            <span class="n">padded_input</span><span class="p">[</span><span class="n">i</span> <span class="o">+</span> <span class="n">fi</span><span class="p">,</span> <span class="n">j</span> <span class="o">+</span> <span class="n">fj</span><span class="p">,</span> <span class="n">c</span><span class="p">]</span> <span class="o">*</span> <span class="n">w_element</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">output</span>
+</pre></div>
+<p>In TensorFlow, the corresponding op is <tt class="docutils literal">tf.nn.depthwise_conv2d</tt>; this op has
+the notion of <em>channel multiplier</em> which lets us compute multiple outputs for
+each input channel (somewhat like the number of output channels concept in
+<tt class="docutils literal">conv2d</tt>).</p>
+</div>
+<div class="section" id="depthwise-separable-convolution">
+<h2>Depthwise separable convolution</h2>
+<p>The depthwise convolution shown above is more commonly used in combination with
+an additional step to mix in the channels - <em>depthwise separable convolution</em>
+<a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>:</p>
+<object class="align-center" data="../../images/2018/conv2d-depthwise-separable.svg" style="width: 500px;" type="image/svg+xml">Depthwise separable convolution</object>
+<p>After completing the depthwise convolution, and additional step is performed: a
+1x1 convolution across channels. This is exactly the same operation as the
+&quot;convolution in 3 dimensions discussed earlier&quot; - just with a 1x1 spatial
+filter. This step can be repeated multiple times for different output channels.
+The output channels all take the output of the depthwise step and mix it up
+with different 1x1 convolutions. Here's the implementation:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">separable_conv2d</span><span class="p">(</span><span class="nb">input</span><span class="p">,</span> <span class="n">w_depth</span><span class="p">,</span> <span class="n">w_pointwise</span><span class="p">):</span>
+    <span class="sd">&quot;&quot;&quot;Depthwise separable convolution.</span>
+
+<span class="sd">    Performs 2d depthwise convolution with w_depth, and then applies a pointwise</span>
+<span class="sd">    1x1 convolution with w_pointwise on the result.</span>
+
+<span class="sd">    Uses SAME padding with 0s, a stride of 1 and no dilation. A single output</span>
+<span class="sd">    channel is used per input channel (channel_multiplier=1) in w_depth.</span>
+
+<span class="sd">    input: input array with shape (height, width, in_depth)</span>
+<span class="sd">    w_depth: depthwise filter array with shape (fd, fd, in_depth)</span>
+<span class="sd">    w_pointwise: pointwise filter array with shape (in_depth, out_depth)</span>
+
+<span class="sd">    Returns a result with shape (height, width, out_depth).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="c1"># First run the depthwise convolution. Its result has the same shape as</span>
+    <span class="c1"># input.</span>
+    <span class="n">depthwise_result</span> <span class="o">=</span> <span class="n">depthwise_conv2d</span><span class="p">(</span><span class="nb">input</span><span class="p">,</span> <span class="n">w_depth</span><span class="p">)</span>
+
+    <span class="n">height</span><span class="p">,</span> <span class="n">width</span><span class="p">,</span> <span class="n">in_depth</span> <span class="o">=</span> <span class="n">depthwise_result</span><span class="o">.</span><span class="n">shape</span>
+    <span class="k">assert</span> <span class="n">in_depth</span> <span class="o">==</span> <span class="n">w_pointwise</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+    <span class="n">out_depth</span> <span class="o">=</span> <span class="n">w_pointwise</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+    <span class="n">output</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="n">height</span><span class="p">,</span> <span class="n">width</span><span class="p">,</span> <span class="n">out_depth</span><span class="p">))</span>
+
+    <span class="k">for</span> <span class="n">out_c</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">out_depth</span><span class="p">):</span>
+        <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">height</span><span class="p">):</span>
+            <span class="k">for</span> <span class="n">j</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">width</span><span class="p">):</span>
+                <span class="k">for</span> <span class="n">c</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">in_depth</span><span class="p">):</span>
+                    <span class="n">w_element</span> <span class="o">=</span> <span class="n">w_pointwise</span><span class="p">[</span><span class="n">c</span><span class="p">,</span> <span class="n">out_c</span><span class="p">]</span>
+                    <span class="n">output</span><span class="p">[</span><span class="n">i</span><span class="p">,</span> <span class="n">j</span><span class="p">,</span> <span class="n">out_c</span><span class="p">]</span> <span class="o">+=</span> <span class="n">depthwise_result</span><span class="p">[</span><span class="n">i</span><span class="p">,</span> <span class="n">j</span><span class="p">,</span> <span class="n">c</span><span class="p">]</span> <span class="o">*</span> <span class="n">w_element</span>
+    <span class="k">return</span> <span class="n">output</span>
+</pre></div>
+<p>In TensorFlow, this op is called <tt class="docutils literal">tf.nn.separable_conv2d</tt>. Similarly to our
+implementation it takes two different filter parameters: <tt class="docutils literal">depthwise_filter</tt>
+for the depthwise step and <tt class="docutils literal">pointwise_filter</tt> for the mixing step.</p>
+<p>Depthwise separable convolutions have become popular in DNN models recently, for
+two reasons:</p>
+<ol class="arabic simple">
+<li>They have fewer parameters than &quot;regular&quot; convolutional layers, and thus are
+less prone to overfitting.</li>
+<li>With fewer parameters, they also require less operations to compute, and thus
+are cheaper and faster.</li>
+</ol>
+<p>Let's examine the difference between the number of parameters first. We'll start
+with some definitions:</p>
+<ul class="simple">
+<li><tt class="docutils literal">S</tt>: spatial dimension - width and height, assuming square inputs.</li>
+<li><tt class="docutils literal">F</tt>: filter width and height, assuming square filter.</li>
+<li><tt class="docutils literal">inC</tt>: number of input channels.</li>
+<li><tt class="docutils literal">outC</tt>: number of output channels.</li>
+</ul>
+<p>We also assume <tt class="docutils literal">SAME</tt> padding as discussed above, so that the spatial size
+of the output matches the input.</p>
+<p>In a regular convolution there are <tt class="docutils literal">F*F*inC*outC</tt> parameters, because every
+filter is 3D and there's one such filter per output channel.</p>
+<p>In depthwise separable convolutions there are <tt class="docutils literal">F*F*inC</tt> parameters for the
+depthwise part, and then <tt class="docutils literal">inC*outC</tt> parameters for the mixing part. It should
+be obvious that for a non-trivial <tt class="docutils literal">outC</tt>, the sum of these two is significanly
+smaller than <tt class="docutils literal">F*F*inC*outC</tt>.</p>
+<p>Now on to computational cost. For a regular convolution, we perform <tt class="docutils literal">F*F*inC</tt>
+operations at each position of the input (to compute the 2D convolution over 3
+dimensions). For the whole input, the number of computations is thus
+<tt class="docutils literal">F*F*inC*S*S</tt> and taking all the output channels we get <tt class="docutils literal">F*F*inC*S*S*outC</tt>.</p>
+<p>For depthwise separable convolutions we need <tt class="docutils literal">F*F*inC*S*S*</tt> operations for
+the depthwise part; then we need <tt class="docutils literal">S*S*inC*outC</tt> operations for the mixing
+part. Let's use some real numbers to get a feel for the difference:</p>
+<p>We'll assume <tt class="docutils literal">S=128</tt>, <tt class="docutils literal">F=3</tt>, <tt class="docutils literal">inC=3</tt>, <tt class="docutils literal">outC=16</tt>. For regular
+convolution:</p>
+<ul class="simple">
+<li>Parameters: <tt class="docutils literal">3*3*3*16 = 432</tt></li>
+<li>Computation cost: <tt class="docutils literal">3*3*3*128*128*16 = ~7e6</tt></li>
+</ul>
+<p>For depthwise separable convolution:</p>
+<ul class="simple">
+<li>Parameters: <tt class="docutils literal">3*3*3+3*16 = 75</tt></li>
+<li>Computation cost: <tt class="docutils literal">3*3*3*128*128+128*128*3*16 = ~1.2e6</tt></li>
+</ul>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>The term <em>separable</em> comes from image processing, where
+<em>spatially separable convolutions</em> are sometimes used to save on
+computation resources. A spatial convolution is separable when the 2D
+convolution filter can be expressed as an outer product of two vectors.
+This lets us compute some 2D convolutions more cheaply. In the case of
+DNNs, the spatial filter is not necessarily separable but the channel
+dimension is separable from the spatial dimensions.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>C++: Deleting destructors and virtual operator delete - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to C++: Deleting destructors and virtual operator delete">
+                        C++: Deleting destructors and virtual operator delete
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> August 21, 2015 at 05:37</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../tag/assembly.html">Assembly</a>
+        ,
+    <a href="../../tag/compilation.html">Compilation</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This post starts with a fairly obscure topic - how an overloaded <tt class="docutils literal">operator
+delete</tt> behaves in light of polymorphism; amazingly, it then gets even more
+obscure - shedding light on the trickery the compiler employs to make this
+work, by generating more than one destructor for certain classes. If you're into
+such things, read on. If not, sorry about that; I heard that three new
+Javascript libraries were released this week for MVC JSON-based dynamic CSS
+layout. Everyone's switching! Hurry up to keep up with the cool guys and leave
+this grumpy compiler engineer to mumble to himself.</p>
+<div class="section" id="virtual-operator-delete">
+<h2>Virtual operator delete?</h2>
+<p>Consider this code sample:</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;cstdio&gt;</span><span class="cp"></span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">Animal</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">public</span><span class="o">:</span><span class="w"></span>
+<span class="w">  </span><span class="k">virtual</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">say</span><span class="p">()</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">virtual</span><span class="w"> </span><span class="o">~</span><span class="n">Animal</span><span class="p">()</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+<span class="p">};</span><span class="w"></span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">Sheep</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="k">public</span><span class="w"> </span><span class="n">Animal</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">public</span><span class="o">:</span><span class="w"></span>
+<span class="w">  </span><span class="k">virtual</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="n">say</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Sheep says baaaaa</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">virtual</span><span class="w"> </span><span class="o">~</span><span class="n">Sheep</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Sheep is dead</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="k">operator</span><span class="w"> </span><span class="k">delete</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">p</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Reclaiming Sheep storage from %p</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">p</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="o">::</span><span class="k">operator</span><span class="w"> </span><span class="nf">delete</span><span class="p">(</span><span class="n">p</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">};</span><span class="w"></span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="o">**</span><span class="w"> </span><span class="n">argv</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">Animal</span><span class="o">*</span><span class="w"> </span><span class="n">ap</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">Sheep</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">ap</span><span class="o">-&gt;</span><span class="n">say</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="k">delete</span><span class="w"> </span><span class="n">ap</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>What happens when <tt class="docutils literal">ap</tt> is deleted? Two things:</p>
+<ol class="arabic simple">
+<li>The destructor of the object pointed to by <tt class="docutils literal">ap</tt> is called.</li>
+<li><tt class="docutils literal">operator delete</tt> is called on <tt class="docutils literal">ap</tt> to reclaim heap storage.</li>
+</ol>
+<p>Part 1 is fairly clear: the <em>static</em> type of <tt class="docutils literal">ap</tt> is <tt class="docutils literal">Animal</tt>, but the
+compiler knows that <tt class="docutils literal">Animal</tt> has a virtual destructor. So it looks up the
+<em>actual</em> destructor to invoke in the virtual table stored in the object <tt class="docutils literal">ap</tt>
+points to. Since the <em>dynamic</em> type of <tt class="docutils literal">ap</tt> is <tt class="docutils literal">Sheep</tt>, the destructor found
+there will be <tt class="docutils literal"><span class="pre">Sheep::~Sheep</span></tt>, which is correct.</p>
+<p>What about that <tt class="docutils literal">operator delete</tt>, though? Is <tt class="docutils literal">operator delete</tt> virtual too?
+Is is also stored in the virtual table? Because if it isn't, how does the
+compiler know which <tt class="docutils literal">operator delete</tt> to invoke?</p>
+<p>No, <tt class="docutils literal">operator delete</tt> is <em>not</em> virtual. It is <em>not</em> stored in the virtual
+table. In fact, <tt class="docutils literal">operator delete</tt> is a static member. The C++11 standard says
+so explicitly in secton 12.5:</p>
+<blockquote>
+Any deallocation function for a class X is a static member (even if not
+explicitly declared <tt class="docutils literal">static</tt>).</blockquote>
+<p>It also adds:</p>
+<blockquote>
+Since member allocation and deallocation functions are static they cannot be
+virtual.</blockquote>
+<p>And if you keep reading, it actually mandates that even though this is the case,
+when the base destructor is virtual <tt class="docutils literal">operator delete</tt> will be correctly looked
+up in the scope of the class that is the <em>dynamic</em>, not the <em>static</em> type of the
+object.</p>
+<p>Indeed, the code snippet above works correctly and prints:</p>
+<div class="highlight"><pre><span></span>Sheep says baaaaa
+Sheep is dead
+Reclaiming Sheep storage from 0x1ed1be0
+</pre></div>
+</div>
+<div class="section" id="deleting-destructor">
+<h2>Deleting destructor</h2>
+<p>So how does this work, if <tt class="docutils literal">operator delete</tt> is not virtual? Then answer is in
+a special destructor created for by the compiler. It's called the <em>deleting
+destructor</em> and its existence is described by the <a class="reference external" href="https://mentorembedded.github.io/cxx-abi/abi.html">Itanium C++ ABI</a>:</p>
+<blockquote>
+<em>deleting destructor of a class T</em> -  A function that, in addition to the
+actions required of a complete object destructor, calls the appropriate
+deallocation function (i.e,. <tt class="docutils literal">operator delete</tt>) for T.</blockquote>
+<p>The ABI goes on to provide more details:</p>
+<blockquote>
+The entries for virtual destructors are actually pairs of entries. The first
+destructor, called the complete object destructor, performs the destruction
+without calling delete() on the object. The second destructor, called the
+deleting destructor, calls delete() after destroying the object.</blockquote>
+<p>So now the mechanics of this operation should be fairly clear. The compiler
+mimics &quot;virtuality&quot; of <tt class="docutils literal">operator delete</tt> by invoking it from the destructor.
+Since the destructor is virtual, what ends up called eventually is the
+destructor for the dynamic type of the object. In our example this would be
+the destructor of <tt class="docutils literal">Sheep</tt>, which can call the right <tt class="docutils literal">operator delete</tt> since
+it's in the same static scope.</p>
+<p>However, as the ABI says, such classes need two destructors. If an object is
+destructed but not deleted from the heap, calling <tt class="docutils literal">operator delete</tt> is wrong.
+So a separate version of the destructor exists for non-<tt class="docutils literal">delete</tt> destructions.</p>
+</div>
+<div class="section" id="examining-how-the-compiler-implements-deleting-destructors">
+<h2>Examining how the compiler implements deleting destructors</h2>
+<p>That's quite a bit of theory. Let's see how this is done in practice by studying
+the machine code generated by gcc for our code sample. First, I'll slightly
+modify <tt class="docutils literal">main</tt> to invoke another function that just creates and discards a new
+<tt class="docutils literal">Sheep</tt> without involving the heap.</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">foo</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">Sheep</span><span class="w"> </span><span class="n">s</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="o">**</span><span class="w"> </span><span class="n">argv</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">Animal</span><span class="o">*</span><span class="w"> </span><span class="n">ap</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">Sheep</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">ap</span><span class="o">-&gt;</span><span class="n">say</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="k">delete</span><span class="w"> </span><span class="n">ap</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">foo</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>And compiling this with the flags <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>:</p>
+<div class="highlight"><pre><span></span>g++ -O2 -g -static -std=c++11 -fno-inline -fno-exceptions
+</pre></div>
+<p>We get the following disassembly for <tt class="docutils literal">main</tt>. I've annotated the disassembly
+with comments to explain what's going on:</p>
+<div class="highlight"><pre><span></span><span class="mo">0000000000400</span><span class="n">cf0</span><span class="w"> </span><span class="o">&lt;</span><span class="n">main</span><span class="o">&gt;:</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">cf0</span><span class="o">:</span><span class="w">    </span><span class="n">push</span><span class="w">   </span><span class="o">%</span><span class="n">rbx</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">cf1</span><span class="o">:</span><span class="w">    </span><span class="n">mov</span><span class="w">    </span><span class="n">$0x8</span><span class="p">,</span><span class="o">%</span><span class="n">edi</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Call operator new to allocate a new object of type Sheep, and call</span>
+<span class="w">  </span><span class="c1">// the constructor of Sheep. Neither Sheep nor Animal have fields, so</span>
+<span class="w">  </span><span class="c1">// their size is 8 bytes for the virtual table pointer.</span>
+<span class="w">  </span><span class="c1">// The pointer to the object will live in %rbx. The vtable pointer in this</span>
+<span class="w">  </span><span class="c1">// object (set up by the constructor of Sheep) points to the the virtual</span>
+<span class="w">  </span><span class="c1">// table of Sheep, because this is the actual type of the object (even</span>
+<span class="w">  </span><span class="c1">// though we hold it by a pointer to Animal here).</span>
+<span class="w">  </span><span class="mi">400</span><span class="n">cf6</span><span class="o">:</span><span class="w">    </span><span class="n">callq</span><span class="w">  </span><span class="mi">401750</span><span class="w"> </span><span class="o">&lt;</span><span class="n">_Znwm</span><span class="o">&gt;</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">cfb</span><span class="o">:</span><span class="w">    </span><span class="n">mov</span><span class="w">    </span><span class="o">%</span><span class="n">rax</span><span class="p">,</span><span class="o">%</span><span class="n">rbx</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">cfe</span><span class="o">:</span><span class="w">    </span><span class="n">mov</span><span class="w">    </span><span class="o">%</span><span class="n">rax</span><span class="p">,</span><span class="o">%</span><span class="n">rdi</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d01</span><span class="o">:</span><span class="w">    </span><span class="n">callq</span><span class="w">  </span><span class="mf">4011f</span><span class="mi">0</span><span class="w"> </span><span class="o">&lt;</span><span class="n">_ZN5SheepC1Ev</span><span class="o">&gt;</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// The first 8 bytes of an Animal object is the vtable pointer. So move</span>
+<span class="w">  </span><span class="c1">// the address of vtable into %rax, and the object pointer itself (&quot;this&quot;)</span>
+<span class="w">  </span><span class="c1">// into %rdi.</span>
+<span class="w">  </span><span class="c1">// Since the vtable&#39;s first entry is the say() method, the call that</span>
+<span class="w">  </span><span class="c1">// actually happens here is Sheep::say(ap) where ap is the object pointer</span>
+<span class="w">  </span><span class="c1">// passed into the (implicit) &quot;this&quot; parameter.</span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d06</span><span class="o">:</span><span class="w">    </span><span class="n">mov</span><span class="w">    </span><span class="p">(</span><span class="o">%</span><span class="n">rbx</span><span class="p">),</span><span class="o">%</span><span class="n">rax</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d09</span><span class="o">:</span><span class="w">    </span><span class="n">mov</span><span class="w">    </span><span class="o">%</span><span class="n">rbx</span><span class="p">,</span><span class="o">%</span><span class="n">rdi</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d0c</span><span class="o">:</span><span class="w">    </span><span class="n">callq</span><span class="w">  </span><span class="o">*</span><span class="p">(</span><span class="o">%</span><span class="n">rax</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Once again, move the vtable address into %rax and the object pointer</span>
+<span class="w">  </span><span class="c1">// into %rdi. This time, invoke the function that lives at offset 0x10 in</span>
+<span class="w">  </span><span class="c1">// the vtable. This is the deleting destructor, as we&#39;ll soon see.</span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d0e</span><span class="o">:</span><span class="w">    </span><span class="n">mov</span><span class="w">    </span><span class="p">(</span><span class="o">%</span><span class="n">rbx</span><span class="p">),</span><span class="o">%</span><span class="n">rax</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d11</span><span class="o">:</span><span class="w">    </span><span class="n">mov</span><span class="w">    </span><span class="o">%</span><span class="n">rbx</span><span class="p">,</span><span class="o">%</span><span class="n">rdi</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d14</span><span class="o">:</span><span class="w">    </span><span class="n">callq</span><span class="w">  </span><span class="o">*</span><span class="mh">0x10</span><span class="p">(</span><span class="o">%</span><span class="n">rax</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Finally call foo() and return.</span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d17</span><span class="o">:</span><span class="w">    </span><span class="n">callq</span><span class="w">  </span><span class="mi">4010</span><span class="n">d0</span><span class="w"> </span><span class="o">&lt;</span><span class="n">_Z3foov</span><span class="o">&gt;</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d1c</span><span class="o">:</span><span class="w">    </span><span class="n">xor</span><span class="w">    </span><span class="o">%</span><span class="n">eax</span><span class="p">,</span><span class="o">%</span><span class="n">eax</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d1e</span><span class="o">:</span><span class="w">    </span><span class="n">pop</span><span class="w">    </span><span class="o">%</span><span class="n">rbx</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d1f</span><span class="o">:</span><span class="w">    </span><span class="n">retq</span><span class="w"></span>
+</pre></div>
+<p>A diagram of the memory layout of the virtual table for <tt class="docutils literal">Sheep</tt> can be helpful
+here. Since neither <tt class="docutils literal">Animal</tt> nor <tt class="docutils literal">Sheep</tt> have any fields, the only
+&quot;contents&quot; of a <tt class="docutils literal">Sheep</tt> object is the vtable pointer which occupies the first
+8 bytes:</p>
+<div class="highlight"><pre><span></span>                          Virtual table for Sheep:
+ap:
+--------------            -----------------------
+| vtable ptr | ---------&gt; |     Sheep::say()    |  0x00
+--------------            -----------------------
+                          |   Sheep::~Sheep()   |  0x08
+                          -----------------------
+                          | Sheep deleting dtor |  0x10
+                          -----------------------
+</pre></div>
+<p>The two destructors seen here have the roles described earlier. Let's see their
+annotated disassembly:</p>
+<div class="highlight"><pre><span></span><span class="c1">// Sheep::~Sheep</span>
+<span class="mo">0000000000401140</span><span class="w"> </span><span class="o">&lt;</span><span class="n">_ZN5SheepD1Ev</span><span class="o">&gt;:</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Call printf(&quot;Sheep is dead\n&quot;)</span>
+<span class="w">  </span><span class="mi">401140</span><span class="o">:</span><span class="w">    </span><span class="n">push</span><span class="w">   </span><span class="o">%</span><span class="n">rbx</span><span class="w"></span>
+<span class="w">  </span><span class="mi">401141</span><span class="o">:</span><span class="w">    </span><span class="n">mov</span><span class="w">    </span><span class="n">$0x49dc7c</span><span class="p">,</span><span class="o">%</span><span class="n">esi</span><span class="w"></span>
+<span class="w">  </span><span class="mi">401146</span><span class="o">:</span><span class="w">    </span><span class="n">mov</span><span class="w">    </span><span class="o">%</span><span class="n">rdi</span><span class="p">,</span><span class="o">%</span><span class="n">rbx</span><span class="w"></span>
+<span class="w">  </span><span class="mi">401149</span><span class="o">:</span><span class="w">    </span><span class="n">movq</span><span class="w">   </span><span class="n">$0x49dd50</span><span class="p">,(</span><span class="o">%</span><span class="n">rdi</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="mi">401150</span><span class="o">:</span><span class="w">    </span><span class="n">xor</span><span class="w">    </span><span class="o">%</span><span class="n">eax</span><span class="p">,</span><span class="o">%</span><span class="n">eax</span><span class="w"></span>
+<span class="w">  </span><span class="mi">401152</span><span class="o">:</span><span class="w">    </span><span class="n">mov</span><span class="w">    </span><span class="n">$0x1</span><span class="p">,</span><span class="o">%</span><span class="n">edi</span><span class="w"></span>
+<span class="w">  </span><span class="mi">401157</span><span class="o">:</span><span class="w">    </span><span class="n">callq</span><span class="w">  </span><span class="mi">446260</span><span class="w"> </span><span class="o">&lt;</span><span class="n">___printf_chk</span><span class="o">&gt;</span><span class="w"></span>
+<span class="w">  </span><span class="mi">40115</span><span class="n">c</span><span class="o">:</span><span class="w">    </span><span class="n">mov</span><span class="w">    </span><span class="o">%</span><span class="n">rbx</span><span class="p">,</span><span class="o">%</span><span class="n">rdi</span><span class="w"></span>
+<span class="w">  </span><span class="mf">40115f</span><span class="o">:</span><span class="w">    </span><span class="n">pop</span><span class="w">    </span><span class="o">%</span><span class="n">rbx</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Call Animal::~Animal, destroying the base class. Note the cool tail</span>
+<span class="w">  </span><span class="c1">// call here (using jmpq instead of a call instruction - control does not</span>
+<span class="w">  </span><span class="c1">// return here but the return instruction from _ZN6AnimalD1Ev will return</span>
+<span class="w">  </span><span class="c1">// straight to the caller).</span>
+<span class="w">  </span><span class="mi">401160</span><span class="o">:</span><span class="w">    </span><span class="n">jmpq</span><span class="w">   </span><span class="mf">4010f</span><span class="mi">0</span><span class="w"> </span><span class="o">&lt;</span><span class="n">_ZN6AnimalD1Ev</span><span class="o">&gt;</span><span class="w"></span>
+<span class="w">  </span><span class="mi">401165</span><span class="o">:</span><span class="w">    </span><span class="n">nopw</span><span class="w">   </span><span class="o">%</span><span class="n">cs</span><span class="o">:</span><span class="mh">0x0</span><span class="p">(</span><span class="o">%</span><span class="n">rax</span><span class="p">,</span><span class="o">%</span><span class="n">rax</span><span class="p">,</span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="mf">40116f</span><span class="o">:</span><span class="w">    </span><span class="n">nop</span><span class="w"></span>
+
+<span class="c1">// Sheep deleting destructor. The D0 part of the mangled name for deleting</span>
+<span class="c1">// destructors, as opposed to D1 for the regular destructor, is mandated by</span>
+<span class="c1">// the ABI name mangling rules.</span>
+<span class="mo">00000000004011</span><span class="n">c0</span><span class="w"> </span><span class="o">&lt;</span><span class="n">_ZN5SheepD0Ev</span><span class="o">&gt;:</span><span class="w"></span>
+<span class="w">  </span><span class="mi">4011</span><span class="n">c0</span><span class="o">:</span><span class="w">    </span><span class="n">push</span><span class="w">   </span><span class="o">%</span><span class="n">rbx</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Call Sheep::~Sheep</span>
+<span class="w">  </span><span class="mi">4011</span><span class="n">c1</span><span class="o">:</span><span class="w">    </span><span class="n">mov</span><span class="w">    </span><span class="o">%</span><span class="n">rdi</span><span class="p">,</span><span class="o">%</span><span class="n">rbx</span><span class="w"></span>
+<span class="w">  </span><span class="mi">4011</span><span class="n">c4</span><span class="o">:</span><span class="w">    </span><span class="n">callq</span><span class="w">  </span><span class="mi">401140</span><span class="w"> </span><span class="o">&lt;</span><span class="n">_ZN5SheepD1Ev</span><span class="o">&gt;</span><span class="w"></span>
+<span class="w">  </span><span class="mi">4011</span><span class="n">c9</span><span class="o">:</span><span class="w">    </span><span class="n">mov</span><span class="w">    </span><span class="o">%</span><span class="n">rbx</span><span class="p">,</span><span class="o">%</span><span class="n">rdi</span><span class="w"></span>
+<span class="w">  </span><span class="mi">4011</span><span class="n">cc</span><span class="o">:</span><span class="w">    </span><span class="n">pop</span><span class="w">    </span><span class="o">%</span><span class="n">rbx</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Call Sheep::operator delete</span>
+<span class="w">  </span><span class="mi">4011</span><span class="n">cd</span><span class="o">:</span><span class="w">    </span><span class="n">jmpq</span><span class="w">   </span><span class="mi">401190</span><span class="w"> </span><span class="o">&lt;</span><span class="n">_ZN5SheepdlEPv</span><span class="o">&gt;</span><span class="w"></span>
+<span class="w">  </span><span class="mi">4011</span><span class="n">d2</span><span class="o">:</span><span class="w">    </span><span class="n">nopw</span><span class="w">   </span><span class="o">%</span><span class="n">cs</span><span class="o">:</span><span class="mh">0x0</span><span class="p">(</span><span class="o">%</span><span class="n">rax</span><span class="p">,</span><span class="o">%</span><span class="n">rax</span><span class="p">,</span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="mi">4011</span><span class="n">dc</span><span class="o">:</span><span class="w">    </span><span class="n">nopl</span><span class="w">   </span><span class="mh">0x0</span><span class="p">(</span><span class="o">%</span><span class="n">rax</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>Now, going back to the amended code sample, let's see what code is generated for
+<tt class="docutils literal">foo</tt>:</p>
+<div class="highlight"><pre><span></span><span class="mo">00000000004010</span><span class="n">d0</span><span class="w"> </span><span class="o">&lt;</span><span class="n">_Z3foov</span><span class="o">&gt;:</span><span class="w"></span>
+<span class="w">  </span><span class="mi">4010</span><span class="n">d0</span><span class="o">:</span><span class="w">    </span><span class="n">sub</span><span class="w">    </span><span class="n">$0x18</span><span class="p">,</span><span class="o">%</span><span class="n">rsp</span><span class="w"></span>
+<span class="w">  </span><span class="mi">4010</span><span class="n">d4</span><span class="o">:</span><span class="w">    </span><span class="n">mov</span><span class="w">    </span><span class="o">%</span><span class="n">rsp</span><span class="p">,</span><span class="o">%</span><span class="n">rdi</span><span class="w"></span>
+<span class="w">  </span><span class="mi">4010</span><span class="n">d7</span><span class="o">:</span><span class="w">    </span><span class="n">movq</span><span class="w">   </span><span class="n">$0x49dd30</span><span class="p">,(</span><span class="o">%</span><span class="n">rsp</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="mi">4010</span><span class="n">df</span><span class="o">:</span><span class="w">    </span><span class="n">callq</span><span class="w">  </span><span class="mi">401140</span><span class="w"> </span><span class="o">&lt;</span><span class="n">_ZN5SheepD1Ev</span><span class="o">&gt;</span><span class="w"></span>
+<span class="w">  </span><span class="mf">4010e4</span><span class="o">:</span><span class="w">    </span><span class="n">add</span><span class="w">    </span><span class="n">$0x18</span><span class="p">,</span><span class="o">%</span><span class="n">rsp</span><span class="w"></span>
+<span class="w">  </span><span class="mf">4010e8</span><span class="o">:</span><span class="w">    </span><span class="n">retq</span><span class="w"></span>
+<span class="w">  </span><span class="mf">4010e9</span><span class="o">:</span><span class="w">    </span><span class="n">nopl</span><span class="w">   </span><span class="mh">0x0</span><span class="p">(</span><span class="o">%</span><span class="n">rax</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p><tt class="docutils literal">foo</tt> just calls <tt class="docutils literal"><span class="pre">Sheep::~Sheep</span></tt>. It shouldn't call the deleting destructor,
+because it does not actually delete an object from the heap.</p>
+<p>It is also interesting to examine how the destructor(s) of <tt class="docutils literal">Animal</tt> look,
+since unlike <tt class="docutils literal">Sheep</tt>, <tt class="docutils literal">Animal</tt> does not define a custom <tt class="docutils literal">operator delete</tt>:</p>
+<div class="highlight"><pre><span></span><span class="c1">// Animal::~Animal</span>
+<span class="mf">00000000004010f</span><span class="mi">0</span><span class="w"> </span><span class="o">&lt;</span><span class="n">_ZN6AnimalD1Ev</span><span class="o">&gt;:</span><span class="w"></span>
+<span class="w">  </span><span class="mf">4010f</span><span class="mi">0</span><span class="o">:</span><span class="w">    </span><span class="n">movq</span><span class="w">   </span><span class="n">$0x49dcf0</span><span class="p">,(</span><span class="o">%</span><span class="n">rdi</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="mf">4010f</span><span class="mi">7</span><span class="o">:</span><span class="w">    </span><span class="n">retq</span><span class="w"></span>
+<span class="w">  </span><span class="mf">4010f</span><span class="mi">8</span><span class="o">:</span><span class="w">    </span><span class="n">nopl</span><span class="w">   </span><span class="mh">0x0</span><span class="p">(</span><span class="o">%</span><span class="n">rax</span><span class="p">,</span><span class="o">%</span><span class="n">rax</span><span class="p">,</span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+
+<span class="c1">// Animal deleting destructor</span>
+<span class="mo">0000000000401100</span><span class="w"> </span><span class="o">&lt;</span><span class="n">_ZN6AnimalD0Ev</span><span class="o">&gt;:</span><span class="w"></span>
+<span class="w">  </span><span class="mi">401100</span><span class="o">:</span><span class="w">    </span><span class="n">push</span><span class="w">   </span><span class="o">%</span><span class="n">rbx</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Call Animal::~Animal</span>
+<span class="w">  </span><span class="mi">401101</span><span class="o">:</span><span class="w">    </span><span class="n">mov</span><span class="w">    </span><span class="o">%</span><span class="n">rdi</span><span class="p">,</span><span class="o">%</span><span class="n">rbx</span><span class="w"></span>
+<span class="w">  </span><span class="mi">401104</span><span class="o">:</span><span class="w">    </span><span class="n">callq</span><span class="w">  </span><span class="mf">4010f</span><span class="mi">0</span><span class="w"> </span><span class="o">&lt;</span><span class="n">_ZN6AnimalD1Ev</span><span class="o">&gt;</span><span class="w"></span>
+<span class="w">  </span><span class="mi">401109</span><span class="o">:</span><span class="w">    </span><span class="n">mov</span><span class="w">    </span><span class="o">%</span><span class="n">rbx</span><span class="p">,</span><span class="o">%</span><span class="n">rdi</span><span class="w"></span>
+<span class="w">  </span><span class="mi">40110</span><span class="n">c</span><span class="o">:</span><span class="w">    </span><span class="n">pop</span><span class="w">    </span><span class="o">%</span><span class="n">rbx</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Call global ::operator::delete</span>
+<span class="w">  </span><span class="mi">40110</span><span class="n">d</span><span class="o">:</span><span class="w">    </span><span class="n">jmpq</span><span class="w">   </span><span class="mf">4011f</span><span class="mi">0</span><span class="w"> </span><span class="o">&lt;</span><span class="n">_ZdlPv</span><span class="o">&gt;</span><span class="w"></span>
+<span class="w">  </span><span class="mi">401112</span><span class="o">:</span><span class="w">    </span><span class="n">nopw</span><span class="w">   </span><span class="o">%</span><span class="n">cs</span><span class="o">:</span><span class="mh">0x0</span><span class="p">(</span><span class="o">%</span><span class="n">rax</span><span class="p">,</span><span class="o">%</span><span class="n">rax</span><span class="p">,</span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="mi">40111</span><span class="n">c</span><span class="o">:</span><span class="w">    </span><span class="n">nopl</span><span class="w">   </span><span class="mh">0x0</span><span class="p">(</span><span class="o">%</span><span class="n">rax</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>As expected, the destructor of <tt class="docutils literal">Animal</tt> calls the global <tt class="docutils literal">::operator
+delete</tt>.</p>
+</div>
+<div class="section" id="classes-with-virtual-destructors-vs-regular-destructors">
+<h2>Classes with virtual destructors vs. regular destructors</h2>
+<p>I want to emphasize that this special treatment - generation of a deleting
+destructor, is done not for classes that have a custom <tt class="docutils literal">operator delete</tt>, but
+for all classes with virtual destructors. This is because when we <tt class="docutils literal">delete</tt> an
+object through a pointer to the base class, the compiler has no way of knowing
+what <tt class="docutils literal">operator delete</tt> to invoke, so this has to be done for every class
+where the destructor is virtual <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>. Here's a clarifying example:</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;cstdio&gt;</span><span class="cp"></span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">Regular</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">public</span><span class="o">:</span><span class="w"></span>
+<span class="w">  </span><span class="o">~</span><span class="n">Regular</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Regular dtor</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">};</span><span class="w"></span>
+
+<span class="k">class</span><span class="w"> </span><span class="nc">Virtual</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">public</span><span class="o">:</span><span class="w"></span>
+<span class="w">  </span><span class="k">virtual</span><span class="w"> </span><span class="o">~</span><span class="n">Virtual</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Virtual dtor</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">};</span><span class="w"></span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">**</span><span class="n">argv</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">Regular</span><span class="o">*</span><span class="w"> </span><span class="n">hr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">Regular</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">delete</span><span class="w"> </span><span class="n">hr</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">Virtual</span><span class="o">*</span><span class="w"> </span><span class="n">hv</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">new</span><span class="w"> </span><span class="n">Virtual</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">delete</span><span class="w"> </span><span class="n">hv</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The only difference between <tt class="docutils literal">Regular</tt> and <tt class="docutils literal">Virtual</tt> here is the destructor
+being virtual in the latter. Let's examine the machine code for <tt class="docutils literal">main</tt> to see
+how the two <tt class="docutils literal">delete</tt> statements are lowered:</p>
+<div class="highlight"><pre><span></span><span class="mo">0000000000400</span><span class="n">cf0</span><span class="w"> </span><span class="o">&lt;</span><span class="n">main</span><span class="o">&gt;:</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">cf0</span><span class="o">:</span><span class="w">       </span><span class="n">push</span><span class="w">   </span><span class="o">%</span><span class="n">rbx</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">cf1</span><span class="o">:</span><span class="w">       </span><span class="n">mov</span><span class="w">    </span><span class="n">$0x1</span><span class="p">,</span><span class="o">%</span><span class="n">edi</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Allocate a new Regular object with the global ::operator new</span>
+<span class="w">  </span><span class="mi">400</span><span class="n">cf6</span><span class="o">:</span><span class="w">       </span><span class="n">callq</span><span class="w">  </span><span class="mi">4016</span><span class="n">a0</span><span class="w"> </span><span class="o">&lt;</span><span class="n">_Znwm</span><span class="o">&gt;</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// If hr != nullptr, call Regular::~Regular, and then call the global</span>
+<span class="w">  </span><span class="c1">// ::operator delete on hr.</span>
+<span class="w">  </span><span class="mi">400</span><span class="n">cfb</span><span class="o">:</span><span class="w">       </span><span class="n">test</span><span class="w">   </span><span class="o">%</span><span class="n">rax</span><span class="p">,</span><span class="o">%</span><span class="n">rax</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">cfe</span><span class="o">:</span><span class="w">       </span><span class="n">mov</span><span class="w">    </span><span class="o">%</span><span class="n">rax</span><span class="p">,</span><span class="o">%</span><span class="n">rbx</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d01</span><span class="o">:</span><span class="w">       </span><span class="n">je</span><span class="w">     </span><span class="mi">400</span><span class="n">d13</span><span class="w"> </span><span class="o">&lt;</span><span class="n">main</span><span class="o">+</span><span class="mh">0x23</span><span class="o">&gt;</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d03</span><span class="o">:</span><span class="w">       </span><span class="n">mov</span><span class="w">    </span><span class="o">%</span><span class="n">rax</span><span class="p">,</span><span class="o">%</span><span class="n">rdi</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d06</span><span class="o">:</span><span class="w">       </span><span class="n">callq</span><span class="w">  </span><span class="mi">401130</span><span class="w"> </span><span class="o">&lt;</span><span class="n">_ZN7RegularD1Ev</span><span class="o">&gt;</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d0b</span><span class="o">:</span><span class="w">       </span><span class="n">mov</span><span class="w">    </span><span class="o">%</span><span class="n">rbx</span><span class="p">,</span><span class="o">%</span><span class="n">rdi</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d0e</span><span class="o">:</span><span class="w">       </span><span class="n">callq</span><span class="w">  </span><span class="mi">401160</span><span class="w"> </span><span class="o">&lt;</span><span class="n">_ZdlPv</span><span class="o">&gt;</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d13</span><span class="o">:</span><span class="w">       </span><span class="n">mov</span><span class="w">    </span><span class="n">$0x8</span><span class="p">,</span><span class="o">%</span><span class="n">edi</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Allocate a new Virtual object with the global ::operator new</span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d18</span><span class="o">:</span><span class="w">       </span><span class="n">callq</span><span class="w">  </span><span class="mi">4016</span><span class="n">a0</span><span class="w"> </span><span class="o">&lt;</span><span class="n">_Znwm</span><span class="o">&gt;</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d1d</span><span class="o">:</span><span class="w">       </span><span class="n">mov</span><span class="w">    </span><span class="o">%</span><span class="n">rax</span><span class="p">,</span><span class="o">%</span><span class="n">rbx</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d20</span><span class="o">:</span><span class="w">       </span><span class="n">mov</span><span class="w">    </span><span class="o">%</span><span class="n">rax</span><span class="p">,</span><span class="o">%</span><span class="n">rdi</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Call the constructor for Virtual. We didn&#39;t define a default</span>
+<span class="w">  </span><span class="c1">// constructor, but the compiler did - to populate the vtable pointer</span>
+<span class="w">  </span><span class="c1">// properly.</span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d23</span><span class="o">:</span><span class="w">       </span><span class="n">callq</span><span class="w">  </span><span class="mi">401150</span><span class="w"> </span><span class="o">&lt;</span><span class="n">_ZN7VirtualC1Ev</span><span class="o">&gt;</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// If hv != nullptr, call the deleting destructor of Virtual through the</span>
+<span class="w">  </span><span class="c1">// virtual table. Do not call operator delete for vr; this will be done by</span>
+<span class="w">  </span><span class="c1">// the deleting destructor.</span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d28</span><span class="o">:</span><span class="w">       </span><span class="n">test</span><span class="w">   </span><span class="o">%</span><span class="n">rbx</span><span class="p">,</span><span class="o">%</span><span class="n">rbx</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d2b</span><span class="o">:</span><span class="w">       </span><span class="n">je</span><span class="w">     </span><span class="mi">400</span><span class="n">d36</span><span class="w"> </span><span class="o">&lt;</span><span class="n">main</span><span class="o">+</span><span class="mh">0x46</span><span class="o">&gt;</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d2d</span><span class="o">:</span><span class="w">       </span><span class="n">mov</span><span class="w">    </span><span class="p">(</span><span class="o">%</span><span class="n">rbx</span><span class="p">),</span><span class="o">%</span><span class="n">rax</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d30</span><span class="o">:</span><span class="w">       </span><span class="n">mov</span><span class="w">    </span><span class="o">%</span><span class="n">rbx</span><span class="p">,</span><span class="o">%</span><span class="n">rdi</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d33</span><span class="o">:</span><span class="w">       </span><span class="n">callq</span><span class="w">  </span><span class="o">*</span><span class="mh">0x8</span><span class="p">(</span><span class="o">%</span><span class="n">rax</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d36</span><span class="o">:</span><span class="w">       </span><span class="n">xor</span><span class="w">    </span><span class="o">%</span><span class="n">eax</span><span class="p">,</span><span class="o">%</span><span class="n">eax</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d38</span><span class="o">:</span><span class="w">       </span><span class="n">pop</span><span class="w">    </span><span class="o">%</span><span class="n">rbx</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d39</span><span class="o">:</span><span class="w">       </span><span class="n">retq</span><span class="w"></span>
+<span class="w">  </span><span class="mi">400</span><span class="n">d3a</span><span class="o">:</span><span class="w">       </span><span class="n">nopw</span><span class="w">   </span><span class="mh">0x0</span><span class="p">(</span><span class="o">%</span><span class="n">rax</span><span class="p">,</span><span class="o">%</span><span class="n">rax</span><span class="p">,</span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>The key difference here is that for deleting <tt class="docutils literal">Regular</tt>, the compiler inserts a
+call to the (global) <tt class="docutils literal">operator delete</tt> after the destructor. However, for
+<tt class="docutils literal">Virtual</tt> it can't do that so it just calls the deleting destructor, which
+will take care of the deletion as we've seen earlier.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>Why this set of options? Without <tt class="docutils literal"><span class="pre">-O2</span></tt>, the code produced by the
+compiler is overly verbose. With <tt class="docutils literal"><span class="pre">-O2</span></tt> it's much better but most
+function calls are inlined, making the special calls generated for the
+deleting destructor hard to follow; hence <tt class="docutils literal"><span class="pre">-fno-inline</span></tt>. I'm also
+disabling exceptions because these complicate the code around destructors
+without being relevant to the main goal of the article.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td><p class="first">One of the derived classes may declare its own <tt class="docutils literal">operator delete</tt>, and
+the compiler doesn't know that. In fact, a pointer to a derived class can
+come from a shared library that was built completely separately from the
+main program (as <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2015/operator-delete-shared-lib">this sample demonstrates</a> ).</p>
+<p class="last">But even if none of the derived classes defines a custom <tt class="docutils literal">operator delete</tt>,
+it's important to know the dynamic type of the deleted object when the
+destructor is called to pass the correct address to the global
+<tt class="docutils literal">operator delete</tt>. An interesting discussion of this issue can be found
+in <a class="reference external" href="https://www.reddit.com/r/cpp/comments/3huvd1/c_deleting_destructors_and_virtual_operator_delete/cuay6u1">this Reddit comment thread</a>.</p>
+</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

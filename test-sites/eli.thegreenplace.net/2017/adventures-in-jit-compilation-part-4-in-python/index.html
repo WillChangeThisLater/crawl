@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Adventures in JIT compilation: Part 4 - in Python - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Adventures in JIT compilation: Part 4 - in Python">
+                        Adventures in JIT compilation: Part 4 - in Python
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> May 10, 2017 at 05:31</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/python.html">Python</a>
+        ,
+    <a href="../../tag/compilation.html">Compilation</a>
+        ,
+    <a href="../../tag/code-generation.html">Code generation</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This is part 4 in a series of posts on writing JIT compilers for BF.</p>
+<ul class="simple">
+<li><a class="reference external" href="../adventures-in-jit-compilation-part-1-an-interpreter/index.html">Part 1 - an interpreter</a></li>
+<li><a class="reference external" href="../adventures-in-jit-compilation-part-2-an-x64-jit/index.html">Part 2 - an x64 JIT</a></li>
+<li><a class="reference external" href="../adventures-in-jit-compilation-part-3-llvm/index.html">Part 3 - LLVM</a></li>
+</ul>
+<p>Even though, for performance considerations, most JIT compilers are written in
+down-to-metal languages like C and C++, in some scenarios it could be useful
+to write them in higher-level languages as well <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>.</p>
+<p>This post intends to do just that, by presenting yet another JIT for BF - this
+time written in Python. It presents both a low-level approach to JITing native
+machine code, and using a higher-level library to perform instruction encoding.
+The JIT implemented here is not optimized (equivalent to the &quot;simple&quot; JIT from
+part 2), so I'm not going to discuss any performance results. The idea is just
+to show how JITing in Python works.</p>
+<div class="section" id="how-to-jit-from-python">
+<h2>How to JIT from Python</h2>
+<p>To be able to JIT-compile BF, we should first be capable of JITing any code at
+all. It's worth showing how to do this in plain Python without any third-party
+libraries. In <a class="reference external" href="../adventures-in-jit-compilation-part-2-an-x64-jit/index.html">part 2 of the series</a>
+we've used the same approach as presented in my older <a class="reference external" href="../../2013/11/05/how-to-jit-an-introduction.html">How to JIT</a> post for
+basic JITing by copying machine code into an executable memory segment and
+jumping to it.</p>
+<p>That was done in C and C++, but it turns out it's not much harder in Python due
+to the magic of <tt class="docutils literal">ctypes</tt>. I've written about <a class="reference external" href="../../2013/03/09/python-ffi-with-ctypes-and-cffi.html">doing runtime calls to C code
+via ctypes before</a>, and
+if you're not familiar with this wonderful tool, I encourage you to read more
+about it. What follows is a complete code sample that implements the JITing
+presented in the &quot;How to JIT&quot; post; it's heavily commented, so it should be
+reasonably clear what's going on:</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">ctypes</span>
+<span class="kn">import</span> <span class="nn">mmap</span>
+
+<span class="c1"># Equivalent to dlopen(NULL) to open the main process; this means the Python</span>
+<span class="c1"># interpreter, which links the C library in. Alternatively, we could open</span>
+<span class="c1"># libc.so.6 directly (for Linux).</span>
+<span class="n">libc</span> <span class="o">=</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">cdll</span><span class="o">.</span><span class="n">LoadLibrary</span><span class="p">(</span><span class="kc">None</span><span class="p">)</span>
+
+<span class="c1"># Grab the mmap foreign function from libc, setting its signature to:</span>
+<span class="c1">#</span>
+<span class="c1">#     void *mmap(void *addr, size_t length, int prot, int flags,</span>
+<span class="c1">#                int fd, off_t offset)</span>
+<span class="c1">#</span>
+<span class="c1"># Per the mmap(2) man page.</span>
+<span class="n">mmap_function</span> <span class="o">=</span> <span class="n">libc</span><span class="o">.</span><span class="n">mmap</span>
+<span class="n">mmap_function</span><span class="o">.</span><span class="n">restype</span> <span class="o">=</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">c_void_p</span>
+<span class="n">mmap_function</span><span class="o">.</span><span class="n">argtypes</span> <span class="o">=</span> <span class="p">(</span><span class="n">ctypes</span><span class="o">.</span><span class="n">c_void_p</span><span class="p">,</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">c_size_t</span><span class="p">,</span>
+                          <span class="n">ctypes</span><span class="o">.</span><span class="n">c_int</span><span class="p">,</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">c_int</span><span class="p">,</span>
+                          <span class="n">ctypes</span><span class="o">.</span><span class="n">c_int</span><span class="p">,</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">c_size_t</span><span class="p">)</span>
+
+<span class="n">CODE_SIZE</span> <span class="o">=</span> <span class="mi">1024</span>
+
+<span class="c1"># Allocate RWX memory with mmap. Using mmap from libc directly rather than</span>
+<span class="c1"># Python&#39;s mmap module here because the latter returns a special &quot;mmap object&quot;</span>
+<span class="c1"># and we just need the raw address of the mapping. However, we will use the</span>
+<span class="c1"># PROT_* and MAP_* constants from the mmap module rather than duplicating them.</span>
+<span class="n">code_address</span> <span class="o">=</span> <span class="n">mmap_function</span><span class="p">(</span><span class="kc">None</span><span class="p">,</span> <span class="n">CODE_SIZE</span><span class="p">,</span>
+                             <span class="n">mmap</span><span class="o">.</span><span class="n">PROT_READ</span> <span class="o">|</span> <span class="n">mmap</span><span class="o">.</span><span class="n">PROT_WRITE</span> <span class="o">|</span> <span class="n">mmap</span><span class="o">.</span><span class="n">PROT_EXEC</span><span class="p">,</span>
+                             <span class="n">mmap</span><span class="o">.</span><span class="n">MAP_PRIVATE</span> <span class="o">|</span> <span class="n">mmap</span><span class="o">.</span><span class="n">MAP_ANONYMOUS</span><span class="p">,</span>
+                             <span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+
+<span class="k">if</span> <span class="n">code_address</span> <span class="o">==</span> <span class="o">-</span><span class="mi">1</span><span class="p">:</span>
+    <span class="k">raise</span> <span class="ne">OSError</span><span class="p">(</span><span class="s1">&#39;mmap failed to allocate memory&#39;</span><span class="p">)</span>
+
+<span class="c1"># Emit code into the allocated address. This sequence of x86-64 machine code</span>
+<span class="c1"># encodes:</span>
+<span class="c1">#</span>
+<span class="c1">#  mov %rdi, %rax</span>
+<span class="c1">#  add $4, %rax</span>
+<span class="c1">#  ret</span>
+<span class="n">code</span> <span class="o">=</span> <span class="sa">b</span><span class="s1">&#39;</span><span class="se">\x48\x89\xf8\x48\x83\xc0\x04\xc3</span><span class="s1">&#39;</span>
+<span class="k">assert</span> <span class="nb">len</span><span class="p">(</span><span class="n">code</span><span class="p">)</span> <span class="o">&lt;=</span> <span class="n">CODE_SIZE</span>
+<span class="n">ctypes</span><span class="o">.</span><span class="n">memmove</span><span class="p">(</span><span class="n">code_address</span><span class="p">,</span> <span class="n">code</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">code</span><span class="p">))</span>
+
+<span class="c1"># Declare the type for our JITed function: long (*JitFuncType)(long), and cast</span>
+<span class="c1"># code_address (which is a void*) to this type so we could just call it.</span>
+<span class="n">JitFuncType</span> <span class="o">=</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">CFUNCTYPE</span><span class="p">(</span><span class="n">ctypes</span><span class="o">.</span><span class="n">c_long</span><span class="p">,</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">c_long</span><span class="p">)</span>
+<span class="n">function</span> <span class="o">=</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">cast</span><span class="p">(</span><span class="n">code_address</span><span class="p">,</span> <span class="n">JitFuncType</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">function</span><span class="p">(</span><span class="o">-</span><span class="mi">100</span><span class="p">))</span>
+</pre></div>
+<p>If you execute this code it will print -96, since the JITed function adds 4 to
+its argument.</p>
+<p>From this point on, it should be easy to implement a full JIT-compiler for BF
+using hand-rolled instruction encoding, just like in <a class="reference external" href="../adventures-in-jit-compilation-part-2-an-x64-jit/index.html">part 2</a>.
+Feel free to do it as an exercise :) You'll face the same issue discussed in
+that post - manually encoding instructions and resolving labels/branches is
+tedious, and it would be nice if a library could do it for us.</p>
+</div>
+<div class="section" id="peachpy">
+<h2>PeachPy</h2>
+<p>Enter <a class="reference external" href="https://github.com/Maratyszcza/PeachPy">PeachPy</a> - an x86-64 assembler
+embedded in Python. It's a relatively new project mostly aimed at writing
+highly-optimized assembly kernels for numerical computations without leaving the
+domain of Python. It even has a cute logo:</p>
+<img alt="PeachPy logo" class="align-center" src="../../images/2017/peachpy.png" />
+<p>PeachPy has some examples strewn around the web, and my code for this post can
+serve as another example. Let's start by replicating the simple JIT
+functionality shown above. PeachPy takes care of all the memory mapping behind
+the scenes <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>, so the full code we need to write is just this:</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">peachpy</span>
+<span class="kn">import</span> <span class="nn">peachpy.x86_64</span>
+
+<span class="n">x</span> <span class="o">=</span> <span class="n">peachpy</span><span class="o">.</span><span class="n">Argument</span><span class="p">(</span><span class="n">peachpy</span><span class="o">.</span><span class="n">int64_t</span><span class="p">)</span>
+
+<span class="k">with</span> <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">Function</span><span class="p">(</span><span class="s2">&quot;Add4&quot;</span><span class="p">,</span> <span class="p">(</span><span class="n">x</span><span class="p">,),</span> <span class="n">peachpy</span><span class="o">.</span><span class="n">int64_t</span><span class="p">)</span> <span class="k">as</span> <span class="n">asm_function</span><span class="p">:</span>
+    <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">LOAD</span><span class="o">.</span><span class="n">ARGUMENT</span><span class="p">(</span><span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">rax</span><span class="p">,</span> <span class="n">x</span><span class="p">)</span>
+    <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">ADD</span><span class="p">(</span><span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">rax</span><span class="p">,</span> <span class="mi">4</span><span class="p">)</span>
+    <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">RETURN</span><span class="p">(</span><span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">rax</span><span class="p">)</span>
+
+<span class="n">abi</span> <span class="o">=</span> <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">abi</span><span class="o">.</span><span class="n">detect</span><span class="p">()</span>
+<span class="n">encoded_function</span> <span class="o">=</span> <span class="n">asm_function</span><span class="o">.</span><span class="n">finalize</span><span class="p">(</span><span class="n">abi</span><span class="p">)</span><span class="o">.</span><span class="n">encode</span><span class="p">()</span>
+<span class="n">python_function</span> <span class="o">=</span> <span class="n">encoded_function</span><span class="o">.</span><span class="n">load</span><span class="p">()</span>
+
+<span class="c1"># The JIT call</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">python_function</span><span class="p">(</span><span class="o">-</span><span class="mi">100</span><span class="p">))</span>
+</pre></div>
+<p>PeachPy lets us write our code in <em>assembly</em> rather than directly in machine
+code, and it also handles the loading for us. As we'll see soon, it lets us use
+symbolic labels (just like <tt class="docutils literal">asmjit</tt>) and takes care of jump target resolution
+automatically. In other words, it's just the tool we need to focus on our domain
+- compiling BF - without worrying too much about the low level details.</p>
+<p>Note how PeachPy uses Python's context managers (a very common approach for DSLs
+embedded in Python). The <tt class="docutils literal">with peachpy.x86_64.Function</tt> statement creates a
+context manager within which all assembly instructions (like <tt class="docutils literal">ADD</tt> and
+<tt class="docutils literal">RETURN</tt>) are appended to the function.</p>
+</div>
+<div class="section" id="jit-compiling-bf-via-peachpy">
+<h2>JIT-compiling BF via PeachPy</h2>
+<p>With the <tt class="docutils literal">Add4</tt> sample above, we actually already have most of the building
+blocks we need to JIT-compile BF. What remains is just a matter of digging in
+PeachPy's source and examples (sadly there's very little documentation) to
+figure out how to invoke and properly use its assembly primitives. The following
+is very similar to how <tt class="docutils literal">simpleasmjit</tt> is implemented in part 2. The full code
+sample is <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/bfjit/peachpyjit.py">available here</a>;
+I'll just highlight the important snippets of code. First the function
+&quot;declaration&quot;:</p>
+<div class="highlight"><pre><span></span><span class="c1"># Create a JITed function named &quot;ppjit&quot;, with the C-style signature:</span>
+<span class="c1">#   void ppjit(uint8_t* memptr)</span>
+<span class="c1">#</span>
+<span class="n">memptr</span> <span class="o">=</span> <span class="n">peachpy</span><span class="o">.</span><span class="n">Argument</span><span class="p">(</span><span class="n">peachpy</span><span class="o">.</span><span class="n">ptr</span><span class="p">(</span><span class="n">peachpy</span><span class="o">.</span><span class="n">uint8_t</span><span class="p">))</span>
+
+<span class="k">with</span> <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">Function</span><span class="p">(</span><span class="s2">&quot;ppjit&quot;</span><span class="p">,</span>
+                             <span class="p">[</span><span class="n">memptr</span><span class="p">],</span>
+                             <span class="n">result_type</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span> <span class="k">as</span> <span class="n">asm_function</span><span class="p">:</span>
+    <span class="c1"># Use r13 as our data pointer; initially it points at the memory buffer</span>
+    <span class="c1"># passed into the JITed function.</span>
+    <span class="n">dataptr</span> <span class="o">=</span> <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">r13</span>
+    <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">LOAD</span><span class="o">.</span><span class="n">ARGUMENT</span><span class="p">(</span><span class="n">dataptr</span><span class="p">,</span> <span class="n">memptr</span><span class="p">)</span>
+</pre></div>
+<p>In this code we'll be passing <tt class="docutils literal">memory</tt> from the host side (from Python, in
+this case), so the function signature is <tt class="docutils literal">void <span class="pre">(*ppjit)(uint8_t*)</span></tt>. We then
+give <tt class="docutils literal">r13</tt> the symbolic name <tt class="docutils literal">dataptr</tt>. The usual instruction-by-instruction
+BF compilation loop follows:</p>
+<div class="highlight"><pre><span></span><span class="k">for</span> <span class="n">pc</span><span class="p">,</span> <span class="n">instr</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">parse_bf_program</span><span class="p">(</span><span class="n">bf_file</span><span class="p">),</span> <span class="n">start</span><span class="o">=</span><span class="mi">1</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">instr</span> <span class="o">==</span> <span class="s1">&#39;&gt;&#39;</span><span class="p">:</span>
+        <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">ADD</span><span class="p">(</span><span class="n">dataptr</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="k">elif</span> <span class="n">instr</span> <span class="o">==</span> <span class="s1">&#39;&lt;&#39;</span><span class="p">:</span>
+        <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">SUB</span><span class="p">(</span><span class="n">dataptr</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="k">elif</span> <span class="n">instr</span> <span class="o">==</span> <span class="s1">&#39;+&#39;</span><span class="p">:</span>
+        <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">ADD</span><span class="p">([</span><span class="n">dataptr</span><span class="p">],</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="k">elif</span> <span class="n">instr</span> <span class="o">==</span> <span class="s1">&#39;-&#39;</span><span class="p">:</span>
+        <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">SUB</span><span class="p">([</span><span class="n">dataptr</span><span class="p">],</span> <span class="mi">1</span><span class="p">)</span>
+</pre></div>
+<p>PeachPy dresses Python in assembly-like flavor. Registers placed in brackets
+like <tt class="docutils literal">[dataptr]</tt> imply dereferencing. While <tt class="docutils literal">dataptr</tt> refers to the value of
+the <tt class="docutils literal">r13</tt> register itself, <tt class="docutils literal">[dataptr]</tt> refers to the value of the memory
+word whose address is held in <tt class="docutils literal">dataptr</tt> - this is similar to the syntax of
+many assembly languages.</p>
+<p>For emitting I/O operations, we resort to syscalls again <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>:</p>
+<div class="highlight"><pre><span></span><span class="k">elif</span> <span class="n">instr</span> <span class="o">==</span> <span class="s1">&#39;.&#39;</span><span class="p">:</span>
+    <span class="c1"># Invoke the WRITE syscall (rax=1) with stdout (rdi=1).</span>
+    <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">MOV</span><span class="p">(</span><span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">rax</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">MOV</span><span class="p">(</span><span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">rdi</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">MOV</span><span class="p">(</span><span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">rsi</span><span class="p">,</span> <span class="n">dataptr</span><span class="p">)</span>
+    <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">MOV</span><span class="p">(</span><span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">rdx</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">SYSCALL</span><span class="p">()</span>
+<span class="k">elif</span> <span class="n">instr</span> <span class="o">==</span> <span class="s1">&#39;,&#39;</span><span class="p">:</span>
+    <span class="c1"># Invoke the READ syscall (rax=0) with stdin (rdi=0).</span>
+    <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">MOV</span><span class="p">(</span><span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">rax</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+    <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">MOV</span><span class="p">(</span><span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">rdi</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+    <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">MOV</span><span class="p">(</span><span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">rsi</span><span class="p">,</span> <span class="n">dataptr</span><span class="p">)</span>
+    <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">MOV</span><span class="p">(</span><span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">rdx</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">SYSCALL</span><span class="p">()</span>
+</pre></div>
+<p>For emitting the loops, we use a stack of PeachPy <tt class="docutils literal">Label</tt> objects with one
+label for the loop and another for the &quot;after loop&quot;. Again, this is <em>very</em>
+similar to how it was done with <tt class="docutils literal">asmjit</tt> in <a class="reference external" href="../adventures-in-jit-compilation-part-2-an-x64-jit/index.html">part 2</a>.</p>
+<div class="highlight"><pre><span></span><span class="k">elif</span> <span class="n">instr</span> <span class="o">==</span> <span class="s1">&#39;[&#39;</span><span class="p">:</span>
+    <span class="c1"># Create labels for the loop start and after-loop.</span>
+    <span class="n">loop_start_label</span> <span class="o">=</span> <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">Label</span><span class="p">()</span>
+    <span class="n">loop_end_label</span> <span class="o">=</span> <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">Label</span><span class="p">()</span>
+    <span class="c1"># Jump to after the loop if the current cell is 0.</span>
+    <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">CMP</span><span class="p">([</span><span class="n">dataptr</span><span class="p">],</span> <span class="mi">0</span><span class="p">)</span>
+    <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">JZ</span><span class="p">(</span><span class="n">loop_end_label</span><span class="p">)</span>
+    <span class="c1"># Bind the &quot;start loop&quot; label here.</span>
+    <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">LABEL</span><span class="p">(</span><span class="n">loop_start_label</span><span class="p">)</span>
+    <span class="n">open_bracket_stack</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+        <span class="n">BracketLabels</span><span class="p">(</span><span class="n">loop_start_label</span><span class="p">,</span> <span class="n">loop_end_label</span><span class="p">))</span>
+<span class="k">elif</span> <span class="n">instr</span> <span class="o">==</span> <span class="s1">&#39;]&#39;</span><span class="p">:</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">len</span><span class="p">(</span><span class="n">open_bracket_stack</span><span class="p">):</span>
+        <span class="n">die</span><span class="p">(</span><span class="s1">&#39;unmatched closing &quot;]&quot; at pc=</span><span class="si">{}</span><span class="s1">&#39;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">pc</span><span class="p">))</span>
+    <span class="n">labels</span> <span class="o">=</span> <span class="n">open_bracket_stack</span><span class="o">.</span><span class="n">pop</span><span class="p">()</span>
+    <span class="c1"># Jump back to loop if the current cell is not 0.</span>
+    <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">CMP</span><span class="p">([</span><span class="n">dataptr</span><span class="p">],</span> <span class="mi">0</span><span class="p">)</span>
+    <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">JNZ</span><span class="p">(</span><span class="n">labels</span><span class="o">.</span><span class="n">open_label</span><span class="p">)</span>
+    <span class="c1"># Bind the &quot;after-loop&quot; label here.</span>
+    <span class="n">peachpy</span><span class="o">.</span><span class="n">x86_64</span><span class="o">.</span><span class="n">LABEL</span><span class="p">(</span><span class="n">labels</span><span class="o">.</span><span class="n">close_label</span><span class="p">)</span>
+</pre></div>
+<p>Finally, this is how the JITed function is invoked:</p>
+<div class="highlight"><pre><span></span><span class="c1"># Allocate memory as a ctypes array and initialize it to 0s. Then perform</span>
+<span class="c1"># the JIT call.</span>
+<span class="n">memsize</span> <span class="o">=</span> <span class="mi">30000</span>
+<span class="n">MemoryArrayType</span> <span class="o">=</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">c_uint8</span> <span class="o">*</span> <span class="n">memsize</span>
+<span class="n">memory</span> <span class="o">=</span> <span class="n">MemoryArrayType</span><span class="p">(</span><span class="o">*</span><span class="p">([</span><span class="mi">0</span><span class="p">]</span> <span class="o">*</span> <span class="n">memsize</span><span class="p">))</span>
+</pre></div>
+<p>There's just a little bit of trickiness here in our usage of <tt class="docutils literal">ctypes</tt>. Since
+we have to pass arguments to C functions, <tt class="docutils literal">ctypes</tt> lets us declare C-like
+types like <tt class="docutils literal">MemoryArrayType</tt> which is a <tt class="docutils literal">uint8_t[30000]</tt>. The funky syntax
+on the following line is nothing more than Python's <tt class="docutils literal">*args</tt> destructuring of a
+list of 30000 zeros. So <tt class="docutils literal">memory</tt> is now an object we can safely pass to our
+JITed function which expects a <tt class="docutils literal">uint8_t*</tt> argument:</p>
+<div class="highlight"><pre><span></span><span class="n">python_function</span><span class="p">(</span><span class="n">memory</span><span class="p">)</span>
+</pre></div>
+<p>This calls the JITed function, the result of which is I/O and modified memory
+cells in <tt class="docutils literal">memory</tt>.</p>
+</div>
+<div class="section" id="peachpy-more-features-and-some-limitations">
+<h2>PeachPy - more features and some limitations</h2>
+<p>My usage of PeachPy in this post has been fairly limited, and the library has
+many more features. For example:</p>
+<ol class="arabic simple">
+<li>Since PeachPy was mainly developed to write fast mathematical kernels, it
+has fairly good support for the newest vector extensions like AVX512.</li>
+<li>There's some support for automatic register allocation. In the BF JIT, the
+<tt class="docutils literal">r13</tt> register is used directly, but we don't <em>really</em> care which register
+it is. We could ask PeachPy for a &quot;general purpose 64-bit register&quot; and it
+would allocate one for us. When writing a much more complicated piece of
+assembly code, this can be very useful.</li>
+<li>There's also some support for generating ARM code, though I don't know how
+mature it is.</li>
+</ol>
+<p>However, PeachPy is also a fairly new library which means there are still
+limitations and rough edges. When developing the JIT I ran into a bug and sent
+<a class="reference external" href="https://github.com/Maratyszcza/PeachPy/pull/72">a PR</a> - which was promptly
+accepted. PeachPy also doesn't do well with a large number of assembly
+instructions. It has some recursive analysis logic that <a class="reference external" href="https://github.com/Maratyszcza/PeachPy/issues/74">blows up the Python
+stack when run on large code</a>. In the BF JIT, I'm setting
+the stack to a higher limit artificially; with that, PeachPy doesn't crash but
+takes quite a while to assemble large programs like Mandelbrot.</p>
+<p>According to PeachPy's maintainer, this is due to the design of PeachPy being
+aimed towards writing assembly code manually rather than generating it from some
+other language. Fair enough - but definitely something to keep in mind. All in
+all, the maintainer is responsive and the library seems to be improving quickly
+- so these limitations may go away in the future.</p>
+</div>
+<div class="section" id="python-jit-alternative-llvmlite">
+<h2>Python JIT alternative - llvmlite</h2>
+<p>A somewhat higher-level alternative to JITing from Python is using <tt class="docutils literal">llvmlite</tt>,
+the new Python binding to LLVM. I wrote <a class="reference external" href="../../2015/building-and-using-llvmlite-a-basic-example/index.html">about llvmlite before</a>
+and also ported the LLVM official tutorial <a class="reference external" href="../../2015/python-version-of-the-llvm-tutorial/index.html">to Python using it</a>.</p>
+<p><tt class="docutils literal">llvmlite</tt> would definitely do the job here (and most likely not have the
+limitations of PeachPy), but I wanted to go with something different in this
+part. After all, a BF JIT with LLVM was already covered <a class="reference external" href="../adventures-in-jit-compilation-part-3-llvm/index.html">in part 3</a>,
+and <tt class="docutils literal">llvmlite</tt> is a binding to the same library, just in Python. PeachPy
+offers an altenative approach for machine code generation from Python - with
+more direct control of the emitted instructions, though none of the optimizations
+LLVM provides automatically.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>For example <a class="reference external" href="http://numba.pydata.org/">Numba</a> - a JIT compiler for
+numeric code written in Python; it takes Python code that uses Numpy and
+JIT-compiles it to optimized native code.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>No magic is involved here - in fact PeachPy uses precisely the same
+approach as I've shown to invoke <tt class="docutils literal">mmap</tt> from Python via <tt class="docutils literal">ctypes</tt>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>As an exercise, modify this code to invoke <tt class="docutils literal">putchar</tt> and <tt class="docutils literal">getchar</tt>.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

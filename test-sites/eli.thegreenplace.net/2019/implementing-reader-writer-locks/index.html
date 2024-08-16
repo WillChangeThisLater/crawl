@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Implementing reader-writer locks - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Implementing reader-writer locks">
+                        Implementing reader-writer locks
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> April 25, 2019 at 06:09</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/concurrency.html">Concurrency</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>When writing concurrent code, a lock is one of the most critical tools
+programmers have in their toolbox. For the majority of applications adding
+a lock to protect access to some data is all you need. However, for some
+performance-critical pieces of code, a lock may introduce significant
+overhead and its use has to be carefully optimized; for example, lock
+<em>granularity</em> is frequently tweaked to make sure threads hold locks for the
+minimal amount of time necessary.</p>
+<p>A common optimization for locks is using <em>reader-writer locks</em>, and this post
+discusses the concept and provides multiple implementations. I'm using Go as
+the programming language because of its great support for concurrency and the
+large number of building blocks available in the standard library, but the
+concepts are easily translatable to any programming language <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>.</p>
+<p>All the code for this post is available <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2019/rwlocks">on GitHub</a>. See the
+appendix at the end of the post for some notes on testing and benchmarking
+methodology.</p>
+<p>The purpose of this post is purely educational; Go already has an excellent
+reader-writer lock implementation with <tt class="docutils literal">sync.RWMutex</tt>. In fact, we'll be
+looking at how it works in this post.</p>
+<img alt="Image of a lock with several read keys and one large write key" class="align-center" src="../../images/2019/rwlock.png" />
+<div class="section" id="motivation-for-having-reader-writer-locks">
+<h2>Motivation for having reader-writer locks</h2>
+<p>Reader-writer locks (RW locks from here on) were created from the observation
+that multiple threads can <em>read</em> shared data concurrently, as long as no
+one is modifying that data while it's being read. Regular locks don't
+distinguish between &quot;lock for reading&quot; and &quot;lock for writing&quot;, so when multiple
+threads are reading data, each will still have to lock it, producing needless
+serialization. In other words, nesessary exclusion between readers and writers
+leads to unnecessary exlusion between multiple readers.</p>
+<p>RW locks fix this issue. Instead of having a single <em>lock</em> method, they have
+two - one for readers and one for writers. When readers enter the critical
+section they invoke the <em>reader lock</em> (and then <em>reader unlock</em> on exit); when
+writers enter the critical section they invoke the <em>writer lock</em> (and then
+<em>writer unlock</em> on exit). With this scheme, as long as there are no writers
+in the critical section, multiple readers can interact with the
+data simultaneously.</p>
+</div>
+<div class="section" id="a-simple-implementation">
+<h2>A simple implementation</h2>
+<p>Let's start with a simple implementation that uses a counter. All RW locks in
+this post will implement this interface:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">RWLocker</span><span class="w"> </span><span class="kd">interface</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">RLock</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">RUnlock</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">WLock</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">WUnlock</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Having a single interface is very useful for testing - see the appendix for more
+details on that. The names of the methods in the interface should be
+self-explanatory: reader lock/unlock, writer lock/unlock.</p>
+<p>The simple counter-based implementation uses a mutex and a counter:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">ReaderCountRWLock</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">m</span><span class="w">           </span><span class="nx">sync</span><span class="p">.</span><span class="nx">Mutex</span><span class="w"></span>
+<span class="w">    </span><span class="nx">readerCount</span><span class="w"> </span><span class="kt">int</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The counter keeps track of the number of readers that are holding the lock. The
+reader locking/unlocking is straightforward <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">l</span><span class="w"> </span><span class="o">*</span><span class="nx">ReaderCountRWLock</span><span class="p">)</span><span class="w"> </span><span class="nx">RLock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">m</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">readerCount</span><span class="o">++</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">m</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">l</span><span class="w"> </span><span class="o">*</span><span class="nx">ReaderCountRWLock</span><span class="p">)</span><span class="w"> </span><span class="nx">RUnlock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">m</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">readerCount</span><span class="o">--</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">m</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The writer is a bit trickier. A writer attempting to take the lock will have
+to wait until there are no readers inside. Here's a simple, though inefficient,
+way to do this:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">l</span><span class="w"> </span><span class="o">*</span><span class="nx">ReaderCountRWLock</span><span class="p">)</span><span class="w"> </span><span class="nx">WLock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">l</span><span class="p">.</span><span class="nx">m</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="nx">l</span><span class="p">.</span><span class="nx">readerCount</span><span class="w"> </span><span class="p">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="nx">l</span><span class="p">.</span><span class="nx">m</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="k">break</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The writer locks the mutex and checks if there are readers inside the lock. If
+there are, it releases the mutex and tries again - this is called <em>spinning</em>.
+If there are no readers, <tt class="docutils literal">WLock</tt> returns with the mutex still locked, so
+readers won't be able to take the lock. A writer unlock is trivial:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">l</span><span class="w"> </span><span class="o">*</span><span class="nx">ReaderCountRWLock</span><span class="p">)</span><span class="w"> </span><span class="nx">WUnlock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">m</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This implementation is the simplest I could come up with. Its performance could
+be better, though. If readers are inside the lock, a writer will spin taking and
+releasing the mutex and &quot;burn&quot; CPU cycles. We could optimize this lock
+significantly if only we had some way for a writer to wait more efficiently.</p>
+</div>
+<div class="section" id="efficient-waiting-with-a-condition-variable">
+<h2>Efficient waiting with a condition variable</h2>
+<p>Condition variables are exactly what we need here, since the pattern of &quot;take
+mutex, check something, release it back if not ready&quot; is precisely the pattern
+they are designed to optimize. A more advanced version of the RW lock will use
+one:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">ReaderCountCondRWLock</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">readerCount</span><span class="w"> </span><span class="kt">int</span><span class="w"></span>
+<span class="w">    </span><span class="nx">c</span><span class="w">           </span><span class="o">*</span><span class="nx">sync</span><span class="p">.</span><span class="nx">Cond</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>If you're wondering where is the mutex here, don't worry. In Go, a <tt class="docutils literal">sync.Cond</tt>
+has a mutex embedded in it, so we get both. This struct is going to need a
+constructor:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">NewReaderCountCondRWLock</span><span class="p">()</span><span class="w"> </span><span class="o">*</span><span class="nx">ReaderCountCondRWLock</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">ReaderCountCondRWLock</span><span class="p">{</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="nx">sync</span><span class="p">.</span><span class="nx">NewCond</span><span class="p">(</span><span class="nb">new</span><span class="p">(</span><span class="nx">sync</span><span class="p">.</span><span class="nx">Mutex</span><span class="p">))}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Here's the reader for this lock:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">l</span><span class="w"> </span><span class="o">*</span><span class="nx">ReaderCountCondRWLock</span><span class="p">)</span><span class="w"> </span><span class="nx">RLock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">c</span><span class="p">.</span><span class="nx">L</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">readerCount</span><span class="o">++</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">c</span><span class="p">.</span><span class="nx">L</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">l</span><span class="w"> </span><span class="o">*</span><span class="nx">ReaderCountCondRWLock</span><span class="p">)</span><span class="w"> </span><span class="nx">RUnlock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">c</span><span class="p">.</span><span class="nx">L</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">readerCount</span><span class="o">--</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">l</span><span class="p">.</span><span class="nx">readerCount</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">l</span><span class="p">.</span><span class="nx">c</span><span class="p">.</span><span class="nx">Signal</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">c</span><span class="p">.</span><span class="nx">L</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The only difference from the simple RW lock is that we signal the condition
+variable when the last reader is releasing the lock. Now the writer lock can be
+implemented as follows:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">l</span><span class="w"> </span><span class="o">*</span><span class="nx">ReaderCountCondRWLock</span><span class="p">)</span><span class="w"> </span><span class="nx">WLock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">c</span><span class="p">.</span><span class="nx">L</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="nx">l</span><span class="p">.</span><span class="nx">readerCount</span><span class="w"> </span><span class="p">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">l</span><span class="p">.</span><span class="nx">c</span><span class="p">.</span><span class="nx">Wait</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The <tt class="docutils literal">Wait</tt> is still in a loop because it's entirely possible that between the
+time a reader signaled the condition variable and the time we got the lock,
+some other reader got to the lock first.</p>
+<p>The unlock is:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">l</span><span class="w"> </span><span class="o">*</span><span class="nx">ReaderCountCondRWLock</span><span class="p">)</span><span class="w"> </span><span class="nx">WUnlock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">c</span><span class="p">.</span><span class="nx">Signal</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">c</span><span class="p">.</span><span class="nx">L</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Can you figure out why the <tt class="docutils literal">Signal</tt> is needed here? Without it, we'll get
+a deadlock under moderately heavy load. The answer is in footnote <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>.</p>
+<p>This implementation is much more efficient than the first one, because the
+spin-loop is avoided. While there's still a loop around <tt class="docutils literal">Wait</tt>, it's of
+a very different nature - <tt class="docutils literal">Wait</tt> still blocks, and the loop re-runs only in
+rare cases when there's a true race to the lock.</p>
+<p>Here a note on benchmarking methodology is apt. I'm saying &quot;more efficient&quot;
+without providing evidence, because benchmarking such code is extremely hard
+and use-case dependent. Results will vary dramatically based on the load and
+the specific workload you're using. The appendix describes one benchmarking
+methodology I used for this code and you should be able to reproduce my results.</p>
+</div>
+<div class="section" id="counted-semaphore">
+<h2>Counted semaphore</h2>
+<p>Another variation of the RW lock which I find particularly elegant and simple is
+using a <em>counting semaphore</em>. In Go, package <tt class="docutils literal">golang.org/x/sync/semaphore</tt>
+provides the <tt class="docutils literal">Weighted</tt> type which implements this - a semaphore where you can
+acquire and release a numeric &quot;weight&quot;. Here's our type, a constructor and
+reader methods:</p>
+<div class="highlight"><pre><span></span><span class="kd">const</span><span class="w"> </span><span class="nx">maxWeight</span><span class="w"> </span><span class="kt">int64</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">30</span><span class="w"></span>
+
+<span class="kd">type</span><span class="w"> </span><span class="nx">SemaRWLock</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">s</span><span class="w"> </span><span class="o">*</span><span class="nx">semaphore</span><span class="p">.</span><span class="nx">Weighted</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="c1">// NewSemaRWLock creates a new SemaRWLock.</span><span class="w"></span>
+<span class="kd">func</span><span class="w"> </span><span class="nx">NewSemaRWLock</span><span class="p">()</span><span class="w"> </span><span class="o">*</span><span class="nx">SemaRWLock</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">SemaRWLock</span><span class="p">{</span><span class="nx">semaphore</span><span class="p">.</span><span class="nx">NewWeighted</span><span class="p">(</span><span class="nx">maxWeight</span><span class="p">)}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">l</span><span class="w"> </span><span class="o">*</span><span class="nx">SemaRWLock</span><span class="p">)</span><span class="w"> </span><span class="nx">RLock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">s</span><span class="p">.</span><span class="nx">Acquire</span><span class="p">(</span><span class="nx">context</span><span class="p">.</span><span class="nx">Background</span><span class="p">(),</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">l</span><span class="w"> </span><span class="o">*</span><span class="nx">SemaRWLock</span><span class="p">)</span><span class="w"> </span><span class="nx">RUnlock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">s</span><span class="p">.</span><span class="nx">Release</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>A writer simply grabs the whole <tt class="docutils literal">maxWeight</tt>, guaranteeing that only a single
+writer can take a semaphore and it's mutually exclusive with any other writer or
+readers:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">l</span><span class="w"> </span><span class="o">*</span><span class="nx">SemaRWLock</span><span class="p">)</span><span class="w"> </span><span class="nx">WLock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">s</span><span class="p">.</span><span class="nx">Acquire</span><span class="p">(</span><span class="nx">context</span><span class="p">.</span><span class="nx">Background</span><span class="p">(),</span><span class="w"> </span><span class="nx">maxWeight</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">l</span><span class="w"> </span><span class="o">*</span><span class="nx">SemaRWLock</span><span class="p">)</span><span class="w"> </span><span class="nx">WUnlock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">s</span><span class="p">.</span><span class="nx">Release</span><span class="p">(</span><span class="nx">maxWeight</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>While this is a really simple and clean solution, I found its performance to be
+wanting. It could be that the implementation of <tt class="docutils literal">semaphore.Weighted</tt> is just
+not a good fit for my specific benchmark, but this aproach performed vastly
+worse than even the simple spin-loop implementation.</p>
+</div>
+<div class="section" id="reader-preference-vs-writer-preference">
+<h2>Reader preference vs. Writer preference</h2>
+<p>You may have noticed a common theme for all the implementations presented so
+far. They all make it rather difficult for writers to get in when many readers
+are active. For example, the very first implementation requires <tt class="docutils literal">readerCount</tt>
+to be at 0 for a writer to get in. Imagine there are 2 active readers and a
+waiting writer; the writer waits for both readers to release the lock, but while
+it's waiting other readers can come in and grab it. It's like waiting at a stop
+sign to cross a very busy street where every car has the right of way over you -
+it may take you quite a while.</p>
+<p>This is called <em>reader preference</em>, or - more dramatically - <em>writer
+starvation</em>. It's often not what we want since it can add significant delay to
+updates in the system. It's great to have many readers working concurrently
+without blocking each other, but it's not as appealing if they are mostly
+reading stale data.</p>
+<p>Let's now look at a couple of writer-preferring implementations.</p>
+</div>
+<div class="section" id="a-simple-writer-preferring-rw-lock">
+<h2>A simple writer-preferring RW lock</h2>
+<p>This implementation is adapted <a class="reference external" href="https://en.wikipedia.org/wiki/Readers%E2%80%93writer_lock">from Wikipedia</a>. We'll start with
+the struct and the constructor:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">WritePreferRWLock</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">readerCount</span><span class="w"> </span><span class="kt">int</span><span class="w"></span>
+<span class="w">    </span><span class="nx">hasWriter</span><span class="w">   </span><span class="kt">bool</span><span class="w"></span>
+<span class="w">    </span><span class="nx">c</span><span class="w">           </span><span class="o">*</span><span class="nx">sync</span><span class="p">.</span><span class="nx">Cond</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">NewWritePreferRWLock</span><span class="p">()</span><span class="w"> </span><span class="o">*</span><span class="nx">WritePreferRWLock</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">WritePreferRWLock</span><span class="p">{</span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="nx">sync</span><span class="p">.</span><span class="nx">NewCond</span><span class="p">(</span><span class="nb">new</span><span class="p">(</span><span class="nx">sync</span><span class="p">.</span><span class="nx">Mutex</span><span class="p">))}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Here <tt class="docutils literal">readerCount</tt> is still the number of readers holding the lock, but we're
+adding a new field - <tt class="docutils literal">hasWriter</tt>; this one is <tt class="docutils literal">true</tt> whenever there's a
+writer waiting to take the lock. <tt class="docutils literal">c</tt> is a condition variable and an associated
+mutex that implement the actual exclusion as well as efficient waiting. Let's
+start with the reader:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">l</span><span class="w"> </span><span class="o">*</span><span class="nx">WritePreferRWLock</span><span class="p">)</span><span class="w"> </span><span class="nx">RLock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">c</span><span class="p">.</span><span class="nx">L</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="nx">l</span><span class="p">.</span><span class="nx">hasWriter</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">l</span><span class="p">.</span><span class="nx">c</span><span class="p">.</span><span class="nx">Wait</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">readerCount</span><span class="o">++</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">c</span><span class="p">.</span><span class="nx">L</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">l</span><span class="w"> </span><span class="o">*</span><span class="nx">WritePreferRWLock</span><span class="p">)</span><span class="w"> </span><span class="nx">RUnlock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">c</span><span class="p">.</span><span class="nx">L</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">readerCount</span><span class="o">--</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">l</span><span class="p">.</span><span class="nx">readerCount</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">l</span><span class="p">.</span><span class="nx">c</span><span class="p">.</span><span class="nx">Broadcast</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">c</span><span class="p">.</span><span class="nx">L</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>As before, it's critical for correctness to only examine the shared data when a
+mutex is held. When a reader comes in, it first checks if writers are waiting to
+grab the lock; if yes, it will wait on the condition variable. This is where the
+writer preference is embodied - unlike previous implementations, in this one
+readers give writers the right of way. When no writers are waiting, the reader
+increments the reader count.</p>
+<p>When releasing the lock, the last reader out will broadcast <tt class="docutils literal">l.c</tt>
+to wake up any writers that could be waiting <a class="footnote-reference" href="index.html#footnote-4" id="footnote-reference-4">[4]</a>.</p>
+<p>Here's the writer side:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">l</span><span class="w"> </span><span class="o">*</span><span class="nx">WritePreferRWLock</span><span class="p">)</span><span class="w"> </span><span class="nx">WLock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">c</span><span class="p">.</span><span class="nx">L</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="nx">l</span><span class="p">.</span><span class="nx">hasWriter</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">l</span><span class="p">.</span><span class="nx">c</span><span class="p">.</span><span class="nx">Wait</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">hasWriter</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="nx">l</span><span class="p">.</span><span class="nx">readerCount</span><span class="w"> </span><span class="p">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">l</span><span class="p">.</span><span class="nx">c</span><span class="p">.</span><span class="nx">Wait</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">c</span><span class="p">.</span><span class="nx">L</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">l</span><span class="w"> </span><span class="o">*</span><span class="nx">WritePreferRWLock</span><span class="p">)</span><span class="w"> </span><span class="nx">WUnlock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">c</span><span class="p">.</span><span class="nx">L</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">hasWriter</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kc">false</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">c</span><span class="p">.</span><span class="nx">Broadcast</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">c</span><span class="p">.</span><span class="nx">L</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>A writer starts by checking that no other writer is active. Note that unlike in
+previous implementations, here writers don't hold the mutex between <tt class="docutils literal">WLock</tt>
+and <tt class="docutils literal">WUnlock</tt>; instead, the mutex is only used to control access to the shared
+struct, and the <tt class="docutils literal">hasWriter</tt> field plays the double role of &quot;writer waiting to
+get lock&quot; and &quot;writer is using lock&quot;. Once there are no more writers, it flips
+<tt class="docutils literal">hasWriter</tt> and waits for existing readers to clear out. Recall that setting
+<tt class="docutils literal">hasWriter</tt> to <tt class="docutils literal">true</tt> guarantees that no <em>new</em> readers will grab the lock.</p>
+<p>In <tt class="docutils literal">WUnlock</tt>, the writer unmarks <tt class="docutils literal">hasWriter</tt> and broadcasts on
+the condition variable. We have to use <tt class="docutils literal">Broadcast</tt> rather than <tt class="docutils literal">Signal</tt> here
+because multiple readers can be waiting and we want to release all of them.</p>
+</div>
+<div class="section" id="a-more-efficient-writer-preferring-rw-lock">
+<h2>A more efficient writer-preferring RW lock</h2>
+<p>While relatively easy to understand, the implementation we've just seen is not
+performing very well - at least on my benchmarks. Therefore, I went looking for
+a more sophisticated writer-preferring implementation, and ended up exploring
+what Go itself uses for its <tt class="docutils literal">sync.RWMutex</tt> <a class="footnote-reference" href="index.html#footnote-5" id="footnote-reference-5">[5]</a>. This is the most complicated
+implementation in this post, so don't be discouraged if you don't get
+it on the first try. Feel free to experiment with <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2019/rwlocks">the code</a> and add
+some logging if you want to get a better grasp of what's going on.</p>
+<p>The goal is to make lock taking - especially in readers - as fast as possible,
+while at the same time giving writers the right of way.</p>
+<p>As usual, we'll start with the struct and constructor:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">WritePreferFastRWLock</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">w</span><span class="w"> </span><span class="nx">sync</span><span class="p">.</span><span class="nx">Mutex</span><span class="w"></span>
+<span class="w">    </span><span class="nx">writerWait</span><span class="w"> </span><span class="kd">chan</span><span class="w"> </span><span class="kd">struct</span><span class="p">{}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">readerWait</span><span class="w"> </span><span class="kd">chan</span><span class="w"> </span><span class="kd">struct</span><span class="p">{}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">numPending</span><span class="w"> </span><span class="kt">int32</span><span class="w"></span>
+<span class="w">    </span><span class="nx">readersDeparting</span><span class="w"> </span><span class="kt">int32</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">maxReaders</span><span class="w"> </span><span class="kt">int32</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">30</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">NewWritePreferFastRWLock</span><span class="p">()</span><span class="w"> </span><span class="o">*</span><span class="nx">WritePreferFastRWLock</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">l</span><span class="w"> </span><span class="nx">WritePreferFastRWLock</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">writerWait</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nb">make</span><span class="p">(</span><span class="kd">chan</span><span class="w"> </span><span class="kd">struct</span><span class="p">{})</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">readerWait</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nb">make</span><span class="p">(</span><span class="kd">chan</span><span class="w"> </span><span class="kd">struct</span><span class="p">{})</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">l</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Now I'll present the reader methods and explain the relevant fields along the
+way:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">l</span><span class="w"> </span><span class="o">*</span><span class="nx">WritePreferFastRWLock</span><span class="p">)</span><span class="w"> </span><span class="nx">RLock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">atomic</span><span class="p">.</span><span class="nx">AddInt32</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">l</span><span class="p">.</span><span class="nx">numPending</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="o">&lt;-</span><span class="nx">l</span><span class="p">.</span><span class="nx">readerWait</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">l</span><span class="w"> </span><span class="o">*</span><span class="nx">WritePreferFastRWLock</span><span class="p">)</span><span class="w"> </span><span class="nx">RUnlock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">r</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">atomic</span><span class="p">.</span><span class="nx">AddInt32</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">l</span><span class="p">.</span><span class="nx">numPending</span><span class="p">,</span><span class="w"> </span><span class="o">-</span><span class="mi">1</span><span class="p">);</span><span class="w"> </span><span class="nx">r</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="nx">atomic</span><span class="p">.</span><span class="nx">AddInt32</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">l</span><span class="p">.</span><span class="nx">readersDeparting</span><span class="p">,</span><span class="w"> </span><span class="o">-</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="nx">l</span><span class="p">.</span><span class="nx">writerWait</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="kd">struct</span><span class="p">{}{}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The mutex <tt class="docutils literal">w</tt> is not used by readers at all. Its sole purpose is to provide
+mutual exclusion between writers, so we'll get to it later. The most critical
+field in this implementation is <tt class="docutils literal">numPending</tt>. It's used to mark the number
+of readers that are using the lock (like <tt class="docutils literal">readerCount</tt>), but is sneakily used
+by writers as well. Writers subtract <tt class="docutils literal">maxReaders</tt> from this field, so a
+negative value means a writer is using the lock. Access to the field is done
+with atomics - so no locking required.</p>
+<p>The reader adds 1 to <tt class="docutils literal">numPending</tt> (atomically). If the value of <tt class="docutils literal">numPending</tt>
+is not negative, there are no waiting/active writers and the reader can proceed.
+This path is expected to be the most common; hence, it's extremely quick - only
+a single atomic add followed by a branch.</p>
+<p>If <tt class="docutils literal">numPending</tt> is negative it means a writer is waiting on the lock or using
+it, so the reader will give the writer the right of way. This is done by waiting
+on an unbuffered channel.</p>
+<p>When a reader is done, it decrements <tt class="docutils literal">numPending</tt>. If there are no writers,
+it's done - again, very quick for the common path. If writers are waiting,
+the <tt class="docutils literal">readersDeparting</tt> field is used to ensure that only a single reader
+releases one waiting writer. <tt class="docutils literal">readersDeparting</tt> is set by a waiting writer
+as we'll soon see.</p>
+<p>Writer lock:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">l</span><span class="w"> </span><span class="o">*</span><span class="nx">WritePreferFastRWLock</span><span class="p">)</span><span class="w"> </span><span class="nx">WLock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">w</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">r</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">atomic</span><span class="p">.</span><span class="nx">AddInt32</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">l</span><span class="p">.</span><span class="nx">numPending</span><span class="p">,</span><span class="w"> </span><span class="o">-</span><span class="nx">maxReaders</span><span class="p">)</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">maxReaders</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">r</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">atomic</span><span class="p">.</span><span class="nx">AddInt32</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">l</span><span class="p">.</span><span class="nx">readersDeparting</span><span class="p">,</span><span class="w"> </span><span class="nx">r</span><span class="p">)</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="o">&lt;-</span><span class="nx">l</span><span class="p">.</span><span class="nx">writerWait</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The <tt class="docutils literal">w</tt> mutex is used here to ensure that only one writer is
+inside the lock at any given time. The second line of the function is a bit
+tricky, since it does two things:</p>
+<ol class="arabic simple">
+<li>It announces to readers that a writer is pending by decrementing
+<tt class="docutils literal">maxReaders</tt> from <tt class="docutils literal">numPending</tt>.</li>
+<li>It calculates the number of active readers by adding <tt class="docutils literal">maxReaders</tt> back
+into the local variable <tt class="docutils literal">r</tt>.</li>
+</ol>
+<p>Then, if there are any active readers (<tt class="docutils literal">r != 0</tt>), it sets their number into
+<tt class="docutils literal">readersDeparting</tt> - this lets readers know how many of them are there before
+releasing <tt class="docutils literal">writerWait</tt>. This function will return (holding the lock) when the
+last departing reader is done. At this point the writer holds the lock
+exclusively (other writers are excluded by <tt class="docutils literal">w</tt>, other readers wait until
+<tt class="docutils literal">numPending</tt> turns positive again).</p>
+<p>Writer unlock:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">l</span><span class="w"> </span><span class="o">*</span><span class="nx">WritePreferFastRWLock</span><span class="p">)</span><span class="w"> </span><span class="nx">WUnlock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">r</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">atomic</span><span class="p">.</span><span class="nx">AddInt32</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">l</span><span class="p">.</span><span class="nx">numPending</span><span class="p">,</span><span class="w"> </span><span class="nx">maxReaders</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="nb">int</span><span class="p">(</span><span class="nx">r</span><span class="p">);</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">l</span><span class="p">.</span><span class="nx">readerWait</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="kd">struct</span><span class="p">{}{}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">l</span><span class="p">.</span><span class="nx">w</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Once again, the clever usage of <tt class="docutils literal">numPending</tt> takes a bit of time to decipher
+here. By adding <tt class="docutils literal">maxReaders</tt>, the writer tells future readers that there are
+no more writers using the lock. The remaining <tt class="docutils literal">r</tt> is the number of readers
+that accumulated waiting for the lock while this writer was active (review
+<tt class="docutils literal">RLock</tt> again). The writer now releases all of them by sending <tt class="docutils literal">r</tt> dummy
+objects into <tt class="docutils literal">readerWait</tt>. Finally it unlocks the writer exclusion lock.</p>
+<p>Phew, that was quite a journey! While it's not necessary to fully understand
+this version of RW locking to get a good sense of how RW locks work, it can be
+quite a rewarding experience - so I do encourage you to play with the code a bit
+and study it more.</p>
+</div>
+<div class="section" id="appendix-testing-and-benchmarking-methodology">
+<h2>Appendix: Testing and benchmarking methodology</h2>
+<p>The testing and benchmarking code <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2019/rwlocks/rwlock_test.go">can be found here</a>.
+Its emphasis is on testing correctness, so it runs a stress test with many
+readers and many writers running concurrently. They all have access to shared
+data - a long slice of integers. The slice begins in increasing sequence (0, 1,
+2, 3, ...) and writers increment each element. Readers check for consistency -
+verifying that the elements in the slice are in the right order. If the lock
+implementation is wrong, readers will read interim state and will fail with an
+error. Since all the locks here implement <tt class="docutils literal">RWLocker</tt>, testing them in a
+uniform way is very easy - interfaces are great for testing!</p>
+<p>Each reader and writer does many iterations, so this is a fairly good stress
+test. I verified that minimal changes in the lock implementations cause the
+tests to fail immediately, and ran all tests with <tt class="docutils literal"><span class="pre">-count</span> 100</tt> and separately
+with <tt class="docutils literal"><span class="pre">-race</span></tt>.</p>
+<p>Benchmarking is more tricky. Each reader and each writer record the time it
+takes them to acquire the lock, and averages are printed out at the end of the
+test. The tricky part here is representing a realistic workload; while my
+measurements seem reasonable for my specific testing scenario, there are many
+variables that represent workloads - number of writers, number of readers,
+how often they access locks, how long their work takes in the critical section
+and so on. In short, YMMV.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td><p class="first">Quick disclaimer: in Go, channels are the first thing programmers
+reach for when coordinating between multiple goroutines, so locks are
+used much less frequently than in other languages. Nevertheless, they
+are still useful in many scenarios.</p>
+<p class="last">In addition, I'll be using the term <em>threads</em> to discuss multiple
+concurrent execution paths to keep in more familiar for non-Go
+programmers.</p>
+</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>Here and elsewhere I'm skipping some extra error checking / assertions
+to keep the code shorter. Take a look at accompanying
+<a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2019/rwlocks">code sample</a>
+for the full version that also includes comments.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>If there are two writers waiting on the condition variable when readers
+are present, one of them will take a the lock and the other may still be
+blocked in <tt class="docutils literal">Wait</tt>. Without additional readers signaling the condition
+variable, this other writer will be stuck in <tt class="docutils literal">Wait</tt> forever. Therefore
+it's important for writers to signal the condition variable too, when
+they're done.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-4">[4]</a></td><td><p class="first">The Wikipedia sample I took this from says we should <em>signal</em> the
+condition variable, but this could be subtly wrong. While one writer
+could be waiting on <tt class="docutils literal">l.c.Wait</tt> for <tt class="docutils literal">readerCount &gt; 0</tt>, another writer
+could be waiting for  <tt class="docutils literal">l.hasWriter</tt>; in addition, multiple readers can
+be waiting on <tt class="docutils literal">l.c.Wait</tt> for <tt class="docutils literal">l.hasWriter</tt>. With a single signal it's
+not defined which goroutine will be woken up.</p>
+<p class="last">Interestingly, if we replace the <tt class="docutils literal">Broadcast</tt> by <tt class="docutils literal">Signal</tt> in
+<tt class="docutils literal">RUnlock</tt>, it happens to work out fine in Go. That's because Go's
+<tt class="docutils literal">sync.Cond</tt> maintains a FIFO queue of waiting goroutines, and the
+writer that got there first (i.e. the one who toggled <tt class="docutils literal">hasWriter</tt> and
+is now waiting for <tt class="docutils literal">readerCount &gt; 0</tt> will be woken up. However, the
+documentation doesn't guarantee this, so it's safer (albeit somewhat less
+efficient) to use <tt class="docutils literal">Broadcast</tt>.</p>
+</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-5">[5]</a></td><td>The following code sample is modified from the standard library
+implementation (Go version 1.12), which uses Go runtime-internal
+functions and types like <tt class="docutils literal">runtime_SemacquireMutex</tt>; instead, I'll be
+using channels for a similar purpose. While the resulting implementation
+is slightly slower than <tt class="docutils literal">sync.RWMutex</tt>, it's easier to understand.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

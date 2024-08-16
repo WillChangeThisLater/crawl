@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>PubSub using channels in Go - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to PubSub using channels in Go">
+                        PubSub using channels in Go
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> January 07, 2020 at 06:33</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/concurrency.html">Concurrency</a>
+        ,
+    <a href="../../tag/go.html">Go</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>The idiomatic way of writing concurrent code in Go is as a collection of
+goroutines communicating over channels. In my experience, the <a class="reference external" href="https://en.wikipedia.org/wiki/Publish%E2%80%93subscribe_pattern">Publish-subscibe
+pattern</a>
+(PubSub) comes up often as a way to structure code. The pattern presented here
+has topic-based subscriptions, but publish-subscribe can appear in other
+disguises as well. In its most simple form, it could be a goroutine that
+produces data and wants to notify a group of other goroutines of that data, with
+each downstream goroutine having access to the data separately (rather than on a
+first-come-first-serve basis as in a work queue). If &quot;PubSub&quot; doesn't ring a
+bell, you might be familiar with its alter egos &quot;message broker&quot; and &quot;event
+bus&quot;.</p>
+<p>In this post I'll present a brief overview of some design decisions that arise
+when implementing PubSub for a Go application. To be clear: this is PubSub for
+<em>in-process</em> communication between multiple goroutines over channels. It does
+not attempt to solve a distributed PubSub problem, which requires sophisticated
+mechanisms for fault-tolerance. Within a single Go process we assume goroutines
+don't just fail and all data sent into channels can be reliably read from the
+other end.</p>
+<p>Let's start with a <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2020/go-pubsub/pubsub-noclose.go">simple and incomplete implementation</a>.
+We'll have the type <tt class="docutils literal">Pubsub</tt> with some methods, which clients can use to
+subscribe to topics and publish on topics:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">Pubsub</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">mu</span><span class="w">   </span><span class="nx">sync</span><span class="p">.</span><span class="nx">RWMutex</span><span class="w"></span>
+<span class="w">  </span><span class="nx">subs</span><span class="w"> </span><span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">][]</span><span class="kd">chan</span><span class="w"> </span><span class="kt">string</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The key data structure here is <tt class="docutils literal">subs</tt>, which maps topic names into a slice
+of channels. Each channel represents a subscription to the topic. I'll talk more
+about the lock later.</p>
+<p>The struct fields aren't exported. Clients interact with <tt class="docutils literal">Pubsub</tt> solely using
+its methods. Let's start with a constructor:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">NewPubsub</span><span class="p">()</span><span class="w"> </span><span class="o">*</span><span class="nx">Pubsub</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ps</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">Pubsub</span><span class="p">{}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ps</span><span class="p">.</span><span class="nx">subs</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nb">make</span><span class="p">(</span><span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">][]</span><span class="kd">chan</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">ps</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Now, a <tt class="docutils literal">Subscribe</tt> method through which clients can subscribe to new topics.
+To subscribe, the client will provide:</p>
+<ol class="arabic simple">
+<li>The topic it's interested in</li>
+<li>A channel on which <tt class="docutils literal">Pubsub</tt> will send it new messages for this topic from
+now on</li>
+</ol>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">ps</span><span class="w"> </span><span class="o">*</span><span class="nx">Pubsub</span><span class="p">)</span><span class="w"> </span><span class="nx">Subscribe</span><span class="p">(</span><span class="nx">topic</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">ch</span><span class="w"> </span><span class="kd">chan</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ps</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">ps</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">ps</span><span class="p">.</span><span class="nx">subs</span><span class="p">[</span><span class="nx">topic</span><span class="p">]</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nb">append</span><span class="p">(</span><span class="nx">ps</span><span class="p">.</span><span class="nx">subs</span><span class="p">[</span><span class="nx">topic</span><span class="p">],</span><span class="w"> </span><span class="nx">ch</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The code is very concise thanks to Go's default value semantics. If <tt class="docutils literal">ps.subs</tt>
+has no <tt class="docutils literal">topic</tt> key, it returns a default value for its value type, or an
+empty slice of <tt class="docutils literal">chan string</tt>. This can be appended to and the result is what
+we expect regardless of the initial contents of <tt class="docutils literal">ps.subs</tt>.</p>
+<p>Publishing on the <tt class="docutils literal">Pubsub</tt> is done with the <tt class="docutils literal">Publish</tt> method, which takes
+a topic and the message:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">ps</span><span class="w"> </span><span class="o">*</span><span class="nx">Pubsub</span><span class="p">)</span><span class="w"> </span><span class="nx">Publish</span><span class="p">(</span><span class="nx">topic</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">msg</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ps</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">RLock</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">ps</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">RUnlock</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">ch</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">ps</span><span class="p">.</span><span class="nx">subs</span><span class="p">[</span><span class="nx">topic</span><span class="p">]</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">ch</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="nx">msg</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Once again the default value semantics in Go are useful. If there are no
+subscribers to <tt class="docutils literal">topic</tt>, <tt class="docutils literal">ps.subs[topic]</tt> is an empty slice so the loop
+doesn't run.</p>
+<p>This is the place to mention the lock. One of Go's most famous philosophies is
+&quot;share memory by communicating&quot;, but Go is also a pragmatic language. When we
+have a shared data structure accessed by multiple goroutines, it's OK to use
+a lock to protect access to it if this results in the clearest
+code. In our case, each <tt class="docutils literal">Pubsub</tt> method starts with a lock + defer unlock
+sequence, so the code is really simple. We do have to be very careful about
+blocking inside <tt class="docutils literal">Pubsub</tt> methods though; more on this shortly.</p>
+<p>Note that we don't have an <tt class="docutils literal">Unsubscribe</tt> method. This is left as an exercise
+to the reader.</p>
+<div class="section" id="closing-the-subscription-channels">
+<h2>Closing the subscription channels</h2>
+<p>The code shown so far has a serious issue. The channels on which messages are
+sent aren't closed; this is not great, because there's no way for subscribers to
+be notified that no more messages are going to be sent. In Go, closing channels
+is important once we're done sending on them, because closing a channel is a
+signal that some job is done and resources can be cleaned up.</p>
+<p>Here is a version of the code with a <tt class="docutils literal">Close</tt> method:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">Pubsub</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">mu</span><span class="w">     </span><span class="nx">sync</span><span class="p">.</span><span class="nx">RWMutex</span><span class="w"></span>
+<span class="w">  </span><span class="nx">subs</span><span class="w">   </span><span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">][]</span><span class="kd">chan</span><span class="w"> </span><span class="kt">string</span><span class="w"></span>
+<span class="hll"><span class="w">  </span><span class="nx">closed</span><span class="w"> </span><span class="kt">bool</span><span class="w"></span>
+</span><span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>We're adding a <tt class="docutils literal">closed</tt> flag to the <tt class="docutils literal">Pubsub</tt> struct. It's initialized to
+<tt class="docutils literal">false</tt> in the constructor. <tt class="docutils literal">Publish</tt> is modified to:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">ps</span><span class="w"> </span><span class="o">*</span><span class="nx">Pubsub</span><span class="p">)</span><span class="w"> </span><span class="nx">Publish</span><span class="p">(</span><span class="nx">topic</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">msg</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ps</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">RLock</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">ps</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">RUnlock</span><span class="p">()</span><span class="w"></span>
+
+<span class="hll"><span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">ps</span><span class="p">.</span><span class="nx">closed</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+</span><span class="hll"><span class="w">    </span><span class="k">return</span><span class="w"></span>
+</span><span class="hll"><span class="w">  </span><span class="p">}</span><span class="w"></span>
+</span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">ch</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">ps</span><span class="p">.</span><span class="nx">subs</span><span class="p">[</span><span class="nx">topic</span><span class="p">]</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">ch</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="nx">msg</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>And we add a new <tt class="docutils literal">Close</tt> method:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">ps</span><span class="w"> </span><span class="o">*</span><span class="nx">Pubsub</span><span class="p">)</span><span class="w"> </span><span class="nx">Close</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ps</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">ps</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">!</span><span class="nx">ps</span><span class="p">.</span><span class="nx">closed</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">ps</span><span class="p">.</span><span class="nx">closed</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">subs</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">ps</span><span class="p">.</span><span class="nx">subs</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">ch</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">subs</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nb">close</span><span class="p">(</span><span class="nx">ch</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>When a <tt class="docutils literal">Pubsub</tt> is done, <tt class="docutils literal">Close</tt> ought to be called to signal on all the
+subscription channels that no more data will be sent.</p>
+<p>Note that these channels weren't created by <tt class="docutils literal">Pubsub</tt>; they are provided
+in calls to <tt class="docutils literal">Subscribe</tt>. Is <tt class="docutils literal">Pubsub.Close</tt> the right place to close them?
+This is a good question. In general, it is idiomatic for the sending side to
+close a channel, because this is its way to signal to the receiving side that no
+more data is going to be sent. Moreover, since sending on a closed channel
+panics, it's dangerous to close channels on the receiving side because then the
+sending side doesn't know that the channel it is sending into may be closed.</p>
+<p>This brings us to the more important topic of where should these channels be
+created in the first place. Is creating them outside <tt class="docutils literal">Pubsub</tt> and passing
+them in the right design, or should <tt class="docutils literal">Pubsub</tt> create them?</p>
+</div>
+<div class="section" id="buffering-in-pubsub-channels">
+<h2>Buffering in pubsub channels</h2>
+<p>The critical issue here is <em>blocking</em>. Recall the sending loop in <tt class="docutils literal">Publish</tt>:</p>
+<div class="highlight"><pre><span></span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">ch</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">ps</span><span class="p">.</span><span class="nx">subs</span><span class="p">[</span><span class="nx">topic</span><span class="p">]</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ch</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="nx">msg</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>If <tt class="docutils literal">ch</tt> is unbuffered, then <tt class="docutils literal">ch &lt;- msg</tt> will block until the message is
+consumed by a receiver. This prevents <tt class="docutils literal">Pubsub</tt> from notifying other
+subscribers on the same channel. Is this the desired behavior? Not likely. Unless
+you can guarantee that receivers consume messages from subscriptions very
+quickly, it may be a good idea to buffer the channels. A buffer of size 1 would
+make it much more robust, wherein the publishing loop could finish notifying
+all topic subscribers quickly (unless a receiver is badly backed up and hasn't
+even consumed the <em>previous</em> message yet).</p>
+<p>In our current design, channels are created outside <tt class="docutils literal">Pubsub</tt>, so their
+buffering is determined by clients. This has both positives and negatives:</p>
+<ul class="simple">
+<li>Positive: <tt class="docutils literal">Pubsub</tt> doesn't know how clients consume the channels, so it
+doesn't have to guess what buffer size is appropriate when creating a channel.
+The client passes it a channel that's already created with the right buffer
+size.</li>
+<li>Negative: the correctness of <tt class="docutils literal">Pubsub</tt> becomes dependent on its clients. A
+slow client that passed in an unbuffered channel can block all other clients
+from consuming their messages.</li>
+</ul>
+</div>
+<div class="section" id="creating-the-subscription-channels-in-pubsub">
+<h2>Creating the subscription channels in Pubsub</h2>
+<p>An alternative design is to create subscription channels in <tt class="docutils literal">Pubsub</tt>. Only the
+<tt class="docutils literal">Subscribe</tt> method would have to change. <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2020/go-pubsub/pubsub-channel-return.go">Here it is</a>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">ps</span><span class="w"> </span><span class="o">*</span><span class="nx">Pubsub</span><span class="p">)</span><span class="w"> </span><span class="nx">Subscribe</span><span class="p">(</span><span class="nx">topic</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;-</span><span class="kd">chan</span><span class="w"> </span><span class="kt">string</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ps</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">ps</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">ch</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">make</span><span class="p">(</span><span class="kd">chan</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ps</span><span class="p">.</span><span class="nx">subs</span><span class="p">[</span><span class="nx">topic</span><span class="p">]</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nb">append</span><span class="p">(</span><span class="nx">ps</span><span class="p">.</span><span class="nx">subs</span><span class="p">[</span><span class="nx">topic</span><span class="p">],</span><span class="w"> </span><span class="nx">ch</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">ch</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Note that the buffer size is hardcoded to 1. While this is a good default, we
+may want to let the client configure the buffer size with an argument. This can
+either be done in the constructor for <em>all</em> subscriptions, or in <tt class="docutils literal">Subscribe</tt>
+with a different buffer size per subscription.</p>
+<p>This version of <tt class="docutils literal">Pubsub</tt> has the nice property that it both creates and closes
+the channels, so the separation of responsibilities is cleaner. Subscribers just
+get a channel and listen on it until it's closed.</p>
+<p>One slight inconvenience with this approach is that clients may want to
+subscribe the same channel to multiple topics. In the previous version of
+<tt class="docutils literal">Pubsub</tt> they could do so by passing in the same channel to multiple
+<tt class="docutils literal">Subscribe</tt> calls; in this version they cannot.</p>
+<p>However, subscribing the same channel to multiple topics is problematic in other
+ways. For example, <tt class="docutils literal">Pubsub</tt> may attempt to <tt class="docutils literal">close</tt> the same channel multiple
+times when done - this panics. We'd have to add special provisions to <tt class="docutils literal">Close</tt>
+to avoid that (such as keep a set of all channels already closed).</p>
+<p>In general, I would recommend avoiding this and sticking to a cleaner
+one-channel-per-subscription approach. In case the client wants to use the same
+<tt class="docutils literal">range</tt> loop to receive from multiple topics, it's easy to use some kind of
+channel fan-in solution instead.</p>
+</div>
+<div class="section" id="doing-each-send-in-a-goroutine">
+<h2>Doing each send in a goroutine</h2>
+<p>When we discussed the danger of <tt class="docutils literal">ch &lt;- msg</tt> blocking <em>all</em> clients, you may
+have wondered why we don't just perform each send in its own goroutine. Here is
+a version of <tt class="docutils literal">Publish</tt> that does this:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">ps</span><span class="w"> </span><span class="o">*</span><span class="nx">Pubsub</span><span class="p">)</span><span class="w"> </span><span class="nx">Publish</span><span class="p">(</span><span class="nx">topic</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">msg</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ps</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">RLock</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">ps</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">RUnlock</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">ps</span><span class="p">.</span><span class="nx">closed</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">ch</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">ps</span><span class="p">.</span><span class="nx">subs</span><span class="p">[</span><span class="nx">topic</span><span class="p">]</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="hll"><span class="w">    </span><span class="k">go</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">ch</span><span class="w"> </span><span class="kd">chan</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+</span><span class="hll"><span class="w">      </span><span class="nx">ch</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="nx">msg</span><span class="w"></span>
+</span><span class="hll"><span class="w">    </span><span class="p">}(</span><span class="nx">ch</span><span class="p">)</span><span class="w"></span>
+</span><span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Now it doesn't matter how much buffering each channel has; the send will not
+block any other sends because it runs in its own goroutine.</p>
+<p>There may be performance implications, of course. Even though starting and
+tearing down goroutines is very quick, do you really want a new one to run <em>for
+every message</em>? The answer depends on your particular application.
+When in doubt, benchmark it.</p>
+<p>But performance implications are not the most serious potential issue with this
+code. It decouples the places where data is sent on subscription channels and
+where these channels are closed, which always leaves me a bit uneasy.</p>
+<p>Consider a slow client that causes its subscription channel to block for a long
+while. Meanwhile, <tt class="docutils literal">Pubsub</tt> may be closed and attempt to close the
+channel. But closing channels that have writes pending on them is bad - it's a
+race condition, which is one of the worst kinds of bug to have. In the original
+code this can't happen because <tt class="docutils literal">Publish</tt> holds a lock that prevents <tt class="docutils literal">Close</tt>
+from running at all.</p>
+</div>
+<div class="section" id="conclusion">
+<h2>Conclusion</h2>
+<p>The goal of this post was to demonstrate some design choices for a simple yet
+functional piece of code. Channels in Go are powerful, but they're not magic.
+Difficult questions of ownership and ordering still arise, and it's instructive
+to think through a single problem from multiple angles.</p>
+<p>Of the approaches presented here, I personally prefer the one where
+<tt class="docutils literal">Subscribe</tt> creates new channels and returns them. This approach is the most
+conceptually simple, IMHO, because the ownership of these channels is the most
+centralized. <tt class="docutils literal">Pubsub</tt> creates them, sends on them, and closes them. For a
+client, the life cycle of a subscription channel is very clear: a new channel is
+created by <tt class="docutils literal">Subscribe</tt> and can be read from until it's closed. Calling
+<tt class="docutils literal">Pubsub.Close</tt> will close all outstanding subscription channel and is useful
+for cleanup. If we need configurable buffering, this is easy to add.</p>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

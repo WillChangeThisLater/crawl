@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Parent links in Go ASTs - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Parent links in Go ASTs">
+                        Parent links in Go ASTs
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> September 03, 2022 at 05:37</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/go-tooling.html">Go tooling</a>
+        ,
+    <a href="../../tag/compilation.html">Compilation</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>A common question that comes up when writing AST-based tooling in Go is &quot;how do
+I find a node's parent?&quot;, or more generally, &quot;what are all the ancestors of
+a given node?&quot;</p>
+<p>Go's <a class="reference external" href="https://pkg.go.dev/go/ast">AST package</a> does not come with parent links
+out of the box; this is a common choice in AST libraries <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>. Parent links are
+rarely needed, but they carry significant overheads in terms of memory usage
+and CPU time. Typical AST nodes can be fairly compact and adding a pointer to
+each node can increase its size considerably. Keeping this pointer populated
+properly also takes CPU time; furthermore, in GC'd languages like Go, parent
+links are a significant source of pointers to scan and keep track of. All of
+these are fixed costs imposed on <em>any</em> analyzer, just for the sake of the few
+that may need this information.</p>
+<p>But say your analysis really <em>does</em> need parent links? What do you do then?
+This post explores a few options.</p>
+<div class="section" id="problem-statement">
+<h2>Problem statement</h2>
+<p>For the sake of discussion, we need a concrete problem to focus on. To keep it
+simple, we'll use something artificial: suppose we want to find all the binary
+multiplication expressions that are nested inside other binary expressions. For
+example:</p>
+<div class="highlight"><pre><span></span><span class="nx">m</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">y</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">z</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">x</span><span class="w"></span>
+</pre></div>
+<p>The <tt class="docutils literal">z * x</tt> sub-expression is represented by an <tt class="docutils literal">ast.BinaryExpr</tt> node, which
+is nested inside another <tt class="docutils literal">ast.BinaryExpr</tt> (the <tt class="docutils literal">+</tt>). Here's a graphical
+AST dump from my <a class="reference external" href="https://astexplorer.net/">new favorite AST viewer</a>:</p>
+<img alt="AST dump of previous expression" class="align-center" src="../../images/2022/astparent-dump1.png" />
+<p>We'll consider the following code as fulfilling our condition too:</p>
+<div class="highlight"><pre><span></span><span class="nx">m</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">x</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">foo</span><span class="p">(</span><span class="nx">y</span><span class="o">*</span><span class="nx">z</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>The multiplication is nested inside the addition, even though the
+multiplication's immediate parent is a <tt class="docutils literal">CallExpr</tt>.</p>
+</div>
+<div class="section" id="approach-1-ad-hoc">
+<h2>Approach #1: ad-hoc</h2>
+<p>The first approach that comes to mind is &quot;just use some flags during traversal&quot;;
+I'll call it the ad-hoc approach, and it's a perfectly valid way to solve the
+problem. Let's start with the usual tool scaffolding (the full code is <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2022/go-ast-parent">on
+GitHub</a>):</p>
+<div class="highlight"><pre><span></span><span class="kd">var</span><span class="w"> </span><span class="nx">fset</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">token</span><span class="p">.</span><span class="nx">NewFileSet</span><span class="p">()</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">mode</span><span class="w"> </span><span class="nx">packages</span><span class="p">.</span><span class="nx">LoadMode</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">packages</span><span class="p">.</span><span class="nx">NeedName</span><span class="w"> </span><span class="o">|</span><span class="w"></span>
+<span class="w">    </span><span class="nx">packages</span><span class="p">.</span><span class="nx">NeedTypes</span><span class="w"> </span><span class="o">|</span><span class="w"></span>
+<span class="w">    </span><span class="nx">packages</span><span class="p">.</span><span class="nx">NeedSyntax</span><span class="w"> </span><span class="o">|</span><span class="w"></span>
+<span class="w">    </span><span class="nx">packages</span><span class="p">.</span><span class="nx">NeedTypesInfo</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Parse</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">NArg</span><span class="p">()</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;Expecting a single argument: directory of module&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">cfg</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">packages</span><span class="p">.</span><span class="nx">Config</span><span class="p">{</span><span class="nx">Fset</span><span class="p">:</span><span class="w"> </span><span class="nx">fset</span><span class="p">,</span><span class="w"> </span><span class="nx">Mode</span><span class="p">:</span><span class="w"> </span><span class="nx">mode</span><span class="p">,</span><span class="w"> </span><span class="nx">Dir</span><span class="p">:</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Args</span><span class="p">()[</span><span class="mi">0</span><span class="p">]}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">pkgs</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">packages</span><span class="p">.</span><span class="nx">Load</span><span class="p">(</span><span class="nx">cfg</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;./...&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">pkg</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">pkgs</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">processPackage</span><span class="p">(</span><span class="nx">pkg</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">processPackage</span><span class="p">(</span><span class="nx">pkg</span><span class="w"> </span><span class="o">*</span><span class="nx">packages</span><span class="p">.</span><span class="nx">Package</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">pkg</span><span class="p">.</span><span class="nx">Errors</span><span class="p">)</span><span class="w"> </span><span class="p">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">e</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">pkg</span><span class="p">.</span><span class="nx">Errors</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;Error: %s\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">e</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">os</span><span class="p">.</span><span class="nx">Exit</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">discoverNodeParentsAdhoc</span><span class="p">(</span><span class="nx">pkg</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>As usual, our AST traversal employs <tt class="docutils literal">ast.Inspect</tt>, which visits the entire
+AST in depth-first order. We can cleverly maintain a &quot;I have a
+<tt class="docutils literal">ast.BinaryExpr</tt> parent&quot; state through the traversal, but it will be much
+easier to invert the logic, like this:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">discoverNodeParentsAdhoc</span><span class="p">(</span><span class="nx">pkg</span><span class="w"> </span><span class="o">*</span><span class="nx">packages</span><span class="p">.</span><span class="nx">Package</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">fileAst</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">pkg</span><span class="p">.</span><span class="nx">Syntax</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Inspect</span><span class="p">(</span><span class="nx">fileAst</span><span class="p">,</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">n</span><span class="w"> </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Node</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">bexpr</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">n</span><span class="p">.(</span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">BinaryExpr</span><span class="p">);</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">findBinMulChild</span><span class="p">(</span><span class="nx">bexpr</span><span class="p">.</span><span class="nx">X</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="nx">findBinMulChild</span><span class="p">(</span><span class="nx">bexpr</span><span class="p">.</span><span class="nx">Y</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="kc">false</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+<span class="w">    </span><span class="p">})</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">findBinMulChild</span><span class="p">(</span><span class="nx">ancestor</span><span class="w"> </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Node</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Inspect</span><span class="p">(</span><span class="nx">ancestor</span><span class="p">,</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">n</span><span class="w"> </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Node</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">bexpr</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">n</span><span class="p">.(</span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">BinaryExpr</span><span class="p">);</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">bexpr</span><span class="p">.</span><span class="nx">Op</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nx">token</span><span class="p">.</span><span class="nx">MUL</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;found BinaryExpr(*) as a child of another binary expr: %v\n&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="nx">fset</span><span class="p">.</span><span class="nx">Position</span><span class="p">(</span><span class="nx">n</span><span class="p">.</span><span class="nx">Pos</span><span class="p">()))</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+<span class="w">  </span><span class="p">})</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>For each <tt class="docutils literal">ast.BinaryExpr</tt>, we start another recursive visit of both
+its children. If this visit finds a binary <tt class="docutils literal">*</tt> - bingo! Note that we don't do
+double work here, since after calling <tt class="docutils literal">findBinMulChild</tt> on the left and right
+children we return <tt class="docutils literal">false</tt>. That's the beauty of ad-hoc approaches - they are,
+well.. ad-hoc :-) We only need to do as much work as our analysis requires. The
+obvious disadvantage is that every task is different and we can't always reuse
+a lot between them.</p>
+<p>Next, let's try something more generic.</p>
+</div>
+<div class="section" id="approach-2-keeping-manual-track-of-parents">
+<h2>Approach #2: keeping manual track of parents</h2>
+<p>Recall the original problem this post started with: AST nodes have no parent
+links. If we had a way to follow a chain of parents, solving the task would be
+easy: once we get to a <tt class="docutils literal">*</tt> node, we simply go up the chain of parents and see
+if there are any <tt class="docutils literal">ast.BinaryExpr</tt>s in it.</p>
+<p>Well, it turns out to be pretty easy to build a list of parents manually. The
+key insight is that <tt class="docutils literal">ast.Inspect</tt> helps us by calling our traversal function
+with <tt class="docutils literal">nil</tt> at the end of each node's children. We can use that for
+bookkeeping:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">discoverNodeParentsManualStack</span><span class="p">(</span><span class="nx">pkg</span><span class="w"> </span><span class="o">*</span><span class="nx">packages</span><span class="p">.</span><span class="nx">Package</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">fileAst</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">pkg</span><span class="p">.</span><span class="nx">Syntax</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">ancestors</span><span class="w"> </span><span class="p">[]</span><span class="nx">ast</span><span class="p">.</span><span class="nx">Node</span><span class="w"></span>
+<span class="w">    </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Inspect</span><span class="p">(</span><span class="nx">fileAst</span><span class="p">,</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">n</span><span class="w"> </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Node</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">bexpr</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">n</span><span class="p">.(</span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">BinaryExpr</span><span class="p">);</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">bexpr</span><span class="p">.</span><span class="nx">Op</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nx">token</span><span class="p">.</span><span class="nx">MUL</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// Walk the ancestor stack to find if one of them is also a BinaryExpr</span><span class="w"></span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">ancestors</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">--</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="k">if</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">ancestors</span><span class="p">[</span><span class="nx">i</span><span class="p">].(</span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">BinaryExpr</span><span class="p">);</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;found BinaryExpr(*) as a child of another binary expr: %v\n&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">              </span><span class="nx">fset</span><span class="p">.</span><span class="nx">Position</span><span class="p">(</span><span class="nx">n</span><span class="p">.</span><span class="nx">Pos</span><span class="p">()))</span><span class="w"></span>
+<span class="w">            </span><span class="k">break</span><span class="w"></span>
+<span class="w">          </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">n</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// Pop, since we&#39;re done with this node and its children.</span><span class="w"></span>
+<span class="w">        </span><span class="nx">ancestors</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">ancestors</span><span class="p">[:</span><span class="nb">len</span><span class="p">(</span><span class="nx">ancestors</span><span class="p">)</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// Push this node on the stack, since its children will be visited</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// next.</span><span class="w"></span>
+<span class="w">        </span><span class="nx">ancestors</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nb">append</span><span class="p">(</span><span class="nx">ancestors</span><span class="p">,</span><span class="w"> </span><span class="nx">n</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+<span class="w">    </span><span class="p">})</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This code keeps a stack of the node's ancestors in a slice. Since the traversal
+is DFS, whenever out function is called we push the current node onto the stack
+(it will serve as an ancestor for subsequent calls), and when called with
+<tt class="docutils literal">nil</tt> (meaning that we're done with this a node's children) we pop it off.</p>
+<p>When an actual <tt class="docutils literal">*</tt> node is found, it's straightforward to walk the stack
+upwards looking for an <tt class="docutils literal">ast.BinaryExpr</tt> <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.</p>
+</div>
+<div class="section" id="approach-3-using-inspector-withstack">
+<h2>Approach #3: using Inspector.WithStack</h2>
+<p>The previous section showed that it's fairly easy to maintain a full stack of
+ancestors while traversing the AST, but even this minimal effort is unnecessary.
+The Go tooling packages come with some useful helpers, and this is one use case
+that's already covered.</p>
+<p>The <a class="reference external" href="https://pkg.go.dev/golang.org/x/tools/go/ast/inspector">ast/inspector</a>
+package provides helper functions for AST traversal. One capability that's
+very useful for our scenario is <tt class="docutils literal">WithStack</tt>. You can read its documentation
+yourself, so without further ado here's how we solve our concrete problem using
+it:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">discoverNodeParentsWithStack</span><span class="p">(</span><span class="nx">pkg</span><span class="w"> </span><span class="o">*</span><span class="nx">packages</span><span class="p">.</span><span class="nx">Package</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">insp</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">inspector</span><span class="p">.</span><span class="nx">New</span><span class="p">(</span><span class="nx">pkg</span><span class="p">.</span><span class="nx">Syntax</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">insp</span><span class="p">.</span><span class="nx">WithStack</span><span class="p">(</span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">n</span><span class="w"> </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Node</span><span class="p">,</span><span class="w"> </span><span class="nx">push</span><span class="w"> </span><span class="kt">bool</span><span class="p">,</span><span class="w"> </span><span class="nx">stack</span><span class="w"> </span><span class="p">[]</span><span class="nx">ast</span><span class="p">.</span><span class="nx">Node</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">bexpr</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">n</span><span class="p">.(</span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">BinaryExpr</span><span class="p">);</span><span class="w"> </span><span class="nx">push</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">bexpr</span><span class="p">.</span><span class="nx">Op</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nx">token</span><span class="p">.</span><span class="nx">MUL</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">stack</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">2</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">--</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">stack</span><span class="p">[</span><span class="nx">i</span><span class="p">].(</span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">BinaryExpr</span><span class="p">);</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;found BinaryExpr(*) as a child of another binary expr: %v\n&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="nx">fset</span><span class="p">.</span><span class="nx">Position</span><span class="p">(</span><span class="nx">n</span><span class="p">.</span><span class="nx">Pos</span><span class="p">()))</span><span class="w"></span>
+<span class="w">          </span><span class="k">break</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+<span class="w">  </span><span class="p">})</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+</div>
+<div class="section" id="approach-4-with-pathenclosinginterval">
+<h2>Approach #4: with PathEnclosingInterval</h2>
+<p>Finally, there's yet another tool we could use - <tt class="docutils literal">PathEnclosingInterval</tt> from
+the <tt class="docutils literal">ast/astutil</tt> package. This function is a bit unusual, in that it takes
+a token position, and returns all the AST nodes that contain that position in
+the source. It's a very specialized API that's mostly useful for text editors,
+but it can also solve our task for this post:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">discoverNodeParentsPathInterval</span><span class="p">(</span><span class="nx">pkg</span><span class="w"> </span><span class="o">*</span><span class="nx">packages</span><span class="p">.</span><span class="nx">Package</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">fileAst</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">pkg</span><span class="p">.</span><span class="nx">Syntax</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Inspect</span><span class="p">(</span><span class="nx">fileAst</span><span class="p">,</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">n</span><span class="w"> </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Node</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">bexpr</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">n</span><span class="p">.(</span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">BinaryExpr</span><span class="p">);</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">bexpr</span><span class="p">.</span><span class="nx">Op</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nx">token</span><span class="p">.</span><span class="nx">MUL</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">path</span><span class="p">,</span><span class="w"> </span><span class="nx">_</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">astutil</span><span class="p">.</span><span class="nx">PathEnclosingInterval</span><span class="p">(</span><span class="nx">fileAst</span><span class="p">,</span><span class="w"> </span><span class="nx">bexpr</span><span class="p">.</span><span class="nx">Pos</span><span class="p">(),</span><span class="w"> </span><span class="nx">bexpr</span><span class="p">.</span><span class="nx">End</span><span class="p">())</span><span class="w"></span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">path</span><span class="p">)</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">--</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="k">if</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">path</span><span class="p">[</span><span class="nx">i</span><span class="p">].(</span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">BinaryExpr</span><span class="p">);</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">path</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nx">bexpr</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;found BinaryExpr(*) as a child of another binary expr: %v\n&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">              </span><span class="nx">fset</span><span class="p">.</span><span class="nx">Position</span><span class="p">(</span><span class="nx">n</span><span class="p">.</span><span class="nx">Pos</span><span class="p">()))</span><span class="w"></span>
+<span class="w">            </span><span class="k">break</span><span class="w"></span>
+<span class="w">          </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+<span class="w">    </span><span class="p">})</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>To be clear: I don't think this approach makes a whole lot of sense in this
+scenario, and it's much better to use <tt class="docutils literal">WithStack</tt>. I'm just including it
+for completeness.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>In my <a class="reference external" href="https://github.com/eliben/pycparser">pycparser project</a>, this
+is <a class="reference external" href="https://github.com/eliben/pycparser/wiki/FAQ#why-dont-ast-nodes-in-pycparser-have-parent-links">a FAQ</a>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>For this particular analysis the order of stack traversal doesn't matter,
+so our loop could go from 0 to <tt class="docutils literal"><span class="pre">len-1</span></tt> instead.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

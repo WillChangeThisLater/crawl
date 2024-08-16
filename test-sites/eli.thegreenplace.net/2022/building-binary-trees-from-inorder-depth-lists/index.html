@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Building binary trees from inorder-depth lists - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Building binary trees from inorder-depth lists">
+                        Building binary trees from inorder-depth lists
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> February 05, 2022 at 06:33</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/programming.html">Programming</a>
+        ,
+    <a href="../../tag/go.html">Go</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>I ran into an interesting algorithm while hacking on <a class="reference external" href="https://adventofcode.com/">Advent of Code</a> a while ago. This post is a summary of what I've
+learned.</p>
+<p>Consider a binary tree that represents nested pairs, where each pair consists
+of two kinds of elements: a number, or another pair. For example, the nested
+pair <tt class="docutils literal">((6 9) ((3 4) 2))</tt> is represented with this tree <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>:</p>
+<img alt="Binary tree with depth marks" class="align-center" src="../../images/2022/depthtree-plain.png" />
+<p><em>(ignore the numbered lines on the right for now, we'll get to them shortly)</em></p>
+<p>Trees representing such pairs have the following characteristics:</p>
+<ul class="simple">
+<li>Leaves hold numbers, while internal nodes don't hold numbers, but only
+pointers to child nodes.</li>
+<li>Each node in the tree has either 0 or 2 children.</li>
+<li>A non-empty tree has at least one internal node.</li>
+</ul>
+<p>While looking for alternative solutions to a
+problem, I ran across <a class="reference external" href="https://github.com/timvisee/">Tim Visée</a>'s Rust
+solution which uses an interesting representation of this tree. It's represented
+by an in-order traversal of the tree, with a list of <tt class="docutils literal">(value depth)</tt> pairs
+where <tt class="docutils literal">value</tt> is a leaf value and <tt class="docutils literal">depth</tt> is its depth in the tree. The
+depth starts from 0 at the root - this is what the numbered lines in the diagram
+above represent.</p>
+<p>For our sample tree, the inorder-depth representation is as follows:</p>
+<div class="highlight"><pre><span></span>(6 2) (9 2) (3 3) (4 3) (2 2)
+</pre></div>
+<p>The surprising realization (at least for me) is that the original tree can
+be reconstructed from this representation! Note that it's just a list of leaf
+values - the internal nodes are not specified. It's well known that we can't
+reconstruct a tree just from its in-order traversal, but a combination of the
+added depth markers and the restrictions on the tree make it possible.</p>
+<p>I'll present a recursive algorithm to reconstruct the tree (based on Tim Visée's
+code, which does not explicitly rebuild the tree but computes something on it);
+this algorithm is very clever and isn't easy to grok. Then, I'll present an
+iterative algorithm which IMHO is easier to understand and explain.</p>
+<p>But first, let's start with the data structures. The full (Go) code is available
+<a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2022/depthtree">on GitHub</a>.</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">DItem</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Value</span><span class="w"> </span><span class="kt">int</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Depth</span><span class="w"> </span><span class="kt">int</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">type</span><span class="w"> </span><span class="nx">DList</span><span class="w"> </span><span class="p">[]</span><span class="nx">DItem</span><span class="w"></span>
+</pre></div>
+<p>This is our representation of the inorder-depth list - a slice of <tt class="docutils literal">DItem</tt>
+values, each of which has a numeric value and depth.</p>
+<p>The tree itself is just what you'd expect in Go:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">Tree</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Value</span><span class="w">       </span><span class="kt">int</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Left</span><span class="p">,</span><span class="w"> </span><span class="nx">Right</span><span class="w"> </span><span class="o">*</span><span class="nx">Tree</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<div class="section" id="recursive-algorithm">
+<h2>Recursive algorithm</h2>
+<p>Here is the recursive version of the tree reconstruction algorithm:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">dl</span><span class="w"> </span><span class="nx">DList</span><span class="p">)</span><span class="w"> </span><span class="nx">BuildTreeRec</span><span class="p">()</span><span class="w"> </span><span class="o">*</span><span class="nx">Tree</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cursor</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">0</span><span class="w"></span>
+
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">builder</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">depth</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="nx">Tree</span><span class="w"></span>
+<span class="w">  </span><span class="nx">builder</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">depth</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="nx">Tree</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">cursor</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">dl</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">left</span><span class="w"> </span><span class="o">*</span><span class="nx">Tree</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">dl</span><span class="p">[</span><span class="nx">cursor</span><span class="p">].</span><span class="nx">Depth</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nx">depth</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">left</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">Tree</span><span class="p">{</span><span class="nx">Value</span><span class="p">:</span><span class="w"> </span><span class="nx">dl</span><span class="p">[</span><span class="nx">cursor</span><span class="p">].</span><span class="nx">Value</span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="nx">cursor</span><span class="o">++</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">left</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">builder</span><span class="p">(</span><span class="nx">depth</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">right</span><span class="w"> </span><span class="o">*</span><span class="nx">Tree</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">dl</span><span class="p">[</span><span class="nx">cursor</span><span class="p">].</span><span class="nx">Depth</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nx">depth</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">right</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">Tree</span><span class="p">{</span><span class="nx">Value</span><span class="p">:</span><span class="w"> </span><span class="nx">dl</span><span class="p">[</span><span class="nx">cursor</span><span class="p">].</span><span class="nx">Value</span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="nx">cursor</span><span class="o">++</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">right</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">builder</span><span class="p">(</span><span class="nx">depth</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">Tree</span><span class="p">{</span><span class="nx">Left</span><span class="p">:</span><span class="w"> </span><span class="nx">left</span><span class="p">,</span><span class="w"> </span><span class="nx">Right</span><span class="p">:</span><span class="w"> </span><span class="nx">right</span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">builder</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>I find this algorithm fairly tricky to understand; the combination of double
+recursion with mutable state is powerful. Some tips:</p>
+<ul class="simple">
+<li><tt class="docutils literal">cursor</tt> represents the next item in the inorder-depth list; it may
+help thinking of it as a queue; taking <tt class="docutils literal">dl[cursor]</tt> and advancing <tt class="docutils literal">cursor</tt>
+is akin to popping from the head of the queue.</li>
+<li>The <tt class="docutils literal">depth</tt> parameter represents the depth in the tree the builder is
+currently on. If the next item in the queue has a matching depth, we construct
+a leaf from it. Otherwise, we recurse with higher depth to construct an
+internal node starting from it.</li>
+<li>The basic recursive invariant for <tt class="docutils literal">builder</tt> is: the remaining items in
+<tt class="docutils literal">dl</tt> represent a pair: build its left side, then build its right side.</li>
+</ul>
+<p>If it's still not 100% clear, that's OK. In what follows, I'll describe an
+alternative formulation of this algorithm - without recursion. IMHO this version
+is easier to follow, and once one gets it - it's also easier to understand the
+recursive approach.</p>
+</div>
+<div class="section" id="iterative-algorithm">
+<h2>Iterative algorithm</h2>
+<p>To get some intuition for how the algorithm works, let's first work through the
+example we've using throughout this post. We'll take the inorder-depth
+representation:</p>
+<div class="highlight"><pre><span></span>(6 2) (9 2) (3 3) (4 3) (2 2)
+</pre></div>
+<p>And will see how to construct a tree from it, step by step. In what follows, the
+numbered list walks through inserting the first 6 child nodes into the tree,
+and the steps correspond one-to-one to the diagrams below the list. Each step
+of the algorithm inserts one node into the tree (either an internal node or
+a leaf node with the value). The red &quot;pointer&quot; in the diagrams corresponds to
+the node inserted by each step.</p>
+<p>Let's assume we begin with the root node already created.</p>
+<ol class="arabic simple">
+<li>To insert <tt class="docutils literal">(6 2)</tt> we have to get to depth 2. The children of the root node
+would be at depth 1, so we have to create a new internal node first. Since
+the list is in-order, we create the left child first and move our pointer to
+it.</li>
+<li>Now our current node's children are depth 2, so we can insert <tt class="docutils literal">(6 2)</tt>.
+Since the current node has no left child, we insert 6 as its left child.</li>
+<li>The next node to insert is <tt class="docutils literal">(9 2)</tt>. The node we've just inserted is a leaf,
+so we backtrack to its parent. Its children are depth two, and it has no
+right child, so we insert 9 as its right child.</li>
+<li>The next node to insert is <tt class="docutils literal">(3 3)</tt>. The current node is a leaf so it can't
+have children; we climb up to the parent, which already has both its children
+links created. So we climb up again, to the root. The root has a left child,
+but no right child. We create the right child.</li>
+<li>Since the current node's children are depth 2, we can't insert <tt class="docutils literal">(3 3)</tt> yet.
+The current node has no left child, so we create it and move into it.</li>
+<li>The current node's children are depth 3, so we can insert 3 as its left
+child.</li>
+</ol>
+<p>And so on, until we proceed to insert all the values.</p>
+<img alt="Six steps constructing a binary tree" class="align-center" src="../../images/2022/depthtree-steps.png" />
+<p>The main thing to notice here is that the insertion follows a strict in-order.
+We go left as far as possible, then backtrack through the parent and turn right.
+How much is &quot;possible&quot; is determined by the depth markers in the representation,
+so there's actually no ambiguity <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.</p>
+<p>Before we move on to the code, one important point about reaching a parent
+from a given node. There are at least two common ways to do this: one is keeping
+parent links in the nodes, and another is using a stack of parents while
+constructing the tree. In the code shown below, I opt for the second option -
+an explicit stack of parent nodes. This code can be easily rewritten with parent
+links instead (try it as an exercise!)</p>
+<p>With all that in place, the code shouldn't be hard to understand; here it is,
+with copious comments:</p>
+<div class="highlight"><pre><span></span><span class="c1">// BuildTree builds a Tree from a DList using an iterative algorithm.</span><span class="w"></span>
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">dl</span><span class="w"> </span><span class="nx">DList</span><span class="p">)</span><span class="w"> </span><span class="nx">BuildTree</span><span class="p">()</span><span class="w"> </span><span class="o">*</span><span class="nx">Tree</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">dl</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// result is the tree this function is building. The result pointer always</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// points at the root, so we can return it to the caller. t points to the</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// current node being constructed throughout the algorithm.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">result</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">Tree</span><span class="p">{}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">t</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">result</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// depth is the current depth of t&#39;s children.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">depth</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// stack of parent nodes to implement backtracking up the tree once we&#39;re done</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// with a subtree.</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">stack</span><span class="w"> </span><span class="p">[]</span><span class="o">*</span><span class="nx">Tree</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// The outer loop iterates over all the items in a DList, inserting each one</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// into the tree. Loop invariant: all items preceding this item in dl have</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// already been inserted into the tree, and t points to the node where the</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// last insertion was made.</span><span class="w"></span>
+<span class="nx">nextItem</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">item</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">dl</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// The inner loop find the right place for item in the tree and performs</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// insertion.</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Loop invariant: t points at the node where we&#39;re trying to insert, depth</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// is the depth of its children and stack holds a stack of t&#39;s parents.</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="c1">// Check if item can be inserted as a child of t; this can be done only if</span><span class="w"></span>
+<span class="w">      </span><span class="c1">// our depth matches the item&#39;s and t doesn&#39;t have both its children yet.</span><span class="w"></span>
+<span class="w">      </span><span class="c1">// Otherwise, t is not the right place and we have to keep looking.</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">item</span><span class="p">.</span><span class="nx">Depth</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nx">depth</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">t</span><span class="p">.</span><span class="nx">Left</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">t</span><span class="p">.</span><span class="nx">Left</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">Tree</span><span class="p">{</span><span class="nx">Value</span><span class="p">:</span><span class="w"> </span><span class="nx">item</span><span class="p">.</span><span class="nx">Value</span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="k">continue</span><span class="w"> </span><span class="nx">nextItem</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="nx">item</span><span class="p">.</span><span class="nx">Depth</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nx">depth</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">t</span><span class="p">.</span><span class="nx">Right</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">t</span><span class="p">.</span><span class="nx">Right</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">Tree</span><span class="p">{</span><span class="nx">Value</span><span class="p">:</span><span class="w"> </span><span class="nx">item</span><span class="p">.</span><span class="nx">Value</span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="k">continue</span><span class="w"> </span><span class="nx">nextItem</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">      </span><span class="c1">// We can&#39;t insert at t.</span><span class="w"></span>
+<span class="w">      </span><span class="c1">// * If t does not have a left child yet, create it and repeat loop with</span><span class="w"></span>
+<span class="w">      </span><span class="c1">//   this left child as t.</span><span class="w"></span>
+<span class="w">      </span><span class="c1">// * If t does not have a right child yet, create it and repeat loop with</span><span class="w"></span>
+<span class="w">      </span><span class="c1">//   this right child as t.</span><span class="w"></span>
+<span class="w">      </span><span class="c1">// * If t has both children, we have to backtrack up the tree to t&#39;s</span><span class="w"></span>
+<span class="w">      </span><span class="c1">//   parent.</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">t</span><span class="p">.</span><span class="nx">Left</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">stack</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nb">append</span><span class="p">(</span><span class="nx">stack</span><span class="p">,</span><span class="w"> </span><span class="nx">t</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="nx">t</span><span class="p">.</span><span class="nx">Left</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">Tree</span><span class="p">{}</span><span class="w"></span>
+<span class="w">        </span><span class="nx">t</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">t</span><span class="p">.</span><span class="nx">Left</span><span class="w"></span>
+<span class="w">        </span><span class="nx">depth</span><span class="o">++</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="nx">t</span><span class="p">.</span><span class="nx">Right</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">stack</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nb">append</span><span class="p">(</span><span class="nx">stack</span><span class="p">,</span><span class="w"> </span><span class="nx">t</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="nx">t</span><span class="p">.</span><span class="nx">Right</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">Tree</span><span class="p">{}</span><span class="w"></span>
+<span class="w">        </span><span class="nx">t</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">t</span><span class="p">.</span><span class="nx">Right</span><span class="w"></span>
+<span class="w">        </span><span class="nx">depth</span><span class="o">++</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// Pop from the stack to make t point to its parent</span><span class="w"></span>
+<span class="w">        </span><span class="nx">t</span><span class="p">,</span><span class="w"> </span><span class="nx">stack</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">stack</span><span class="p">[</span><span class="nb">len</span><span class="p">(</span><span class="nx">stack</span><span class="p">)</span><span class="o">-</span><span class="mi">1</span><span class="p">],</span><span class="w"> </span><span class="nx">stack</span><span class="p">[:</span><span class="nb">len</span><span class="p">(</span><span class="nx">stack</span><span class="p">)</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="w"></span>
+<span class="w">        </span><span class="nx">depth</span><span class="o">--</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">result</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+</div>
+<div class="section" id="final-words">
+<h2>Final words</h2>
+<p>If you take some time to convince yourself that the iterative algorithm works,
+it becomes easier to understand the recursive one... because it's doing the
+exact same thing! The loops are replaced by recursion; the explicit parent stack
+is replaced by an implicit call stack of the recursive function, but otherwise -
+it's the same algorithm <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>.</p>
+<p>Finally, some credits are due. Thanks to my wife for helping me come up with the
+iterative formulation of the algorithm. Thanks to Tim Visée for the inspiration
+for this post.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>Note that this is not a binary <em>search</em> tree; the order of values in the
+leaves is entirely arbitrary.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>One way the algorithm avoids ambiguity is by requiring that nodes in the
+tree have either no children or two children. Nodes with one child would
+confuse the algorithm; can you see why?</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>Here is an exercise: the code of the iterative algorithm is currently
+structured to ease understanding, but what happens if we merge the
+conditions of <tt class="docutils literal">t.Left == nil</tt>, checking it in just one place and
+then either inserting (if the depth matches) or keep looking; and the
+same for <tt class="docutils literal">t.Right</tt>. If you make these changes the algorithm will still
+work (feel free to use the tests in the accompanying code), and it starts
+resembling the recursive version even more.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

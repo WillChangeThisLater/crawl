@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Tokens for LLMs: Byte Pair Encoding in Go - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Tokens for LLMs: Byte Pair Encoding in Go">
+                        Tokens for LLMs: Byte Pair Encoding in Go
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> April 25, 2024 at 06:34</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/machine-learning.html">Machine Learning</a>
+        ,
+    <a href="../../tag/webassembly.html">WebAssembly</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>A basic unit of currency in modern LLMs is the <em>token</em>; <a class="reference external" href="https://blog.google/technology/ai/google-gemini-next-generation-model-february-2024/">exciting new models</a>
+have long context windows of millions of <em>tokens</em>. API pricing for the large
+providers is <em>per-token</em>. We're even seeing the invention of new, derived units
+like TPM (<a class="reference external" href="https://ai.google.dev/pricing">tokens per minute</a>).</p>
+<p>But what are tokens?</p>
+<p><a class="reference external" href="https://help.openai.com/en/articles/4936856-what-are-tokens-and-how-to-count-them">This OpenAI help article</a>
+tells us that tokens are <em>pieces of words</em>, and gives some useful rules of thumb
+like a token being equivalent to approximately 4 characters or 3/4 of a word
+for the English language.</p>
+<p>In this post I want to review the most commonly used algorithm for splitting
+text into tokens, provide a complete implementation in Go, and show a playground
+for experimenting with it. While my implementation isn't tuned for speed, it
+aims to be complete, readable and compatible with OpenAI's <a class="reference external" href="https://github.com/openai/tiktoken">tiktoken library</a>, generating identical results and
+working with the same vocabulary files.</p>
+<div class="section" id="byte-pair-encoding-introduction">
+<h2>Byte pair encoding - introduction</h2>
+<p><a class="reference external" href="https://en.wikipedia.org/wiki/Byte_pair_encoding">Byte pair encoding</a> (BPE) is
+an algorithm originally designed for data compression. A <a class="reference external" href="https://arxiv.org/abs/1508.07909">2016 paper</a> suggested re-purposing it for &quot;word
+segmentation&quot; for machine learning tasks. The colloquial term for word
+segmentation is <em>tokenization</em>.</p>
+<ul class="simple">
+<li>Input: arbitrary text with words, numbers, whitespace and punctuation.</li>
+<li>Output: list of tokens representing the same text. Each token is an integer
+identifier which can be looked up in a vocabulary to reproduce the input text
+<a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>.</li>
+</ul>
+<p>The BPE algorithm has an important pre-processing step: splitting the input text
+into words. The splitting is customizable and different models / vocabularies
+use different regexps for splitting (more on this later). The main idea is
+some sort of whitespace-based splitting (though whitespace itself is preserved)
+because we typically don't want inter-word tokens <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.</p>
+<p>We'll be using this line from a <a class="reference external" href="https://en.wikipedia.org/wiki/Blue_(Da_Ba_Dee)">catchy 1990s song</a>
+as an example:</p>
+<div class="highlight"><pre><span></span>i&#39;m blue dabadee dabadam
+</pre></div>
+<p>A word splitter will produce something like the following list, where spaces are
+replaced by underscores <tt class="docutils literal">_</tt> for the sake of presentation (they remain as
+spaces in the actual implementation of the algorithm and its trained
+vocabulary):</p>
+<div class="highlight"><pre><span></span>i
+&#39;m
+_blue
+_dabadee
+_dabadam
+</pre></div>
+<p>A few things to note:</p>
+<ul class="simple">
+<li>The contraction <tt class="docutils literal">'m</tt> is split from <tt class="docutils literal">i</tt> - this is common for English language
+splitters, which want things like <tt class="docutils literal">'m</tt>, <tt class="docutils literal">'ll</tt>, <tt class="docutils literal">'re</tt> as separate words.</li>
+<li>Whitespace is preserved and attached at the start of a word. Whitespace is
+important because tokens at the beginning of words sometimes have different
+semantic meaning from tokens not at the beginning of words.
+The choice of where it's attached is arbitrary. From this point on, whitespace
+bytes are considered like any other bytes in the BPE algorithm.</li>
+</ul>
+<p>Now is a good time for some terminology we'll be using while talking about BPE:</p>
+<ul class="simple">
+<li><em>Word</em>: produced by the splitter in pre-processing, like the list shown above.</li>
+<li><em>Token</em>: typically a sub-word sequence of bytes; the output of the tokenizer
+is a list of tokens, by ID.</li>
+<li><em>Token ID</em>: unique numerical identifier for a token.</li>
+<li><em>Vocabulary</em>: a mapping of token IDs --&gt; token values learned by the tokenizer
+during the training process.</li>
+<li><em>Training</em>: the process in which BPE learns a vocabulary from a corpus of
+text.</li>
+<li><em>Splitter regexp</em>: regular expression used to split text into words during
+pre-processing. Given an algorithm (in this case BPE), the pair vocabulary +
+splitter regexp unambiguously defines how a given text will be tokenized.</li>
+<li><em>Encoder</em>: given a vocabulary and a splitter regexp, tokenizes any text into
+a list of IDs from the vocabulary.</li>
+<li><em>Decoder</em>: given a list of IDs and the vocabulary, reconstructs the
+original text.</li>
+</ul>
+</div>
+<div class="section" id="training">
+<h2>Training</h2>
+<p>BPE training proceeds by first assuming each byte is its own token, and then
+successively merging pairs of tokens into longer tokens and adding these to
+the vocabulary, until the desired vocabulary size is achieved.</p>
+<p>Let's reuse our example, starting with these words:</p>
+<div class="highlight"><pre><span></span>i
+&#39;m
+_blue
+_dabadee
+_dabadam
+</pre></div>
+<p>The BPE process starts by creating a token for each byte in the inclusive
+range [0..255]. So the minimal vocabulary size is 256; this guarantees that
+from the very start, there's a valid encoded representation of any text.</p>
+<p>Then, the following process is repeated:</p>
+<ul class="simple">
+<li>Count how many times each ordered pair of bytes appears in the input.
+<em>Ordered pair</em> here means two bytes right next to each other. In our example,
+some such pairs are &quot;bl&quot;, &quot;da&quot;, &quot;de&quot;, &quot;ee&quot; etc.</li>
+<li>Find the pair with the highest count, and create a new token from it (create
+a new token ID, mapping it to the concatenation of the most common pair).</li>
+<li>Replace this most common pair with the combined token in the input set.</li>
+</ul>
+<p>In our example, we start by splitting input words to bytes, so it's a list of
+single-byte token lists. This is our working list:</p>
+<div class="highlight"><pre><span></span>[i]
+[&#39; m]
+[_ b l u e]
+[_ d a b a d e e]
+[_ d a b a d a m]
+</pre></div>
+<p>Next, we count the frequency of appearance of each ordered pair:</p>
+<div class="highlight"><pre><span></span>[d a] --&gt; 3
+[a b] --&gt; 2
+[b a] --&gt; 2
+[&#39; m] --&gt; 1
+[_ b] --&gt; 1
+[l u] --&gt; 1
+[u e] --&gt; 1
+[_ d] --&gt; 2
+[a d] --&gt; 2
+[d e] --&gt; 1
+[e e] --&gt; 1
+[b l] --&gt; 1
+[a m] --&gt; 1
+</pre></div>
+<p>The pair &quot;da&quot; is the most common one, so we're creating a new token for it,
+and substituting it everywhere in the working list:</p>
+<div class="highlight"><pre><span></span>[i]
+[&#39; m]
+[_ b l u e]
+[_ da b a d e e]
+[_ da b a da m]
+</pre></div>
+<p>As you can see, in every instance &quot;d&quot; followed by &quot;a&quot; was combined into &quot;da&quot;.
+Now repeat the process; finding the most common pairs in this new working list:</p>
+<div class="highlight"><pre><span></span>[e e] --&gt; 1
+[a da] --&gt; 1
+[l u] --&gt; 1
+[_ da] --&gt; 2
+[da b] --&gt; 2
+[a d] --&gt; 1
+[d e] --&gt; 1
+[da m] --&gt; 1
+[&#39; m] --&gt; 1
+[_ b] --&gt; 1
+[b l] --&gt; 1
+[u e] --&gt; 1
+[b a] --&gt; 2
+</pre></div>
+<p>Several pairs have a count of 2, so we pick one arbitrarily. Let's say it's
+<tt class="docutils literal">_da</tt> (a space followed by &quot;da&quot;). We add <tt class="docutils literal">_da</tt> as a new token and
+make replacements in the working list:</p>
+<div class="highlight"><pre><span></span>[i]
+[&#39; m]
+[_ b l u e]
+[_da b a d e e]
+[_da b a da m]
+</pre></div>
+<p>And so on. When does this process stop? When we either run out of pairs (every
+word consists of a single token) or - more realistically for an actual training
+corpus - when we reach our desired vocabulary size. For example the vocabulary
+used for GPT-4 has around 100,000 tokens (more on this later).</p>
+<p>The output of the training process is a vocabulary; let's say we've only run
+two cycles on our input text as described. The vocabulary will have 258 tokens
+in it: 256 for the single bytes, one for <tt class="docutils literal">da</tt> and another for <tt class="docutils literal">_da</tt>. Each
+of these would have a unique integer ID.</p>
+<p>In our Go sample code, the training is implemented <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2024/bpe/train.go">in this file</a>. You
+can set the <tt class="docutils literal">debugTrain</tt> variable to <tt class="docutils literal">true</tt> to follow the process on some
+sample text.</p>
+</div>
+<div class="section" id="encoding">
+<h2>Encoding</h2>
+<p>Having learned a vocabulary, the process of encoding is what happens every time
+we feed text into an LLM and it needs to be tokenized. The input is arbitrary
+text, a splitting regexp and a vocabulary. For example, let's take the input
+text &quot;yada daba&quot;. Splitting is performed as before, and the input is broken
+into individual bytes:</p>
+<div class="highlight"><pre><span></span>[y a d a]
+[_ d a b a]
+</pre></div>
+<p>BPE encoding takes the vocabulary and tries to apply learned tokens to the input
+text, word by word. The process is <em>greedy</em> - tokens are applied in the same
+order they've been learned (this is easy to accomplish by assigning
+monotonically increasing integer IDs to new tokens in the vocabulary, and then
+prioritizing lower-numbered tokens for encoding).</p>
+<p>The first token we learned was <tt class="docutils literal">da</tt>, so let's apply that:</p>
+<div class="highlight"><pre><span></span>[y a da]
+[_ da b a]
+</pre></div>
+<p>The next token we learned was <tt class="docutils literal">_da</tt>:</p>
+<div class="highlight"><pre><span></span>[y a da]
+[_da b a]
+</pre></div>
+<p>This is the final stage; there are no more learned tokens to apply. The result
+will consist of 6 tokens.</p>
+<p>In our sample code, the encoder is <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2024/bpe/encode.go">in this file</a>.</p>
+</div>
+<div class="section" id="realistic-vocabulary-and-splitting">
+<h2>Realistic vocabulary and splitting</h2>
+<p>The examples shown so far have been toys, but the algorithms are real and work
+with the actual vocabularies and splitters used in modern models. As a case
+study, the tokenizer used for OpenAI's GPT-4 uses a vocabulary called
+<tt class="docutils literal">cl100k_base</tt>, which contains 100k tokens in addition to the 256 byte-sized
+ones. This is also the vocabulary (encoding) the
+<a class="reference external" href="https://github.com/openai/tiktoken">tiktoken</a> library uses. It can be
+freely downloaded from OpenAI - a copy is available in my
+<a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2024/bpe/data">sample repository</a>.
+The file is base64 encoded, which is easy to unravel and we'll see
+tokens like:</p>
+<div class="highlight"><pre><span></span>&quot; Fritz&quot;  91083
+&quot;Initially&quot;  91084
+&quot;nodeValue&quot;  91085
+&quot;_TRIANGLES&quot;  91086
+&quot;-backend&quot;  91087
+</pre></div>
+<p>The token string value is to the left, and the numerical token ID is to the
+right. As you can see, the algorithm is not particularly discerning about what
+it learns - names, pieces of code - whatever works!</p>
+<p>The other important data needed to reproduce OpenAI's tokenization is the
+splitting regexp, which is this:</p>
+<div class="highlight"><pre><span></span>(?i:&#39;s|&#39;t|&#39;re|&#39;ve|&#39;m|&#39;ll|&#39;d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+</pre></div>
+<p>It's just a combination of several alternatives. You could
+use one of the many &quot;regexp explainer&quot; websites out there to study
+it, or ask a modern LLM, but the gist of it is: this regexp splits
+space-delimited words, leaving spaces in front of the words, with some special
+provisions like English contractions (being separate words) and long numbers
+being split to groups of 3. For Go programmers, it's important to note that
+this pattern uses <tt class="docutils literal"><span class="pre">?!</span></tt> - negative lookahead - which the standard <tt class="docutils literal">regexp</tt>
+package doesn't support. Therefore, we'll have to reach for the 3rd party
+<a class="reference external" href="https://github.com/dlclark/regexp2">regexp2</a> to implement this <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>.</p>
+<p>In our sample repository, take a look at <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2024/bpe/tiktoken_tokenize_test.go">this test</a>
+that ties everything together - it loads the <tt class="docutils literal">cl100k_base</tt> encoding and uses
+it alongside the splitting regexp to tokenize some real text.</p>
+</div>
+<div class="section" id="full-online-demo-with-a-web-ui-and-webassembly">
+<h2>Full online demo with a web UI and WebAssembly</h2>
+<p>My goal with this project wasn't only to understand the BPE algorithm, but to
+also try reproducing the actual tokenizer used by OpenAI for its most modern
+models. And this goal was accomplished!</p>
+<p>OpenAI has a nice <a class="reference external" href="https://platform.openai.com/tokenizer">website here</a>
+that lets you enter text and see how it's tokenized. I've managed to reproduce
+this UI - see the <tt class="docutils literal">cmd/wasm</tt> directory in the repository. I've also placed it
+online - it can ran in your browser <a class="reference external" href="https://eliben.org/bpe/">from here</a>.
+Here's a screenshot <a class="footnote-reference" href="index.html#footnote-4" id="footnote-reference-4">[4]</a>:</p>
+<img alt="Screenshot of tokenizer with a sample text, showing tokens" class="align-center" src="../../images/2024/tokenizer-screenshot.png" />
+<p>How it works: the Go implementation of BPE is compiled to a WebAssembly binary
+that's loaded from a bit of glue JavaScript embedded in a simple HTML page.
+The JavaScript watches the text box as you type and sends the string to a Go
+function exported from the WASM, which tokenizes it on the fly. So we get a nice
+effect of &quot;tokens updated as we type&quot;. The selection button at the bottom also
+lets us see the numerical IDs for these tokens - they should be equivalent to
+what tiktoken is producing.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>For simplicity, this post will focus on English. As you'll see, however,
+the BPE algorithm is language-agnostic.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>There's also a performance implication: if we make tokenization
+word-oriented, we can easily implement streaming tokenization without
+depending on previous words.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>I think it would be possible - with a bit of effort - to work around this
+limitation and stick to the standard library, but just using <tt class="docutils literal">regexp2</tt>
+is simpler, and it's also what <a class="reference external" href="https://github.com/pkoukk/tiktoken-go">tiktoken-go</a>
+is doing.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-4">[4]</a></td><td>You'll notice that in this example every word (except contractions) is
+a separate token; this shouldn't be surprising, since these are all very
+common words and the vocabulary is large! Try playing with it a bit
+though, giving it longer words (like &quot;discombobulated&quot;) or non-trivial
+variable names from a programming language.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

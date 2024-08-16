@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Removing epsilon productions from context free grammars - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="removing-epsilon-productions-from-context-free-grammars.html"
+                       rel="bookmark"
+                       title="Permalink to Removing epsilon productions from context free grammars">
+                        Removing epsilon productions from context free grammars
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> February 08, 2010 at 06:53</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/compilation.html">Compilation</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <div class="section" id="background">
+<h3>Background</h3>
+<p>epsilon productions are very useful to express many grammars in a compact way. For example, take these simple function call productions in some imaginary C-like language:</p>
+<div class="highlight"><pre>func_call:: identifier &#39;(&#39; arguments_opt &#39;)&#39;
+arguments_opt:: arguments_list | eps
+arguments_list:: argument | argument &#39;,&#39; arguments_list
+</pre></div>
+<p>When composing grammars by hand, simplicity matters. It's very useful to be able to look at <tt class="docutils literal"><span class="pre">arguments_opt</span></tt> and know that it's an optional list of arguments. The same non-terminal can be reused in several other productions.</p>
+<p>However, epsilon productions pose a problem for several algorithms that act on grammars. Therefore, prior to running these algorithms, epsilon productions have to be removed. Fortunately, this can be done relatively effortlessly in an automatic way.</p>
+<p>Here I want to present an algorithm and a simple implementation for epsilon production removal.</p>
+</div>
+<div class="section" id="the-algorithm">
+<h3>The algorithm</h3>
+<p>Intuitively, it's quite simple to remove epsilon productions. Consider the grammar for function calls presented above. The <tt class="docutils literal"><span class="pre">argument_opt</span></tt> nonterminal in <tt class="docutils literal"><span class="pre">func_call</span></tt> is just a short way of saying that there either is an argument list inside those parens or nothing. In other words, it can be rewritten as follows:</p>
+<div class="highlight"><pre>func_call:: identifier &#39;(&#39; arguments_opt &#39;)&#39;
+          | identifier &#39;(&#39; &#39;)&#39;
+arguments_opt:: arguments_list
+arguments_list:: argument | argument &#39;,&#39; arguments_list
+</pre></div>
+<p>This duplication of productions for <tt class="docutils literal"><span class="pre">func_call</span></tt> will have to be repeated for every other production that had <tt class="docutils literal"><span class="pre">arguments_opt</span></tt> in it. This grammar looks somewhat strange, as <tt class="docutils literal"><span class="pre">arguments_opt</span></tt> is now identical to <tt class="docutils literal"><span class="pre">arguments_list</span></tt>. It is correct, however.</p>
+<p>A more interesting case occurs when the epsilon production is in a nonterminal that appears more than once in some other production <a class="footnote-reference" href="removing-epsilon-productions-from-context-free-grammars.html#id4" id="id1">[1]</a>. Consider:</p>
+<div class="highlight"><pre>B:: A z A
+A:: a | eps
+</pre></div>
+<p>When we remove the epsilon production from <tt class="docutils literal"><span class="pre">A</span></tt>, we have to duplicate the productions that have <tt class="docutils literal"><span class="pre">A</span></tt> in them, but the production for <tt class="docutils literal"><span class="pre">B</span></tt> has two <tt class="docutils literal"><span class="pre">A</span></tt>. Since either of the <tt class="docutils literal"><span class="pre">A</span></tt> instances in the production can be empty, the only proper way to do this is go over all the combinations:</p>
+<div class="highlight"><pre>B:: z | A z | z A | A z A
+A:: a
+</pre></div>
+<p>In the general case, if <tt class="docutils literal"><span class="pre">A</span></tt> appears <tt class="docutils literal"><span class="pre">k</span></tt> times in some production, this production will be replicated <tt class="docutils literal"><span class="pre">2^k</span></tt> times, each time with a different combination <a class="footnote-reference" href="removing-epsilon-productions-from-context-free-grammars.html#id5" id="id2">[2]</a>.</p>
+<p>This leads us to the algorithm:</p>
+<ol class="arabic simple">
+<li>Pick a nonterminal <tt class="docutils literal"><span class="pre">A</span></tt> with an epsilon production</li>
+<li>Remove that epsilon production</li>
+<li>For each production containing <tt class="docutils literal"><span class="pre">A</span></tt>: Replicate it <tt class="docutils literal"><span class="pre">2^k</span></tt> times where <tt class="docutils literal"><span class="pre">k</span></tt> is the number of <tt class="docutils literal"><span class="pre">A</span></tt> instances in the production, such that all combinations of <tt class="docutils literal"><span class="pre">A</span></tt> being there or not will be represented.</li>
+<li>If there are still epsilon productions in the grammar, go back to step 1.</li>
+</ol>
+<p>A couple of points to pay attention to:</p>
+<ul class="simple">
+<li>It's obvious that a step of the algorithm can create new epsilon productions <a class="footnote-reference" href="removing-epsilon-productions-from-context-free-grammars.html#id6" id="id3">[3]</a>. This is handled correctly, as it works iteratively until all epsilon productions are removed.</li>
+<li>The only place where an epsilon production cannot be removed is at the start symbol. If the grammar can generate an empty string, we can't ruin that. A special case will have to handle this case.</li>
+</ul>
+</div>
+<div class="section" id="implementation">
+<h3>Implementation</h3>
+<p>Here's an implementation of this algorithm in Python:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">from</span> <span style="color: #00007f">collections</span> <span style="color: #00007f; font-weight: bold">import</span> defaultdict
+
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">CFG</span>(<span style="color: #00007f">object</span>):
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">__init__</span>(<span style="color: #00007f">self</span>):
+        <span style="color: #00007f">self</span>.prod = defaultdict(<span style="color: #00007f">list</span>)
+        <span style="color: #00007f">self</span>.start = <span style="color: #00007f">None</span>
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">set_start_symbol</span>(<span style="color: #00007f">self</span>, start):
+        <span style="color: #7f007f">&quot;&quot;&quot; Set the start symbol of the grammar.</span>
+<span style="color: #7f007f">        &quot;&quot;&quot;</span>
+        <span style="color: #00007f">self</span>.start = start
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">add_prod</span>(<span style="color: #00007f">self</span>, lhs, rhs):
+        <span style="color: #7f007f">&quot;&quot;&quot; Add production to the grammar. &#39;rhs&#39; can</span>
+<span style="color: #7f007f">            be several productions separated by &#39;|&#39;.</span>
+<span style="color: #7f007f">            Each production is a sequence of symbols</span>
+<span style="color: #7f007f">            separated by whitespace.</span>
+<span style="color: #7f007f">            Empty strings are interpreted as an eps-production.</span>
+
+<span style="color: #7f007f">            Usage:</span>
+<span style="color: #7f007f">                grammar.add_prod(&#39;NT&#39;, &#39;VP PP&#39;)</span>
+<span style="color: #7f007f">                grammar.add_prod(&#39;Digit&#39;, &#39;1|2|3|4&#39;)</span>
+
+<span style="color: #7f007f">                # Optional Digit: digit or eps</span>
+<span style="color: #7f007f">                grammar.add_prod(&#39;Digit_opt&#39;, Digit |&#39;)</span>
+<span style="color: #7f007f">        &quot;&quot;&quot;</span>
+        <span style="color: #007f00"># The internal data-structure representing productions.</span>
+        <span style="color: #007f00"># maps a nonterminal name to a list of productions, each</span>
+        <span style="color: #007f00"># a list of symbols. An empty list [] specifies an</span>
+        <span style="color: #007f00"># eps-production.</span>
+        <span style="color: #007f00">#</span>
+        prods = rhs.split(<span style="color: #7f007f">&#39;|&#39;</span>)
+        <span style="color: #00007f; font-weight: bold">for</span> prod <span style="color: #0000aa">in</span> prods:
+            <span style="color: #00007f">self</span>.prod[lhs].append(prod.split())
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">remove_eps_productions</span>(<span style="color: #00007f">self</span>):
+        <span style="color: #7f007f">&quot;&quot;&quot; Removes epsilon productions from the grammar.</span>
+
+<span style="color: #7f007f">            The algorithm:</span>
+
+<span style="color: #7f007f">            1. Pick a nonterminal p_eps with an epsilon production</span>
+<span style="color: #7f007f">            2. Remove that epsilon production</span>
+<span style="color: #7f007f">            3. For each production containing p_eps, replace it</span>
+<span style="color: #7f007f">               with several productions such that all the</span>
+<span style="color: #7f007f">               combinations of p_eps being there or not will be</span>
+<span style="color: #7f007f">               represented.</span>
+<span style="color: #7f007f">            4. If there are still epsilon productions in the</span>
+<span style="color: #7f007f">               grammar, go back to step 1</span>
+
+<span style="color: #7f007f">            The replication can be demonstrated with an example.</span>
+<span style="color: #7f007f">            Suppose that A contains an epsilon production, and</span>
+<span style="color: #7f007f">            we&#39;ve found a production B:: [A, k, A]</span>
+<span style="color: #7f007f">            Then this production of B will be replaced with these:</span>
+<span style="color: #7f007f">            [A, k], [k], [k, A], [A, k, A]</span>
+<span style="color: #7f007f">        &quot;&quot;&quot;</span>
+        <span style="color: #00007f; font-weight: bold">while</span> <span style="color: #00007f">True</span>:
+            <span style="color: #007f00"># Find an epsilon production</span>
+            <span style="color: #007f00">#</span>
+            p_eps, index = <span style="color: #00007f">self</span>._find_eps_production()
+
+            <span style="color: #007f00"># No epsilon productions? Then we&#39;re done...</span>
+            <span style="color: #007f00">#</span>
+            <span style="color: #00007f; font-weight: bold">if</span> p_eps <span style="color: #0000aa">is</span> <span style="color: #00007f">None</span>:
+                <span style="color: #00007f; font-weight: bold">break</span>
+
+            <span style="color: #007f00"># Remove the epsilon production</span>
+            <span style="color: #007f00">#</span>
+            <span style="color: #00007f; font-weight: bold">del</span> <span style="color: #00007f">self</span>.prod[p_eps][index]
+
+            <span style="color: #007f00"># Now find all the productions that contain the</span>
+            <span style="color: #007f00"># production that removed.</span>
+            <span style="color: #007f00"># For each such production, replicate it with all</span>
+            <span style="color: #007f00"># the combinations of the removed production.</span>
+            <span style="color: #007f00">#</span>
+            <span style="color: #00007f; font-weight: bold">for</span> lhs <span style="color: #0000aa">in</span> <span style="color: #00007f">self</span>.prod:
+                prods = []
+
+                <span style="color: #00007f; font-weight: bold">for</span> lhs_prod <span style="color: #0000aa">in</span> <span style="color: #00007f">self</span>.prod[lhs]:
+                    num_p_eps = lhs_prod.count(p_eps)
+                    <span style="color: #00007f; font-weight: bold">if</span> num_p_eps == <span style="color: #007f7f">0</span>:
+                        prods.append(lhs_prod)
+                    <span style="color: #00007f; font-weight: bold">else</span>:
+                        prods.extend(<span style="color: #00007f">self</span>._create_prod_combinations(
+                            prod=lhs_prod,
+                            nt=p_eps,
+                            count=num_p_eps))
+
+                <span style="color: #007f00"># Remove duplicates</span>
+                <span style="color: #007f00">#</span>
+                prods = sorted(prods)
+                prods = [prods[i] <span style="color: #00007f; font-weight: bold">for</span> i <span style="color: #0000aa">in</span> <span style="color: #00007f">xrange</span>(<span style="color: #00007f">len</span>(prods))
+                                  <span style="color: #00007f; font-weight: bold">if</span> i == <span style="color: #007f7f">0</span> <span style="color: #0000aa">or</span> prods[i] != prods[i-<span style="color: #007f7f">1</span>]]
+
+                <span style="color: #00007f">self</span>.prod[lhs] = prods
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">_find_eps_production</span>(<span style="color: #00007f">self</span>):
+        <span style="color: #7f007f">&quot;&quot;&quot; Finds an epsilon production in the grammar. If such</span>
+<span style="color: #7f007f">            a production is found, returns the pair (lhs, index):</span>
+<span style="color: #7f007f">            the name of the non-terminal that has an epsilon</span>
+<span style="color: #7f007f">            production and its index in lhs&#39;s list of productions.</span>
+<span style="color: #7f007f">            If no epsilon productions were found, returns the</span>
+<span style="color: #7f007f">            pair (None, None).</span>
+
+<span style="color: #7f007f">            Note: eps productions in the start symbol will be</span>
+<span style="color: #7f007f">            ignored, because we don&#39;t want to remove them.</span>
+<span style="color: #7f007f">        &quot;&quot;&quot;</span>
+        <span style="color: #00007f; font-weight: bold">for</span> lhs <span style="color: #0000aa">in</span> <span style="color: #00007f">self</span>.prod:
+            <span style="color: #00007f; font-weight: bold">if</span> <span style="color: #0000aa">not</span> <span style="color: #00007f">self</span>.start <span style="color: #0000aa">is</span> <span style="color: #00007f">None</span> <span style="color: #0000aa">and</span> lhs == <span style="color: #00007f">self</span>.start:
+                <span style="color: #00007f; font-weight: bold">continue</span>
+
+            <span style="color: #00007f; font-weight: bold">for</span> i, p <span style="color: #0000aa">in</span> <span style="color: #00007f">enumerate</span>(<span style="color: #00007f">self</span>.prod[lhs]):
+                <span style="color: #00007f; font-weight: bold">if</span> <span style="color: #00007f">len</span>(p) == <span style="color: #007f7f">0</span>:
+                    <span style="color: #00007f; font-weight: bold">return</span> lhs, i
+
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">None</span>, <span style="color: #00007f">None</span>
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">_create_prod_combinations</span>(<span style="color: #00007f">self</span>, prod, nt, count):
+        <span style="color: #7f007f">&quot;&quot;&quot; prod:</span>
+<span style="color: #7f007f">                A production (list) that contains at least one</span>
+<span style="color: #7f007f">                instance of &#39;nt&#39;</span>
+<span style="color: #7f007f">            nt:</span>
+<span style="color: #7f007f">                The non-terminal which should be replicated</span>
+<span style="color: #7f007f">            count:</span>
+<span style="color: #7f007f">                The amount of times &#39;nt&#39; appears in &#39;lhs_prod&#39;.</span>
+<span style="color: #7f007f">                Assumed to be &gt;= 1</span>
+
+<span style="color: #7f007f">            Returns the generated list of productions.</span>
+<span style="color: #7f007f">        &quot;&quot;&quot;</span>
+        <span style="color: #007f00"># The combinations are a kind of a powerset. Membership</span>
+        <span style="color: #007f00"># in a powerset can be checked by using the binary</span>
+        <span style="color: #007f00"># representation of a number.</span>
+        <span style="color: #007f00"># There are 2^count possibilities in total.</span>
+        <span style="color: #007f00">#</span>
+        numset = <span style="color: #007f7f">1</span> &lt;&lt; count
+        new_prods = []
+
+        <span style="color: #00007f; font-weight: bold">for</span> i <span style="color: #0000aa">in</span> <span style="color: #00007f">xrange</span>(numset):
+            nth_nt = <span style="color: #007f7f">0</span>
+            new_prod = []
+
+            <span style="color: #00007f; font-weight: bold">for</span> s <span style="color: #0000aa">in</span> prod:
+                <span style="color: #00007f; font-weight: bold">if</span> s == nt:
+                    <span style="color: #00007f; font-weight: bold">if</span> i &amp; (<span style="color: #007f7f">1</span> &lt;&lt; nth_nt):
+                        new_prod.append(s)
+                    nth_nt += <span style="color: #007f7f">1</span>
+                <span style="color: #00007f; font-weight: bold">else</span>:
+                    new_prod.append(s)
+
+            new_prods.append(new_prod)
+
+        <span style="color: #00007f; font-weight: bold">return</span> new_prods
+</pre></div>
+<p>And here are the results with some of the sample grammars presented earlier in the article:</p>
+<div class="highlight"><pre>cfg = CFG()
+cfg.add_prod(<span style="color: #7f007f">&#39;identifier&#39;</span>, <span style="color: #7f007f">&#39;( arguments_opt )&#39;</span>)
+cfg.add_prod(<span style="color: #7f007f">&#39;arguments_opt&#39;</span>, <span style="color: #7f007f">&#39;arguments_list | &#39;</span>)
+cfg.add_prod(<span style="color: #7f007f">&#39;arguments_list&#39;</span>, <span style="color: #7f007f">&#39;argument | argument , arguments_list&#39;</span>)
+
+cfg.remove_eps_productions()
+<span style="color: #00007f; font-weight: bold">for</span> p <span style="color: #0000aa">in</span> cfg.prod:
+    <span style="color: #00007f; font-weight: bold">print</span> p, <span style="color: #7f007f">&#39;:: &#39;</span>, [<span style="color: #7f007f">&#39; &#39;</span>.join(pr) <span style="color: #00007f; font-weight: bold">for</span> pr <span style="color: #0000aa">in</span> cfg.prod[p]]
+</pre></div>
+<p>Produces:</p>
+<div class="highlight"><pre>func_call ::  [&#39;identifier ( )&#39;, &#39;identifier ( arguments_opt )&#39;]
+arguments_list ::  [&#39;argument&#39;, &#39;argument , arguments_list&#39;]
+arguments_opt ::  [&#39;arguments_list&#39;]
+</pre></div>
+<p>As expected. And:</p>
+<div class="highlight"><pre>cfg = CFG()
+cfg.add_prod(<span style="color: #7f007f">&#39;B&#39;</span>, <span style="color: #7f007f">&#39;A z A&#39;</span>)
+cfg.add_prod(<span style="color: #7f007f">&#39;A&#39;</span>, <span style="color: #7f007f">&#39;a | &#39;</span>)
+
+cfg.remove_eps_productions()
+<span style="color: #00007f; font-weight: bold">for</span> p <span style="color: #0000aa">in</span> cfg.prod:
+    <span style="color: #00007f; font-weight: bold">print</span> p, <span style="color: #7f007f">&#39;:: &#39;</span>, [<span style="color: #7f007f">&#39; &#39;</span>.join(pr) <span style="color: #00007f; font-weight: bold">for</span> pr <span style="color: #0000aa">in</span> cfg.prod[p]]
+</pre></div>
+<p>Produces:</p>
+<div class="highlight"><pre>A ::  [&#39;a&#39;]
+B ::  [&#39;A z&#39;, &#39;A z A&#39;, &#39;z&#39;, &#39;z A&#39;]
+</pre></div>
+<p>The implementation isn't tuned for efficiency, but for simplicity. Luckily, CFGs are usually small enough to make the runtime of this implementation manageable. Note that the preservation of epsilon productions in the start rule is implemented in the <tt class="docutils literal"><span class="pre">_find_eps_production</span></tt> method.</p>
+<div align="center" class="align-center"><img class="align-center" src="../../../images/hline.jpg" style="width: 320px; height: 5px;" /></div>
+<table class="docutils footnote" frame="void" id="id4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="removing-epsilon-productions-from-context-free-grammars.html#id1">[1]</a></td><td>From here on, lowercase letters early in the alphabet (a, b, c...) are terminals. Early uppercase letters (A, B, C...) are nonterminals, and letters late in the alphabet (z, y, x...) are arbitrary strings of terminals and nonterminals.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="removing-epsilon-productions-from-context-free-grammars.html#id2">[2]</a></td><td>If this sounds like generating a <a class="reference external" href="http://en.wikipedia.org/wiki/Powerset">powerset</a>, you're right.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id6" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="removing-epsilon-productions-from-context-free-grammars.html#id3">[3]</a></td><td>Consider the productions:</td></tr>
+</tbody>
+</table>
+<div class="highlight"><pre>A:: a | eps
+B:: b | A
+</pre></div>
+<p>After removing the epsilon production from <tt class="docutils literal"><span class="pre">A</span></tt> we'll have:</p>
+<div class="highlight"><pre>A:: a
+B:: b | A | eps
+</pre></div>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="removing-epsilon-productions-from-context-free-grammars.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

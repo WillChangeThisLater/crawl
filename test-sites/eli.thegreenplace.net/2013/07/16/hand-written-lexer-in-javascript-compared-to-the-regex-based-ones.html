@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Hand-written lexer in Javascript compared to the regex-based ones - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="hand-written-lexer-in-javascript-compared-to-the-regex-based-ones.html"
+                       rel="bookmark"
+                       title="Permalink to Hand-written lexer in Javascript compared to the regex-based ones">
+                        Hand-written lexer in Javascript compared to the regex-based ones
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> July 16, 2013 at 06:25</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/compilation.html">Compilation</a>
+        ,
+    <a href="../../../tag/javascript.html">Javascript</a>
+        ,
+    <a href="../../../tag/lexer.html">Lexer</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>A <a class="reference external" href="../../06/25/regex-based-lexical-analysis-in-python-and-javascript/index.html">few weeks ago I wrote</a> about the comparison between regex-based lexers in Python and Javascript. Javascript running on Node.js (V8) ended up being much faster than Python, and in both languages a speed improvement could be gained by switching to a single regex and letting the regex engine do the hard work.</p>
+<p>However, in the real world you'll find that most lexers (particularly lexers for real programming languages) are not written that way. They are carefully hand-written to go over the input and dispatch to the appropriate token handling code depending on the first character encountered.</p>
+<p>This technique makes more sense for complex languages because it's much more flexible than regexes (for instance, representing nested comments with regexes is a big challenge). But I was curious also about its performance implications.</p>
+<p>So I hacked together a hand-written lexer for exactly the same language used in the previous benchmark and also exercised it on the same large file to make sure the results are correct. Its runtime, however, surprised me. Here's the runtime of lexing a large-ish document (smaller is better):</p>
+<img class="align-center" src="../../../images/2013/07/lexer_runtime_vs_handwritten.png" />
+<p>I was expecting the runtime to be much closer to the single-regex version; in fact I was expecting it to be a bit slower (because most of the regex engine work is done at a lower level). But it turned out to be much faster, more than 2.5x. Another case of the real world beating intuition.</p>
+<p>I was lazy to look, but if V8's regex implementation is anything like Python's, then alternation of many options (<tt class="docutils literal">foo|bar</tt>) is not as efficient as one might expect because the regex engine does not use real DFAs, but rather backtracking. So alternation essentially means iteration deep in the regex engine. On the other hand, the hand-written code seems like something quite optimizable by a JIT compiler like V8 (the types are simple and consistent) so there's a good chance it got converted into tight machine code. Throw some inlining in and the speed is not very unlikely.</p>
+<p>Anyway, here is the hand-written lexer. It's significantly more code than the regex-based ones, but I can't say it was particularly difficult to write - the main part took a bit more than an hour, or so. If you have any additional ideas about the speed difference, I'll be happy to hear about them.</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #7f007f">&#39;use strict&#39;</span>;
+
+<span style="color: #00007f; font-weight: bold">var</span> Lexer = exports.Lexer = <span style="color: #00007f; font-weight: bold">function</span>() {
+  <span style="color: #00007f; font-weight: bold">this</span>.pos = <span style="color: #007f7f">0</span>;
+  <span style="color: #00007f; font-weight: bold">this</span>.buf = <span style="color: #00007f; font-weight: bold">null</span>;
+  <span style="color: #00007f; font-weight: bold">this</span>.buflen = <span style="color: #007f7f">0</span>;
+
+  <span style="color: #007f00">// Operator table, mapping operator -&gt; token name</span>
+  <span style="color: #00007f; font-weight: bold">this</span>.optable = {
+    <span style="color: #7f007f">&#39;+&#39;</span>:  <span style="color: #7f007f">&#39;PLUS&#39;</span>,
+    <span style="color: #7f007f">&#39;-&#39;</span>:  <span style="color: #7f007f">&#39;MINUS&#39;</span>,
+    <span style="color: #7f007f">&#39;*&#39;</span>:  <span style="color: #7f007f">&#39;MULTIPLY&#39;</span>,
+    <span style="color: #7f007f">&#39;.&#39;</span>:  <span style="color: #7f007f">&#39;PERIOD&#39;</span>,
+    <span style="color: #7f007f">&#39;\\&#39;</span>: <span style="color: #7f007f">&#39;BACKSLASH&#39;</span>,
+    <span style="color: #7f007f">&#39;:&#39;</span>:  <span style="color: #7f007f">&#39;COLON&#39;</span>,
+    <span style="color: #7f007f">&#39;%&#39;</span>:  <span style="color: #7f007f">&#39;PERCENT&#39;</span>,
+    <span style="color: #7f007f">&#39;|&#39;</span>:  <span style="color: #7f007f">&#39;PIPE&#39;</span>,
+    <span style="color: #7f007f">&#39;!&#39;</span>:  <span style="color: #7f007f">&#39;EXCLAMATION&#39;</span>,
+    <span style="color: #7f007f">&#39;?&#39;</span>:  <span style="color: #7f007f">&#39;QUESTION&#39;</span>,
+    <span style="color: #7f007f">&#39;#&#39;</span>:  <span style="color: #7f007f">&#39;POUND&#39;</span>,
+    <span style="color: #7f007f">&#39;&amp;&#39;</span>:  <span style="color: #7f007f">&#39;AMPERSAND&#39;</span>,
+    <span style="color: #7f007f">&#39;;&#39;</span>:  <span style="color: #7f007f">&#39;SEMI&#39;</span>,
+    <span style="color: #7f007f">&#39;,&#39;</span>:  <span style="color: #7f007f">&#39;COMMA&#39;</span>,
+    <span style="color: #7f007f">&#39;(&#39;</span>:  <span style="color: #7f007f">&#39;L_PAREN&#39;</span>,
+    <span style="color: #7f007f">&#39;)&#39;</span>:  <span style="color: #7f007f">&#39;R_PAREN&#39;</span>,
+    <span style="color: #7f007f">&#39;&lt;&#39;</span>:  <span style="color: #7f007f">&#39;L_ANG&#39;</span>,
+    <span style="color: #7f007f">&#39;&gt;&#39;</span>:  <span style="color: #7f007f">&#39;R_ANG&#39;</span>,
+    <span style="color: #7f007f">&#39;{&#39;</span>:  <span style="color: #7f007f">&#39;L_BRACE&#39;</span>,
+    <span style="color: #7f007f">&#39;}&#39;</span>:  <span style="color: #7f007f">&#39;R_BRACE&#39;</span>,
+    <span style="color: #7f007f">&#39;[&#39;</span>:  <span style="color: #7f007f">&#39;L_BRACKET&#39;</span>,
+    <span style="color: #7f007f">&#39;]&#39;</span>:  <span style="color: #7f007f">&#39;R_BRACKET&#39;</span>,
+    <span style="color: #7f007f">&#39;=&#39;</span>:  <span style="color: #7f007f">&#39;EQUALS&#39;</span>
+  };
+}
+
+<span style="color: #007f00">// Initialize the Lexer&#39;s buffer. This resets the lexer&#39;s internal</span>
+<span style="color: #007f00">// state and subsequent tokens will be returned starting with the</span>
+<span style="color: #007f00">// beginning of the new buffer.</span>
+Lexer.prototype.input = <span style="color: #00007f; font-weight: bold">function</span>(buf) {
+  <span style="color: #00007f; font-weight: bold">this</span>.pos = <span style="color: #007f7f">0</span>;
+  <span style="color: #00007f; font-weight: bold">this</span>.buf = buf;
+  <span style="color: #00007f; font-weight: bold">this</span>.buflen = buf.length;
+}
+
+<span style="color: #007f00">// Get the next token from the current buffer. A token is an object with</span>
+<span style="color: #007f00">// the following properties:</span>
+<span style="color: #007f00">// - name: name of the pattern that this token matched (taken from rules).</span>
+<span style="color: #007f00">// - value: actual string value of the token.</span>
+<span style="color: #007f00">// - pos: offset in the current buffer where the token starts.</span>
+<span style="color: #007f00">//</span>
+<span style="color: #007f00">// If there are no more tokens in the buffer, returns null. In case of</span>
+<span style="color: #007f00">// an error throws Error.</span>
+Lexer.prototype.token = <span style="color: #00007f; font-weight: bold">function</span>() {
+  <span style="color: #00007f; font-weight: bold">this</span>._skipnontokens();
+  <span style="color: #00007f; font-weight: bold">if</span> (<span style="color: #00007f; font-weight: bold">this</span>.pos &gt;= <span style="color: #00007f; font-weight: bold">this</span>.buflen) {
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f; font-weight: bold">null</span>;
+  }
+
+  <span style="color: #007f00">// The char at this.pos is part of a real token. Figure out which.</span>
+  <span style="color: #00007f; font-weight: bold">var</span> c = <span style="color: #00007f; font-weight: bold">this</span>.buf.charAt(<span style="color: #00007f; font-weight: bold">this</span>.pos);
+
+  <span style="color: #007f00">// &#39;/&#39; is treated specially, because it starts a comment if followed by</span>
+  <span style="color: #007f00">// another &#39;/&#39;. If not followed by another &#39;/&#39;, it&#39;s the DIVIDE</span>
+  <span style="color: #007f00">// operator.</span>
+  <span style="color: #00007f; font-weight: bold">if</span> (c === <span style="color: #7f007f">&#39;/&#39;</span>) {
+    <span style="color: #00007f; font-weight: bold">var</span> next_c = <span style="color: #00007f; font-weight: bold">this</span>.buf.charAt(<span style="color: #00007f; font-weight: bold">this</span>.pos + <span style="color: #007f7f">1</span>);
+    <span style="color: #00007f; font-weight: bold">if</span> (next_c === <span style="color: #7f007f">&#39;/&#39;</span>) {
+      <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f; font-weight: bold">this</span>._process_comment();
+    } <span style="color: #00007f; font-weight: bold">else</span> {
+      <span style="color: #00007f; font-weight: bold">return</span> {name: <span style="color: #7f007f">&#39;DIVIDE&#39;</span>, value: <span style="color: #7f007f">&#39;/&#39;</span>, pos: <span style="color: #00007f; font-weight: bold">this</span>.pos++};
+    }
+  } <span style="color: #00007f; font-weight: bold">else</span> {
+    <span style="color: #007f00">// Look it up in the table of operators</span>
+    <span style="color: #00007f; font-weight: bold">var</span> op = <span style="color: #00007f; font-weight: bold">this</span>.optable[c];
+    <span style="color: #00007f; font-weight: bold">if</span> (op !== <span style="color: #00007f; font-weight: bold">undefined</span>) {
+      <span style="color: #00007f; font-weight: bold">return</span> {name: op, value: c, pos: <span style="color: #00007f; font-weight: bold">this</span>.pos++};
+    } <span style="color: #00007f; font-weight: bold">else</span> {
+      <span style="color: #007f00">// Not an operator - so it&#39;s the beginning of another token.</span>
+      <span style="color: #00007f; font-weight: bold">if</span> (Lexer._isalpha(c)) {
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f; font-weight: bold">this</span>._process_identifier();
+      } <span style="color: #00007f; font-weight: bold">else</span> <span style="color: #00007f; font-weight: bold">if</span> (Lexer._isdigit(c)) {
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f; font-weight: bold">this</span>._process_number();
+      } <span style="color: #00007f; font-weight: bold">else</span> <span style="color: #00007f; font-weight: bold">if</span> (c === <span style="color: #7f007f">&#39;&quot;&#39;</span>) {
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f; font-weight: bold">this</span>._process_quote();
+      } <span style="color: #00007f; font-weight: bold">else</span> {
+        <span style="color: #00007f; font-weight: bold">throw</span> <span style="color: #00007f">Error</span>(<span style="color: #7f007f">&#39;Token error at &#39;</span> + <span style="color: #00007f; font-weight: bold">this</span>.pos);
+      }
+    }
+  }
+}
+
+Lexer._isnewline = <span style="color: #00007f; font-weight: bold">function</span>(c) {
+  <span style="color: #00007f; font-weight: bold">return</span> c === <span style="color: #7f007f">&#39;\r&#39;</span> || c === <span style="color: #7f007f">&#39;\n&#39;</span>;
+}
+
+Lexer._isdigit = <span style="color: #00007f; font-weight: bold">function</span>(c) {
+  <span style="color: #00007f; font-weight: bold">return</span> c &gt;= <span style="color: #7f007f">&#39;0&#39;</span> &amp;&amp; c &lt;= <span style="color: #7f007f">&#39;9&#39;</span>;
+}
+
+Lexer._isalpha = <span style="color: #00007f; font-weight: bold">function</span>(c) {
+  <span style="color: #00007f; font-weight: bold">return</span> (c &gt;= <span style="color: #7f007f">&#39;a&#39;</span> &amp;&amp; c &lt;= <span style="color: #7f007f">&#39;z&#39;</span>) ||
+         (c &gt;= <span style="color: #7f007f">&#39;A&#39;</span> &amp;&amp; c &lt;= <span style="color: #7f007f">&#39;Z&#39;</span>) ||
+         c === <span style="color: #7f007f">&#39;_&#39;</span> || c === <span style="color: #7f007f">&#39;$&#39;</span>;
+}
+
+Lexer._isalphanum = <span style="color: #00007f; font-weight: bold">function</span>(c) {
+  <span style="color: #00007f; font-weight: bold">return</span> (c &gt;= <span style="color: #7f007f">&#39;a&#39;</span> &amp;&amp; c &lt;= <span style="color: #7f007f">&#39;z&#39;</span>) ||
+         (c &gt;= <span style="color: #7f007f">&#39;A&#39;</span> &amp;&amp; c &lt;= <span style="color: #7f007f">&#39;Z&#39;</span>) ||
+         (c &gt;= <span style="color: #7f007f">&#39;0&#39;</span> &amp;&amp; c &lt;= <span style="color: #7f007f">&#39;9&#39;</span>) ||
+         c === <span style="color: #7f007f">&#39;_&#39;</span> || c === <span style="color: #7f007f">&#39;$&#39;</span>;
+}
+
+Lexer.prototype._process_number = <span style="color: #00007f; font-weight: bold">function</span>() {
+  <span style="color: #00007f; font-weight: bold">var</span> endpos = <span style="color: #00007f; font-weight: bold">this</span>.pos + <span style="color: #007f7f">1</span>;
+  <span style="color: #00007f; font-weight: bold">while</span> (endpos &lt; <span style="color: #00007f; font-weight: bold">this</span>.buflen &amp;&amp;
+         Lexer._isdigit(<span style="color: #00007f; font-weight: bold">this</span>.buf.charAt(endpos))) {
+    endpos++;
+  }
+
+  <span style="color: #00007f; font-weight: bold">var</span> tok = {
+    name: <span style="color: #7f007f">&#39;NUMBER&#39;</span>,
+    value: <span style="color: #00007f; font-weight: bold">this</span>.buf.substring(<span style="color: #00007f; font-weight: bold">this</span>.pos, endpos),
+    pos: <span style="color: #00007f; font-weight: bold">this</span>.pos
+  };
+  <span style="color: #00007f; font-weight: bold">this</span>.pos = endpos;
+  <span style="color: #00007f; font-weight: bold">return</span> tok;
+}
+
+Lexer.prototype._process_comment = <span style="color: #00007f; font-weight: bold">function</span>() {
+  <span style="color: #00007f; font-weight: bold">var</span> endpos = <span style="color: #00007f; font-weight: bold">this</span>.pos + <span style="color: #007f7f">2</span>;
+  <span style="color: #007f00">// Skip until the end of the line</span>
+  <span style="color: #00007f; font-weight: bold">var</span> c = <span style="color: #00007f; font-weight: bold">this</span>.buf.charAt(<span style="color: #00007f; font-weight: bold">this</span>.pos + <span style="color: #007f7f">2</span>);
+  <span style="color: #00007f; font-weight: bold">while</span> (endpos &lt; <span style="color: #00007f; font-weight: bold">this</span>.buflen &amp;&amp;
+         !Lexer._isnewline(<span style="color: #00007f; font-weight: bold">this</span>.buf.charAt(endpos))) {
+    endpos++;
+  }
+
+  <span style="color: #00007f; font-weight: bold">var</span> tok = {
+    name: <span style="color: #7f007f">&#39;COMMENT&#39;</span>,
+    value: <span style="color: #00007f; font-weight: bold">this</span>.buf.substring(<span style="color: #00007f; font-weight: bold">this</span>.pos, endpos),
+    pos: <span style="color: #00007f; font-weight: bold">this</span>.pos
+  };
+  <span style="color: #00007f; font-weight: bold">this</span>.pos = endpos + <span style="color: #007f7f">1</span>;
+  <span style="color: #00007f; font-weight: bold">return</span> tok;
+}
+
+Lexer.prototype._process_identifier = <span style="color: #00007f; font-weight: bold">function</span>() {
+  <span style="color: #00007f; font-weight: bold">var</span> endpos = <span style="color: #00007f; font-weight: bold">this</span>.pos + <span style="color: #007f7f">1</span>;
+  <span style="color: #00007f; font-weight: bold">while</span> (endpos &lt; <span style="color: #00007f; font-weight: bold">this</span>.buflen &amp;&amp;
+         Lexer._isalphanum(<span style="color: #00007f; font-weight: bold">this</span>.buf.charAt(endpos))) {
+    endpos++;
+  }
+
+  <span style="color: #00007f; font-weight: bold">var</span> tok = {
+    name: <span style="color: #7f007f">&#39;IDENTIFIER&#39;</span>,
+    value: <span style="color: #00007f; font-weight: bold">this</span>.buf.substring(<span style="color: #00007f; font-weight: bold">this</span>.pos, endpos),
+    pos: <span style="color: #00007f; font-weight: bold">this</span>.pos
+  };
+  <span style="color: #00007f; font-weight: bold">this</span>.pos = endpos;
+  <span style="color: #00007f; font-weight: bold">return</span> tok;
+}
+
+Lexer.prototype._process_quote = <span style="color: #00007f; font-weight: bold">function</span>() {
+  <span style="color: #007f00">// this.pos points at the opening quote. Find the ending quote.</span>
+  <span style="color: #00007f; font-weight: bold">var</span> end_index = <span style="color: #00007f; font-weight: bold">this</span>.buf.indexOf(<span style="color: #7f007f">&#39;&quot;&#39;</span>, <span style="color: #00007f; font-weight: bold">this</span>.pos + <span style="color: #007f7f">1</span>);
+
+  <span style="color: #00007f; font-weight: bold">if</span> (end_index === -<span style="color: #007f7f">1</span>) {
+    <span style="color: #00007f; font-weight: bold">throw</span> <span style="color: #00007f">Error</span>(<span style="color: #7f007f">&#39;Unterminated quote at &#39;</span> + <span style="color: #00007f; font-weight: bold">this</span>.pos);
+  } <span style="color: #00007f; font-weight: bold">else</span> {
+    <span style="color: #00007f; font-weight: bold">var</span> tok = {
+      name: <span style="color: #7f007f">&#39;QUOTE&#39;</span>,
+      value: <span style="color: #00007f; font-weight: bold">this</span>.buf.substring(<span style="color: #00007f; font-weight: bold">this</span>.pos, end_index + <span style="color: #007f7f">1</span>),
+      pos: <span style="color: #00007f; font-weight: bold">this</span>.pos
+    };
+    <span style="color: #00007f; font-weight: bold">this</span>.pos = end_index + <span style="color: #007f7f">1</span>;
+    <span style="color: #00007f; font-weight: bold">return</span> tok;
+  }
+}
+
+Lexer.prototype._skipnontokens = <span style="color: #00007f; font-weight: bold">function</span>() {
+  <span style="color: #00007f; font-weight: bold">while</span> (<span style="color: #00007f; font-weight: bold">this</span>.pos &lt; <span style="color: #00007f; font-weight: bold">this</span>.buflen) {
+    <span style="color: #00007f; font-weight: bold">var</span> c = <span style="color: #00007f; font-weight: bold">this</span>.buf.charAt(<span style="color: #00007f; font-weight: bold">this</span>.pos);
+    <span style="color: #00007f; font-weight: bold">if</span> (c == <span style="color: #7f007f">&#39; &#39;</span> || c == <span style="color: #7f007f">&#39;\t&#39;</span> || c == <span style="color: #7f007f">&#39;\r&#39;</span> || c == <span style="color: #7f007f">&#39;\n&#39;</span>) {
+      <span style="color: #00007f; font-weight: bold">this</span>.pos++;
+    } <span style="color: #00007f; font-weight: bold">else</span> {
+      <span style="color: #00007f; font-weight: bold">break</span>;
+    }
+  }
+}
+</pre></div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="hand-written-lexer-in-javascript-compared-to-the-regex-based-ones.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

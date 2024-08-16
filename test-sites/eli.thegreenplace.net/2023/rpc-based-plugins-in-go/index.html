@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>RPC-based plugins in Go - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to RPC-based plugins in Go">
+                        RPC-based plugins in Go
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> March 28, 2023 at 20:05</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/plugins.html">Plugins</a>
+        ,
+    <a href="../../tag/network-programming.html">Network Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This post is the next installment in my <a class="reference external" href="../../2012/08/07/fundamental-concepts-of-plugin-infrastructures.html">plugin series</a>.
+<a class="reference external" href="../../2021/plugins-in-go/index.html">The last post</a>
+discussed the two main approaches to developing plugins in Go: compile-time
+plugins and run-time plugins. For run-time plugins, the post described how to
+use <tt class="docutils literal"><span class="pre">-buildmode=plugin</span></tt> and shared libraries to load plugins at runtime, but
+also hinted at an alternative approach that uses separate processes and RPC.</p>
+<p>Now it's time to discuss the RPC approach in more detail, using the
+<a class="reference external" href="https://github.com/hashicorp/go-plugin">hashicorp/go-plugin</a> package. Here's
+a sketch of how such plugins work:</p>
+<ol class="arabic simple">
+<li>Each plugin is a separate Go binary, built using some code shared with the
+main application.</li>
+<li>The main application loads plugins by running their binaries as sub-processes.</li>
+<li>The main application talks to plugins via RPC to access their functionality.</li>
+</ol>
+<p>We'll start by explaining how the <tt class="docutils literal"><span class="pre">go-plugin</span></tt> package works and how it helps
+us write plugins. Then I'll present a re-implementation of the <em>htmlize</em> program
+we've been using throughout the plugin series, this time using <tt class="docutils literal"><span class="pre">go-plugin</span></tt>.</p>
+<div class="section" id="the-go-plugin-package">
+<h2>The go-plugin package</h2>
+<p><a class="reference external" href="https://github.com/hashicorp/go-plugin">go-plugin</a> was developed by
+HashiCorp - a powerhouse of Go-based tooling, and has been used in production
+by many of their tools (like Terraform and Vault) for years. This is one if its
+greatest strengths - it's battle-tested.</p>
+<p>The basic idea behind <tt class="docutils literal"><span class="pre">go-plugin</span></tt> is a run-time plugin system wherein each
+plugin is a separate binary and runs in its own OS process.</p>
+<img alt="A plugin in its on OS process talking RPC with other plugins in their separate OS processes" class="align-center" src="../../images/2023/plugin-rpc-binaries.png" />
+<p><tt class="docutils literal"><span class="pre">go-plugin</span></tt> lets us pick which RPC mechanism to use; it supports
+<tt class="docutils literal">net/rpc</tt> and gRPC out of the box. Therefore, its API is a bit odd at first
+sight. Specifically, we are expected to define our own RPC methods both for
+the server (plugin) and the client (main application), and register them with
+<tt class="docutils literal"><span class="pre">go-plugin</span></tt> by implementing its <a class="reference external" href="https://pkg.go.dev/github.com/hashicorp/go-plugin#Plugin">Plugin interface</a>.</p>
+<p>This leaves one thinking - &quot;wait, so what does <tt class="docutils literal"><span class="pre">go-plugin</span></tt> give me, anyway? If
+I have to implement my own RPC, do I really need this helper package?&quot; - which
+is a valid question. <tt class="docutils literal"><span class="pre">go-plugin</span></tt> provides several important capabilities,
+however:</p>
+<ul class="simple">
+<li>Handles the actual network connection between a client and multiple servers:
+supporting Unix domain sockets on Linux <a class="reference external" href="../../2019/unix-domain-sockets-in-go/index.html">for performance</a>, TCP
+elsewhere.</li>
+<li>When the client launches a plugin server, <tt class="docutils literal"><span class="pre">go-plugin</span></tt> handles <em>discovery</em>
+- figuring out which port/file the server is listening on, and establishing
+the connection. This also includes verifying that the launched binary is
+the right plugin, meant for this program and not something else.</li>
+<li>Supports protocol versioning, which ensures that the main binary doesn't try
+to talk to plugins that are &quot;too old&quot;.</li>
+<li>Supports liveness pings to plugins.</li>
+<li>Can set up mTLS between the client and servers (useful when the plugin runs
+on a different machine).</li>
+<li>Handles redirection of plugin stdin/stdout streams and logs back to the main
+process.</li>
+<li>Allows having multiple logical plugins reside in the same binary/process,
+each with its own RPC interface. All plugins share a single connection to the
+main process via connection multiplexing that <tt class="docutils literal"><span class="pre">go-plugin</span></tt> implements. This
+also allows plugins to call back into the main application - more on this
+later.</li>
+</ul>
+</div>
+<div class="section" id="htmlize-plugins-with-go-plugin">
+<h2>htmlize plugins with go-plugin</h2>
+<p>Let's rebuild our <tt class="docutils literal">htmlize</tt> tool that we've been using for this demonstration
+since the <a class="reference external" href="../../2012/08/07/fundamental-concepts-of-plugin-infrastructures.html">original plugins post</a>
+(including the <a class="reference external" href="../../2021/plugins-in-go/index.html">Go version</a>), this time using
+<tt class="docutils literal"><span class="pre">go-plugin</span></tt>. The full code for this version is <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2023/go-plugin-htmlize-rpc">on GitHub</a>.
+We will examine it using the <a class="reference external" href="../../2012/08/07/fundamental-concepts-of-plugin-infrastructures.html">fundamental concepts of plugins</a>.</p>
+<p><strong>Discovery and registration:</strong> since plugins are just binaries that can be
+found anywhere, <tt class="docutils literal"><span class="pre">go-plugin</span></tt> doesn't prescribe what approach to take here. It
+only provides a <tt class="docutils literal">Discover</tt> function which is a basic wrapper around a
+filesystem glob pattern. In our code, the <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2023/go-plugin-htmlize-rpc/plugin/manager.go">Manager type</a> takes a
+path where it will look for plugin binaries, and treats each file in that
+directory as a potential plugin.</p>
+<p><tt class="docutils literal"><span class="pre">go-plugin</span></tt> does provide tools to ensure that a loaded binary is, in fact, a
+plugin for the right application. When creating a new <tt class="docutils literal"><span class="pre">go-plugin</span></tt> client, we
+have to pass in a <a class="reference external" href="https://pkg.go.dev/github.com/hashicorp/go-plugin#HandshakeConfig">HandshakeConfig</a>, which
+has to match between the application and the plugin. This helps ensure that we
+don't attempt to load a plugin meant for another application, or for a different
+version of this application.</p>
+<p>As described earlier, at this point <tt class="docutils literal"><span class="pre">go-plugin</span></tt> takes over; it launches the
+plugin in a subprocess, connects to its stdout to discover which address the
+plugin server is listening on (could be a Unix domain socket or a TCP socket,
+based on OS), and then sets up the RPC. The main application (client) is now
+ready to invoke RPCs in the plugin (server), based on the agreed-upon interface.</p>
+<p><strong>Application hooks:</strong> the central communication point between a plugin and an
+application with <tt class="docutils literal"><span class="pre">go-plugin</span></tt> is the plugin's <em>exposed interface</em>. In our
+case, the interface is:</p>
+<div class="highlight"><pre><span></span><span class="c1">// Htmlizer is the interface plugins have to implement. To avoid calling the</span><span class="w"></span>
+<span class="c1">// plugin for roles it doesn&#39;t support, it has to tell the plugin managers</span><span class="w"></span>
+<span class="c1">// which roles it wants to be invoked on by implementing the Hooks() method.</span><span class="w"></span>
+<span class="kd">type</span><span class="w"> </span><span class="nx">Htmlizer</span><span class="w"> </span><span class="kd">interface</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Hooks returns a list of the hooks this plugin wants to register.</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Hooks can have one of the following forms:</span><span class="w"></span>
+<span class="w">  </span><span class="c1">//</span><span class="w"></span>
+<span class="w">  </span><span class="c1">//  * &quot;contents&quot;: the plugin&#39;s ProcessContents method will be called on</span><span class="w"></span>
+<span class="w">  </span><span class="c1">//                the post&#39;s complete contents.</span><span class="w"></span>
+<span class="w">  </span><span class="c1">//</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// * &quot;role:NN&quot;: the plugin&#39;s ProcessRole method will be called with role=NN</span><span class="w"></span>
+<span class="w">  </span><span class="c1">//              and the role&#39;s value when a :NN: role is encountered in the</span><span class="w"></span>
+<span class="w">  </span><span class="c1">//              input.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Hooks</span><span class="p">()</span><span class="w"> </span><span class="p">[]</span><span class="kt">string</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// ProcessRole is called on roles the plugin requested in the list returned</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// by Hooks(). It takes the role name, role value in the input and the post</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// and should return the transformed role value.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ProcessRole</span><span class="p">(</span><span class="nx">role</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">val</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">post</span><span class="w"> </span><span class="nx">content</span><span class="p">.</span><span class="nx">Post</span><span class="p">)</span><span class="w"> </span><span class="kt">string</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// ProcessContents is called on the entire post contents, if requested in</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Hooks(). It takes the contents and the post and should return the</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// transformed contents.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ProcessContents</span><span class="p">(</span><span class="nx">val</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">post</span><span class="w"> </span><span class="nx">content</span><span class="p">.</span><span class="nx">Post</span><span class="p">)</span><span class="w"> </span><span class="kt">string</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This interface is presented to the application via a RPC mechanism, so code
+in the application simply invokes these methods on a value implementing the
+interface; <tt class="docutils literal"><span class="pre">go-plugin</span></tt> translates this to RPC calls behind the scenes <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>.</p>
+<p>I recommend you to carefully read the comments on the <tt class="docutils literal">Htmlizer</tt> interface;
+they describe an interesting nuance w.r.t. application hooks. In our <tt class="docutils literal">htmlize</tt>
+application, we want plugins to register for specific text &quot;roles&quot;. If a plugin
+didn't register for a role, we don't want to invoke it when the role is
+encountered - it's wasteful to call N RPCs for N plugins for each role, when in
+reality at most one plugin likely cares about any given role.</p>
+<p><tt class="docutils literal"><span class="pre">go-plugin</span></tt> does not provide built-in support to handle this conditional
+registration. A plugin exposes an interface via RPC, and that's it. But it turns
+out to be fairly easy to implement in a custom way, as our <tt class="docutils literal">Hooks</tt> method
+demonstrates. Here is how our plugin <tt class="docutils literal">Manager</tt> type handles this; first the
+<tt class="docutils literal">Manager</tt> type itself:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">Manager</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">roleHooks</span><span class="w">     </span><span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">]</span><span class="nx">Htmlizer</span><span class="w"></span>
+<span class="w">  </span><span class="nx">contentsHooks</span><span class="w"> </span><span class="p">[]</span><span class="nx">Htmlizer</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">pluginClients</span><span class="w"> </span><span class="p">[]</span><span class="o">*</span><span class="nx">goplugin</span><span class="p">.</span><span class="nx">Client</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>And the relevant part from its <tt class="docutils literal">LoadPlugins</tt> method:</p>
+<div class="highlight"><pre><span></span><span class="c1">// Query the plugin for its capabilities -- the hooks it supports.</span><span class="w"></span>
+<span class="c1">// Based on this information, register the plugin with the appropriate</span><span class="w"></span>
+<span class="c1">// role or contents hooks.</span><span class="w"></span>
+<span class="nx">capabilities</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">impl</span><span class="p">.</span><span class="nx">Hooks</span><span class="p">()</span><span class="w"></span>
+
+<span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">cap</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">capabilities</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="nx">cap</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s">&quot;contents&quot;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="nx">m</span><span class="p">.</span><span class="nx">contentsHooks</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nb">append</span><span class="p">(</span><span class="nx">m</span><span class="p">.</span><span class="nx">contentsHooks</span><span class="p">,</span><span class="w"> </span><span class="nx">impl</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="nx">parts</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">strings</span><span class="p">.</span><span class="nx">Split</span><span class="p">(</span><span class="nx">cap</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;:&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">                </span><span class="k">if</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">parts</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">parts</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s">&quot;role&quot;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                        </span><span class="nx">m</span><span class="p">.</span><span class="nx">roleHooks</span><span class="p">[</span><span class="nx">parts</span><span class="p">[</span><span class="mi">1</span><span class="p">]]</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">impl</span><span class="w"></span>
+<span class="w">                </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It queries each plugins for its supported hooks, and then registers the right
+hooks. As a result, when we encounter a role like <tt class="docutils literal">:tt:</tt>, it will only invoke
+the plugin that asked to handle this role.</p>
+<p>In this code <tt class="docutils literal">impl</tt> refers to a value of the type <tt class="docutils literal">PluginClientRPC</tt>, which
+implements the <tt class="docutils literal">Htmlize</tt> interface by issuing RPC calls to the plugin:</p>
+<div class="highlight"><pre><span></span><span class="c1">// PluginClientRPC is used by clients (main application) to translate the</span><span class="w"></span>
+<span class="c1">// Htmlize interface of plugins to RPC calls.</span><span class="w"></span>
+<span class="kd">type</span><span class="w"> </span><span class="nx">PluginClientRPC</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">client</span><span class="w"> </span><span class="o">*</span><span class="nx">rpc</span><span class="p">.</span><span class="nx">Client</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">c</span><span class="w"> </span><span class="o">*</span><span class="nx">PluginClientRPC</span><span class="p">)</span><span class="w"> </span><span class="nx">Hooks</span><span class="p">()</span><span class="w"> </span><span class="p">[]</span><span class="kt">string</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">reply</span><span class="w"> </span><span class="nx">HooksReply</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">c</span><span class="p">.</span><span class="nx">client</span><span class="p">.</span><span class="nx">Call</span><span class="p">(</span><span class="s">&quot;Plugin.Hooks&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">HooksArgs</span><span class="p">{},</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">reply</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">reply</span><span class="p">.</span><span class="nx">Hooks</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">c</span><span class="w"> </span><span class="o">*</span><span class="nx">PluginClientRPC</span><span class="p">)</span><span class="w"> </span><span class="nx">ProcessContents</span><span class="p">(</span><span class="nx">val</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">post</span><span class="w"> </span><span class="nx">content</span><span class="p">.</span><span class="nx">Post</span><span class="p">)</span><span class="w"> </span><span class="kt">string</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">reply</span><span class="w"> </span><span class="nx">ContentsReply</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">c</span><span class="p">.</span><span class="nx">client</span><span class="p">.</span><span class="nx">Call</span><span class="p">(</span><span class="w"></span>
+<span class="w">    </span><span class="s">&quot;Plugin.ProcessContents&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">ContentsArgs</span><span class="p">{</span><span class="nx">Value</span><span class="p">:</span><span class="w"> </span><span class="nx">val</span><span class="p">,</span><span class="w"> </span><span class="nx">Post</span><span class="p">:</span><span class="w"> </span><span class="nx">post</span><span class="p">},</span><span class="w"></span>
+<span class="w">    </span><span class="o">&amp;</span><span class="nx">reply</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">reply</span><span class="p">.</span><span class="nx">Value</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">c</span><span class="w"> </span><span class="o">*</span><span class="nx">PluginClientRPC</span><span class="p">)</span><span class="w"> </span><span class="nx">ProcessRole</span><span class="p">(</span><span class="nx">role</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">val</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">post</span><span class="w"> </span><span class="nx">content</span><span class="p">.</span><span class="nx">Post</span><span class="p">)</span><span class="w"> </span><span class="kt">string</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">reply</span><span class="w"> </span><span class="nx">RoleReply</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">c</span><span class="p">.</span><span class="nx">client</span><span class="p">.</span><span class="nx">Call</span><span class="p">(</span><span class="w"></span>
+<span class="w">    </span><span class="s">&quot;Plugin.ProcessRole&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">RoleArgs</span><span class="p">{</span><span class="nx">Role</span><span class="p">:</span><span class="w"> </span><span class="nx">role</span><span class="p">,</span><span class="w"> </span><span class="nx">Value</span><span class="p">:</span><span class="w"> </span><span class="nx">val</span><span class="p">,</span><span class="w"> </span><span class="nx">Post</span><span class="p">:</span><span class="w"> </span><span class="nx">post</span><span class="p">},</span><span class="w"></span>
+<span class="w">    </span><span class="o">&amp;</span><span class="nx">reply</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">reply</span><span class="p">.</span><span class="nx">Value</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Per convention, each RPC call has its own type for arguments and another for
+the response (e.g. <tt class="docutils literal">RoleArgs</tt> and <tt class="docutils literal">RoleReply</tt>). These are basic data
+containers I'm leaving out of this post but you can see in the code.
+A similar RPC wrapper is implemented on the server (plugin) side, doing the
+translation the other way.</p>
+<p><strong>Exposing application capabilities back to plugins:</strong> this is actually quite
+tricky to accomplish in RPC-based systems, at least in the general case. Since
+in this model plugins run in a separate process, we can't just pass a reference
+to a big data structure into the plugin as we did before.</p>
+<p>For small and simple data structures, serializing them through the RPC is not
+an issue. This is what our example does for the <tt class="docutils literal">content.Post</tt> type - as you
+can see from the <tt class="docutils literal">Htmlizer</tt> interface code snippet above. But what about
+larger types? What if we want to expose the entire DB to the plugin? Or have the
+plugin invoke functionality in the main application.</p>
+<p>This is one of the capabilities <tt class="docutils literal"><span class="pre">go-plugin</span></tt> provides, via its <em>bidirectional
+communication</em> feature. <tt class="docutils literal"><span class="pre">go-plugin</span></tt> can multiplex several RPC channels onto
+the same connection between the plugin and the application (using the <a class="reference external" href="https://github.com/hashicorp/yamux">yamux
+package</a>), and through this the client
+can open its own RPC server available to the plugin to invoke.</p>
+<p>I left this out of our example because I didn't want to needlessly complicate
+it (we don't really need this functionality for <tt class="docutils literal">htmlize</tt>), but I created a
+<a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2023/go-plugin-bidir-netrpc">separate sample</a>
+that shows how to do this with <tt class="docutils literal">net/rpc</tt> - it's on GitHub if you're interested
+<a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.</p>
+</div>
+<div class="section" id="a-sample-plugin-for-htmlize">
+<h2>A sample plugin for <tt class="docutils literal">htmlize</tt></h2>
+<p>Here's the entire code for a sample plugin - one that implements rendering the
+<tt class="docutils literal">:tt:</tt> role into the <tt class="docutils literal">&lt;tt&gt;</tt> HTML element:</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span><span class="w"> </span><span class="nx">main</span><span class="w"></span>
+
+<span class="kn">import</span><span class="w"> </span><span class="p">(</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;fmt&quot;</span><span class="w"></span>
+
+<span class="w">  </span><span class="s">&quot;example.com/content&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;example.com/plugin&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="nx">goplugin</span><span class="w"> </span><span class="s">&quot;github.com/hashicorp/go-plugin&quot;</span><span class="w"></span>
+<span class="p">)</span><span class="w"></span>
+
+<span class="kd">type</span><span class="w"> </span><span class="nx">TtHtmlizer</span><span class="w"> </span><span class="kd">struct</span><span class="p">{}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">TtHtmlizer</span><span class="p">)</span><span class="w"> </span><span class="nx">Hooks</span><span class="p">()</span><span class="w"> </span><span class="p">[]</span><span class="kt">string</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">[]</span><span class="kt">string</span><span class="p">{</span><span class="s">&quot;role:tt&quot;</span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">TtHtmlizer</span><span class="p">)</span><span class="w"> </span><span class="nx">ProcessContents</span><span class="p">(</span><span class="nx">val</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">post</span><span class="w"> </span><span class="nx">content</span><span class="p">.</span><span class="nx">Post</span><span class="p">)</span><span class="w"> </span><span class="kt">string</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">val</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">TtHtmlizer</span><span class="p">)</span><span class="w"> </span><span class="nx">ProcessRole</span><span class="p">(</span><span class="nx">role</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">val</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">post</span><span class="w"> </span><span class="nx">content</span><span class="p">.</span><span class="nx">Post</span><span class="p">)</span><span class="w"> </span><span class="kt">string</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Sprintf</span><span class="p">(</span><span class="s">&quot;&lt;tt&gt;%s&lt;/tt&gt;&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">val</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">goplugin</span><span class="p">.</span><span class="nx">Serve</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">goplugin</span><span class="p">.</span><span class="nx">ServeConfig</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">HandshakeConfig</span><span class="p">:</span><span class="w"> </span><span class="nx">plugin</span><span class="p">.</span><span class="nx">Handshake</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Plugins</span><span class="p">:</span><span class="w"> </span><span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">]</span><span class="nx">goplugin</span><span class="p">.</span><span class="nx">Plugin</span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="s">&quot;htmlize&quot;</span><span class="p">:</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">plugin</span><span class="p">.</span><span class="nx">HtmlizePlugin</span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">Impl</span><span class="p">:</span><span class="w"> </span><span class="nx">TtHtmlizer</span><span class="p">{},</span><span class="w"></span>
+<span class="w">      </span><span class="p">},</span><span class="w"></span>
+<span class="w">    </span><span class="p">},</span><span class="w"></span>
+<span class="w">  </span><span class="p">})</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Using <tt class="docutils literal"><span class="pre">go-plugin</span></tt> involves a bit of work for setting up the RPC scaffolding,
+but once that's all done, writing new plugins is quick and easy: just implement
+an interface and invoke a plugin server registration function in <tt class="docutils literal">main</tt>.</p>
+</div>
+<div class="section" id="comparing-shared-libraries-vs-rpc-for-plugins">
+<h2>Comparing shared libraries vs RPC for plugins</h2>
+<p>By now we've seen how to create run-time plugins in Go using two different
+mechanisms: shared libraries (<tt class="docutils literal"><span class="pre">--buildmode=plugin</span></tt>) and RPC (via
+<tt class="docutils literal"><span class="pre">go-plugin</span></tt>). Which one should you actually use?</p>
+<p>As the <a class="reference external" href="../../2021/plugins-in-go/index.html">previous post</a>
+discussed, shared library plugins can be awkward to work with, because they
+require strict source code compatibility with the main application. Another
+problem is portability: they don't currently work on Windows, for example, and
+it's not clear if they ever will.</p>
+<p>On the other hand, shared library plugins have excellent performance: plugins
+run in-process with the main application. Calling a plugin is a simple Go
+function call and we can pass references to data structures across the boundary.
+Compare that to RPC, where each call is a network interaction; even if this
+&quot;network&quot; is very fast (Unix domain sockets or localhost TCP), it still implies
+serializing the data into a linear buffer, then deserializing it at the other
+end; this is orders of magnitude slower per invocation.</p>
+<p>RPC-based plugins have some clear benefits of their own, however. First and
+foremost - isolation; a plugin runs in a process of its own. If it crashes,
+it doesn't bring down the rest of the application with it.
+Moreover, if the plugin is malicious there's limited damage it can do to the
+application itself. Plugins can even be invoked with different system
+permissions from the main application. With some tinkering it should be possible
+to set up a plugin that runs inside a container.</p>
+<p>An additional benefit is that plugins can be distributed; since they can talk
+RPC over TCP. It's easy to set up a plugin that runs on a different machine
+(<tt class="docutils literal"><span class="pre">go-plugin</span></tt> supports this with its <tt class="docutils literal">ReattachConfig</tt> type).</p>
+<p>Finally, since the interface is RPC, the plugins don't even necessarily have to
+be written in Go! If we use the gRPC interface, we can theoretically use any
+language to write a plugin for a Go application; in this scenario, all the data
+exchanged between the main application and plugins goes through protocol buffers
+anyway.</p>
+</div>
+<div class="section" id="source-code">
+<h2>Source code</h2>
+<p>The full source code for this sample is here: <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2023/go-plugin-htmlize-rpc">go-plugin-htmlize-rpc</a>.</p>
+<p>Separate sample that shows how to call back from plugins into the host with
+<tt class="docutils literal"><span class="pre">go-plugin</span></tt> and <tt class="docutils literal">net/rpc</tt>: <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2023/go-plugin-bidir-netrpc">go-plugin-bidir-netrpc</a>.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>To be precise, it's RPC scaffolding implemented by us + <tt class="docutils literal"><span class="pre">go-plugin</span></tt>
+that do this in tandem. As described earlier, in order to support
+multiple RPC flavors, <tt class="docutils literal"><span class="pre">go-plugin</span></tt> leaves the RPC layer scaffolding
+for users to define.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>The <tt class="docutils literal"><span class="pre">go-plugin</span></tt> repository has an example of doing this for gRPC
+but not for <tt class="docutils literal">net/rpc</tt>, as far as I could tell.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

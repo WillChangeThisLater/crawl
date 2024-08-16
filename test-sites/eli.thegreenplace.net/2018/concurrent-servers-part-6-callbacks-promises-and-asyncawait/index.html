@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Concurrent Servers: Part 6 - Callbacks, Promises and async/await - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Concurrent Servers: Part 6 - Callbacks, Promises and async/await">
+                        Concurrent Servers: Part 6 - Callbacks, Promises and async/await
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> May 08, 2018 at 05:50</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/concurrency.html">Concurrency</a>
+        ,
+    <a href="../../tag/javascript.html">Javascript</a>
+        ,
+    <a href="../../tag/network-programming.html">Network Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This is part 6 in a series of posts on writing concurrent network servers. Parts
+3, 4, and 5 in the series discussed the <em>event-driven</em> approach to building
+concurrent servers, alternatively known as <em>asynchronous programming</em>. In this
+part, we're going to look at some of the challenges inherent in this style of
+programming and examine some of the modern solutions available.</p>
+<p>This post covers many topics, and as such can't cover all of them in great
+detail. It comes with sizable, fully-working code samples, so I hope it can
+serve as a good starting point for learning if these topics interest you.</p>
+<p>All posts in the series:</p>
+<ul class="simple">
+<li><a class="reference external" href="../../2017/concurrent-servers-part-1-introduction/index.html">Part 1 - Introduction</a></li>
+<li><a class="reference external" href="../../2017/concurrent-servers-part-2-threads/index.html">Part 2 - Threads</a></li>
+<li><a class="reference external" href="../../2017/concurrent-servers-part-3-event-driven/index.html">Part 3 - Event-driven</a></li>
+<li><a class="reference external" href="../../2017/concurrent-servers-part-4-libuv/index.html">Part 4 - libuv</a></li>
+<li><a class="reference external" href="../../2017/concurrent-servers-part-5-redis-case-study/index.html">Part 5 - Redis case study</a></li>
+<li><a class="reference external" href="index.html">Part 6 - Callbacks, Promises and async/await</a></li>
+</ul>
+<div class="section" id="revisiting-the-primality-testing-server-with-node-js">
+<h2>Revisiting the primality testing server with Node.js</h2>
+<p>So far the series has focused on a simple state-machine protocol,
+to demonstrate the challenges of keeping client-specific state on the server. In
+this part, I want to focus on a different challenge - keeping track of waiting
+for multiple things on the server side. To this end, I'm going to revisit the
+primality testing server that appeared in <a class="reference external" href="../../2017/concurrent-servers-part-4-libuv/index.html">part 4</a>, where it
+was implemented in C using <tt class="docutils literal">libuv</tt>.</p>
+<p>Here we're going to reimplement this in JavaScript, using the Node.js
+server-side framework and execution engine. Node.js is a popular server-side
+programming environment that brought the asynchronous style of programming
+into the limelight when it appeared in 2009 <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>.</p>
+<p>The C code for the original primality testing server <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/async-socket-server/uv-isprime-server.c">is here</a>.
+It listens on a socket for numbers to arrive, tests them for primality (using
+the slow brute-force method) and sends back &quot;prime&quot; or &quot;composite&quot;. It
+optionally uses <tt class="docutils literal">libuv</tt>'s work queues to offload the computation itself to a
+thread, to avoid blocking the main event loop.</p>
+<p>Let's reconstruct this server in steps in Node.js, starting with a basic server
+that does all computations in the main thread (all the code for this post is
+<a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2018/async-socket-server/">available here</a>):</p>
+<div class="highlight"><pre><span></span><span class="kd">var</span><span class="w"> </span><span class="nx">net</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;net&#39;</span><span class="p">);</span><span class="w"></span>
+<span class="kd">var</span><span class="w"> </span><span class="nx">utils</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;./utils.js&#39;</span><span class="p">);</span><span class="w"></span>
+
+<span class="kd">var</span><span class="w"> </span><span class="nx">portnum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">8070</span><span class="p">;</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">process</span><span class="p">.</span><span class="nx">argv</span><span class="p">.</span><span class="nx">length</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mf">2</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">portnum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">argv</span><span class="p">[</span><span class="mf">2</span><span class="p">];</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">var</span><span class="w"> </span><span class="nx">server</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">net</span><span class="p">.</span><span class="nx">createServer</span><span class="p">();</span><span class="w"></span>
+<span class="nx">server</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;connection&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">handleConnection</span><span class="p">);</span><span class="w"></span>
+
+<span class="nx">server</span><span class="p">.</span><span class="nx">listen</span><span class="p">(</span><span class="nx">portnum</span><span class="p">,</span><span class="w"> </span><span class="kd">function</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;Serving on port %d&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">portnum</span><span class="p">);</span><span class="w"></span>
+<span class="p">});</span><span class="w"></span>
+
+<span class="kd">function</span><span class="w"> </span><span class="nx">handleConnection</span><span class="p">(</span><span class="nx">conn</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">remoteAddress</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">conn</span><span class="p">.</span><span class="nx">remoteAddress</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s1">&#39;:&#39;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">conn</span><span class="p">.</span><span class="nx">remotePort</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;peer %s connected&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">remoteAddress</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">conn</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;data&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">onConnData</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="nx">conn</span><span class="p">.</span><span class="nx">once</span><span class="p">(</span><span class="s1">&#39;close&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">onConnClose</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="nx">conn</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;error&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">onConnError</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="kd">function</span><span class="w"> </span><span class="nx">onConnData</span><span class="p">(</span><span class="nx">d</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">utils</span><span class="p">.</span><span class="nx">buf2num</span><span class="p">(</span><span class="nx">d</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;num %d&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">num</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">answer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">utils</span><span class="p">.</span><span class="nx">isPrime</span><span class="p">(</span><span class="nx">num</span><span class="p">,</span><span class="w"> </span><span class="kc">true</span><span class="p">)</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="s2">&quot;prime&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;composite&quot;</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="nx">conn</span><span class="p">.</span><span class="nx">write</span><span class="p">(</span><span class="nx">answer</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s1">&#39;\n&#39;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;... %d is %s&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">num</span><span class="p">,</span><span class="w"> </span><span class="nx">answer</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="kd">function</span><span class="w"> </span><span class="nx">onConnClose</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;connection from %s closed&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">remoteAddress</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="kd">function</span><span class="w"> </span><span class="nx">onConnError</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;connection %s error: %s&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">remoteAddress</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">message</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This is standard Node.js fare; the interesting work happens in the
+<tt class="docutils literal">onConnData</tt> callback, which is called whenever new data arrives on the
+socket. We're missing a couple of utility functions used by this code - they
+are in <tt class="docutils literal">utils.js</tt>:</p>
+<div class="highlight"><pre><span></span><span class="c1">// Check if n is prime, returning a boolean. The delay parameter is optional -</span><span class="w"></span>
+<span class="c1">// if it&#39;s true the function will block for n milliseconds before computing the</span><span class="w"></span>
+<span class="c1">// answer.</span><span class="w"></span>
+<span class="nx">exports</span><span class="p">.</span><span class="nx">isPrime</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kd">function</span><span class="p">(</span><span class="nx">n</span><span class="p">,</span><span class="w"> </span><span class="nx">delay</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">delay</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="kc">true</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">sleep</span><span class="p">(</span><span class="nx">n</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">n</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mf">2</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">n</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mf">2</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">var</span><span class="w"> </span><span class="nx">r</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">3</span><span class="p">;</span><span class="w"> </span><span class="nx">r</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">r</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="nx">n</span><span class="p">;</span><span class="w"> </span><span class="nx">r</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mf">2</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">n</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="nx">r</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mf">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="c1">// Parse the given a buffer into a number. buf is of class Buffer; it stores the</span><span class="w"></span>
+<span class="c1">// ascii representation of the number followed by some non-digits (like a</span><span class="w"></span>
+<span class="c1">// newline).</span><span class="w"></span>
+<span class="nx">exports</span><span class="p">.</span><span class="nx">buf2num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kd">function</span><span class="p">(</span><span class="nx">buf</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">code0</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;0&#39;</span><span class="p">.</span><span class="nx">charCodeAt</span><span class="p">(</span><span class="mf">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">code9</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;9&#39;</span><span class="p">.</span><span class="nx">charCodeAt</span><span class="p">(</span><span class="mf">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">var</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mf">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="nx">buf</span><span class="p">.</span><span class="nx">length</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="nx">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">buf</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="nx">code0</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">buf</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="nx">code9</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">num</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mf">10</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">buf</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nx">code0</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">num</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="c1">// Blocking sleep for the given number of milliseconds. Uses a spin-loop to</span><span class="w"></span>
+<span class="c1">// block; note that this loads the CPU and is only useful for simulating load.</span><span class="w"></span>
+<span class="kd">function</span><span class="w"> </span><span class="nx">sleep</span><span class="p">(</span><span class="nx">ms</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">awake_time</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">().</span><span class="nx">getTime</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">ms</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="nx">awake_time</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Date</span><span class="p">().</span><span class="nx">getTime</span><span class="p">())</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>For testing and demonstration purposes, <tt class="docutils literal">isPrime</tt> accepts an optional
+<tt class="docutils literal">delay</tt> parameter; if <tt class="docutils literal">true</tt>, the function will sleep for the number of
+milliseconds given by <tt class="docutils literal">n</tt> before computing whether <tt class="docutils literal">n</tt> is a prime <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.</p>
+</div>
+<div class="section" id="offloading-cpu-intensive-computations">
+<h2>Offloading CPU-intensive computations</h2>
+<p>Naturally, the server shown above is poorly designed for concurrency; it has a
+single thread that will stop listening for new clients while it's busy computing
+the prime-ness of a large number for an existing client.</p>
+<p>The natural way to handle this is to offload the CPU intensive computation to
+a thread. Alas, JavaScript doesn't support threads and Node.js doesn't either.
+Node.js <em>does</em> support sub-processes though, with its <tt class="docutils literal">child_process</tt> package.
+Our <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2018/async-socket-server/primeserver-offload.js">next version of the server</a>
+leverages this capability. Here is the relevant part in the new server - the
+<tt class="docutils literal">onConnData</tt> callback:</p>
+<div class="highlight"><pre><span></span><span class="kd">function</span><span class="w"> </span><span class="nx">onConnData</span><span class="p">(</span><span class="nx">d</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">utils</span><span class="p">.</span><span class="nx">buf2num</span><span class="p">(</span><span class="nx">d</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;num %d&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">num</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Fork off a worker to do this computation, and add a callback to handle</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// the result when it&#39;s ready. After the callback is set up, this function</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// returns so the server can resume the event loop.</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">worker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">child_process</span><span class="p">.</span><span class="nx">fork</span><span class="p">(</span><span class="s1">&#39;./primeworker.js&#39;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="nx">worker</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nx">num</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="nx">worker</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;message&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">message</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">answer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">message</span><span class="p">.</span><span class="nx">result</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="s2">&quot;prime&quot;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;composite&quot;</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="nx">conn</span><span class="p">.</span><span class="nx">write</span><span class="p">(</span><span class="nx">answer</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s1">&#39;\n&#39;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;... %d is %s&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">num</span><span class="p">,</span><span class="w"> </span><span class="nx">answer</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">});</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>When new data is received from a connected client, this server forks off a
+sub-process to execute code in <tt class="docutils literal">primeworker.js</tt>, sends it the task using IPC
+and attaches a callback on new messages received from the worker. It then cedes
+control to the event loop - so there's no bad blocking happening here.
+<tt class="docutils literal">primeworker.js</tt> is very simple:</p>
+<div class="highlight"><pre><span></span><span class="kd">var</span><span class="w"> </span><span class="nx">utils</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;./utils.js&#39;</span><span class="p">);</span><span class="w"></span>
+
+<span class="nx">process</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;message&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">message</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;[child %d] received message from server:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">pid</span><span class="p">,</span><span class="w"> </span><span class="nx">message</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Compute the result (with emulate ddelay) and send back a message.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">process</span><span class="p">.</span><span class="nx">send</span><span class="p">({</span><span class="nx">task</span><span class="o">:</span><span class="w"> </span><span class="nx">message</span><span class="p">,</span><span class="w"> </span><span class="nx">result</span><span class="o">:</span><span class="w"> </span><span class="nx">utils</span><span class="p">.</span><span class="nx">isPrime</span><span class="p">(</span><span class="nx">message</span><span class="p">,</span><span class="w"> </span><span class="kc">true</span><span class="p">)});</span><span class="w"></span>
+<span class="w">  </span><span class="nx">process</span><span class="p">.</span><span class="nx">disconnect</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;[child %d] exiting&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">process</span><span class="p">.</span><span class="nx">pid</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="nx">process</span><span class="p">.</span><span class="nx">exit</span><span class="p">();</span><span class="w"></span>
+<span class="p">});</span><span class="w"></span>
+</pre></div>
+<p>It waits for a message on its IPC channel, computes the prime-ness of the number
+received, sends the reply and exits. Let's ignore the fact that it's wasteful to
+launch a subprocess for each number, since the focus of this article is the
+callbacks in the server. A more realistic application would have a pool of
+&quot;worker&quot; processes that persist throughout the server's lifetime; this wouldn't
+change much on the server side, however.</p>
+<p>The important part to notice here is that we have a nested callback within the
+server's <tt class="docutils literal">onConnData</tt>. The server's architecture is still quite simple - let's
+see how it handles added complexity.</p>
+</div>
+<div class="section" id="adding-caching">
+<h2>Adding caching</h2>
+<p>Let's grossly over-engineer our silly primality testing server by adding a
+cache. Not just any cache, but stored in Redis! How about that for a true child
+of the 2010s? The point of this is educational, of course, so please bear with
+me for a bit.</p>
+<p>We assume a Redis server is running on the local host, listening on the default
+port. We'll use the <tt class="docutils literal">redis</tt> package to talk to it; the <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2018/async-socket-server/primeserver-offload-caching.js">full code is here</a>,
+but the interesting part is this:</p>
+<div class="highlight"><pre><span></span><span class="kd">function</span><span class="w"> </span><span class="nx">onConnData</span><span class="p">(</span><span class="nx">d</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">utils</span><span class="p">.</span><span class="nx">buf2num</span><span class="p">(</span><span class="nx">d</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;num %d&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">num</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">cachekey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;primecache:&#39;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">num</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="nx">redis_client</span><span class="p">.</span><span class="nx">get</span><span class="p">(</span><span class="nx">cachekey</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;redis client error&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">res</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="kc">null</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">var</span><span class="w"> </span><span class="nx">worker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">child_process</span><span class="p">.</span><span class="nx">fork</span><span class="p">(</span><span class="s1">&#39;./primeworker.js&#39;</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="nx">worker</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nx">num</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="nx">worker</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;message&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">message</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="kd">var</span><span class="w"> </span><span class="nx">answer</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">message</span><span class="p">.</span><span class="nx">result</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="s1">&#39;prime&#39;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;composite&#39;</span><span class="p">;</span><span class="w"></span>
+<span class="w">          </span><span class="nx">redis_client</span><span class="p">.</span><span class="nx">set</span><span class="p">(</span><span class="nx">cachekey</span><span class="p">,</span><span class="w"> </span><span class="nx">answer</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">              </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;redis client error&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">);</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">              </span><span class="nx">conn</span><span class="p">.</span><span class="nx">write</span><span class="p">(</span><span class="nx">answer</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s1">&#39;\n&#39;</span><span class="p">);</span><span class="w"></span>
+<span class="w">              </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;... %d is %s&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">num</span><span class="p">,</span><span class="w"> </span><span class="nx">answer</span><span class="p">);</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">          </span><span class="p">});</span><span class="w"></span>
+<span class="w">        </span><span class="p">});</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// The strings &#39;prime&#39; or &#39;composite&#39; are stored in the Redis cache.</span><span class="w"></span>
+<span class="w">        </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;cached num %d is %s&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">num</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="nx">conn</span><span class="p">.</span><span class="nx">write</span><span class="p">(</span><span class="nx">res</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s1">&#39;\n&#39;</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">});</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Let's see what's going on. When a new number is received from the client, we
+first check to see if it's already in the cache. This involves contacting the
+Redis server, so naturally it has to be done asynchronously with a callback
+registered for when the answer is ready. If the number is in the cache, we're
+pretty much done.</p>
+<p>If it's not, we have to spawn a worker to compute it; then, once the answer is
+ready we want to write it to the cache. If the write is successful, we return
+the answer <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>.</p>
+</div>
+<div class="section" id="callback-hell">
+<h2>Callback hell</h2>
+<p>Taking another look at the last code snippet, we see callbacks nested 3 layers
+deep. That's inside <tt class="docutils literal">onConnData</tt>, which is itself a callback - so make it 4
+layers deep. This style of code is so common and notorious in event-driven
+programming that it has an epithet - &quot;callback hell&quot;.</p>
+<p>The problem is often visualized as this deep, deep callback nest, but IMHO
+that's not the real issue. Callback nesting is just a syntactic convenience JS
+makes particularly easy, so folks use it. If you look at the C code
+<a class="reference external" href="../../2017/concurrent-servers-part-4-libuv.html">in part 4</a>, it has a
+similar level of <em>logical</em> nesting, but since each function is standalone and
+not a closure embedded in a surrounding function, it's less visually jarring.</p>
+<p>The &quot;just use standalone named functions&quot; solution has issues too; closures
+have their benefits - for example they easily refer to values from external
+scopes. In the last code snippet, note how <tt class="docutils literal">num</tt> is used in several nested
+callbacks but only defined inside <tt class="docutils literal">onConnData</tt> itself. Without this lexical
+convenience we'd have to pass it explicitly through all the callbacks, and the
+same for all other common values. It's not the end of the world, but it helps
+explain why folks gravitate naturally to the tower of nested closures - it's
+less code to type.</p>
+<p>The bigger issue with this way of programming is forcing programmers into
+<em>continuation passing style</em>. It's worth spending some time to explain what I
+mean.</p>
+<p>Traditional, &quot;straight-line&quot; code looks like the following:</p>
+<div class="highlight"><pre><span></span>a &lt;- run_w()
+b &lt;- run_x(a)
+c &lt;- run_y()
+d &lt;- run_z(b, c)
+</pre></div>
+<p>Let's assume that each of <tt class="docutils literal">run_*</tt> can potentially block, but it doesn't
+concern us because we have our own thread or something. The flow of data here
+is very straightforward. Now let's see how this would look using asynchronous
+callbacks:</p>
+<div class="highlight"><pre><span></span>run_w(a =&gt;
+  run_x(a, b =&gt;
+    run_y(c =&gt;
+      run_z(b, c, ...))))
+</pre></div>
+<p>Nothing surprising, but note how much less obvious the flow of data is. Instead
+of saying &quot;run W and get me an <tt class="docutils literal">a</tt>&quot;, we have to say &quot;run W and when <tt class="docutils literal">a</tt> is
+ready, do ...&quot;. This is similar to continuations in programming language theory;
+<a class="reference external" href="../../2017/on-recursion-continuations-and-trampolines/index.html">I've written about continuations in the past</a>,
+and it should be easy to find tons of other information online.</p>
+<p>Continuation passing style is not bad per-se, but it makes it harder to keep
+track of the data flow in the program. It's easier to think of functions as
+taking values and returning values, as opposed to taking values and passing
+their results forward to other functions <a class="footnote-reference" href="index.html#footnote-4" id="footnote-reference-4">[4]</a>.</p>
+<p>This problem is compounded when we consider error handling in realistic
+programs. Back to the straight-line code sample - if <tt class="docutils literal">run_x</tt> encounters an
+error, it returns it. The place where <tt class="docutils literal">run_x</tt> is called is precisely the right
+place to handle this error, because this is the place that has the full context
+for the call.</p>
+<p>In the asynchronous variant, if <tt class="docutils literal">run_x</tt> encounters an error, there's no
+natural place to &quot;return&quot; it to, because <tt class="docutils literal">run_x</tt> doesn't really return
+anything. It feeds its result forward. Node.js has an idiom to support this
+style of programming - <a class="reference external" href="http://fredkschott.com/post/2014/03/understanding-error-first-callbacks-in-node-js/">error-first callbacks</a>.</p>
+<p>You might think that JS's exceptions should be able to help here, but exceptions
+mix with callbacks even more poorly. The callback is usually invoked in a
+completely different stack frame from the place where it's passed into an
+operation. Therefore, there's no natural place to position <tt class="docutils literal">try</tt> blocks.</p>
+</div>
+<div class="section" id="promises">
+<h2>Promises</h2>
+<p>Even though the callback-programming style has some issues, they are by no means
+fatal. After all, many successful projects were developed with Node.js, even
+before the fancy new features became available in ES6 and beyond.</p>
+<p>People have been well aware of the issues, however, and have worked hard
+to create solutions or at least mitigations for the most serious problems. The
+first such solution came to standard JS with ES6: <em>promises</em> (also known as
+<em>futures</em> in other languages). However, long before becoming a standard,
+promises were available as libraries. A <tt class="docutils literal">Promise</tt> object is really just
+syntactic sugar around callbacks - it can be implemented as a library in pure
+Javascript.</p>
+<p>There are plenty of tutorials about promises online; I'll just focus on showing
+how our over-engineered prime server looks when written with promises instead of
+naked callbacks. Here's <tt class="docutils literal">onConnData</tt> in the <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2018/async-socket-server/primeserver-promises.js">promise-based version</a>:</p>
+<div class="highlight"><pre><span></span><span class="kd">function</span><span class="w"> </span><span class="nx">onConnData</span><span class="p">(</span><span class="nx">d</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">utils</span><span class="p">.</span><span class="nx">buf2num</span><span class="p">(</span><span class="nx">d</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;num %d&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">num</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">cachekey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;primecache:&#39;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">num</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="nx">redisGetAsync</span><span class="p">(</span><span class="nx">cachekey</span><span class="p">).</span><span class="nx">then</span><span class="p">(</span><span class="nx">res</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">res</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="kc">null</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nx">isPrimeAsync</span><span class="p">(</span><span class="nx">num</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;cached num %d is %s&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">num</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">resolve</span><span class="p">(</span><span class="nx">res</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}).</span><span class="nx">then</span><span class="p">(</span><span class="nx">res</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Using Promise.all to pass &#39;res&#39; from here to the next .then handler.</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nb">Promise</span><span class="p">.</span><span class="nx">all</span><span class="p">([</span><span class="nx">redisSetAsync</span><span class="p">(</span><span class="nx">cachekey</span><span class="p">,</span><span class="w"> </span><span class="nx">res</span><span class="p">),</span><span class="w"> </span><span class="nx">res</span><span class="p">]);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}).</span><span class="nx">then</span><span class="p">(([</span><span class="nx">set_result</span><span class="p">,</span><span class="w"> </span><span class="nx">computation_result</span><span class="p">])</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">conn</span><span class="p">.</span><span class="nx">write</span><span class="p">(</span><span class="nx">computation_result</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s1">&#39;\n&#39;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}).</span><span class="k">catch</span><span class="p">(</span><span class="nx">err</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;error:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">});</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>There are some missing pieces here. First, the promise-ready versions of the
+Redis client are defined thus:</p>
+<div class="highlight"><pre><span></span><span class="kd">const</span><span class="w"> </span><span class="p">{</span><span class="nx">promisify</span><span class="p">}</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;util&#39;</span><span class="p">);</span><span class="w"></span>
+
+<span class="c1">// Create a Redis client. This connects to a Redis server running on the local</span><span class="w"></span>
+<span class="c1">// machine at the default port.</span><span class="w"></span>
+<span class="kd">var</span><span class="w"> </span><span class="nx">redis_client</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">redis</span><span class="p">.</span><span class="nx">createClient</span><span class="p">();</span><span class="w"></span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">redisGetAsync</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">promisify</span><span class="p">(</span><span class="nx">redis_client</span><span class="p">.</span><span class="nx">get</span><span class="p">).</span><span class="nx">bind</span><span class="p">(</span><span class="nx">redis_client</span><span class="p">);</span><span class="w"></span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">redisSetAsync</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">promisify</span><span class="p">(</span><span class="nx">redis_client</span><span class="p">.</span><span class="nx">set</span><span class="p">).</span><span class="nx">bind</span><span class="p">(</span><span class="nx">redis_client</span><span class="p">);</span><span class="w"></span>
+</pre></div>
+<p><tt class="docutils literal">promisify</tt> is a Node utility function that takes a callback-based function
+and returns a promise-returning version. <tt class="docutils literal">isPrimeAsync</tt> is:</p>
+<div class="highlight"><pre><span></span><span class="kd">function</span><span class="w"> </span><span class="nx">isPrimeAsync</span><span class="p">(</span><span class="nx">n</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nb">Promise</span><span class="p">((</span><span class="nx">resolve</span><span class="p">,</span><span class="w"> </span><span class="nx">reject</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">child</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">child_process</span><span class="p">.</span><span class="nx">fork</span><span class="p">(</span><span class="s1">&#39;./primeworker.js&#39;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="nx">child</span><span class="p">.</span><span class="nx">send</span><span class="p">(</span><span class="nx">n</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="nx">child</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;message&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">message</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="kd">var</span><span class="w"> </span><span class="nx">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">message</span><span class="p">.</span><span class="nx">result</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="s1">&#39;prime&#39;</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s1">&#39;composite&#39;</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="nx">resolve</span><span class="p">(</span><span class="nx">result</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">});</span><span class="w"></span>
+<span class="w">    </span><span class="nx">child</span><span class="p">.</span><span class="nx">on</span><span class="p">(</span><span class="s1">&#39;error&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">message</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="nx">reject</span><span class="p">(</span><span class="nx">message</span><span class="p">)});</span><span class="w"></span>
+<span class="w">  </span><span class="p">});</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Here the <tt class="docutils literal">Promise</tt> protocol is implemented manually. Instead of taking a
+callback to be invoked when the result is ready (and another to be invoked for
+errors), <tt class="docutils literal">isPrimeAsync</tt> returns a <tt class="docutils literal">Promise</tt> object wrapping a function. It
+can then participate in a <tt class="docutils literal">then</tt> chain of <tt class="docutils literal">Promise</tt>s, as usual.</p>
+<p>Now looking back at the main flow of <tt class="docutils literal">onConnData</tt>, some things become
+apparent:</p>
+<ol class="arabic simple">
+<li>The nesting is <em>flattened</em>, turning into a chain of <tt class="docutils literal">then</tt> calls.</li>
+<li>Errors can be handled in a single <tt class="docutils literal">catch</tt> at the end of the promise chain.
+Programming language afficionados will be delighted to discover that in this
+sense promises behave just like <a class="reference external" href="https://hackage.haskell.org/package/mtl-2.2.2/docs/Control-Monad-Cont.html">continuation monads in Haskell</a>.</li>
+</ol>
+<p>Choosing promises over the callback style is a matter of preference; what makes
+promises really interesting, IMHO, is the next step - <tt class="docutils literal">await</tt>.</p>
+</div>
+<div class="section" id="async-and-await">
+<h2>async and await</h2>
+<p>With ES7, Javascript added support for the <tt class="docutils literal">async</tt> and <tt class="docutils literal">await</tt> keywords,
+actually modifying the language for more convenient support of asynchronous
+programming. Functions returning promises can now be marked as <tt class="docutils literal">async</tt>, and
+invoking these functions can be done with <tt class="docutils literal">await</tt>. When a promise-returning
+function is invoked with <tt class="docutils literal">await</tt>, what happens behind the scenes is exactly
+the same as in the callback or promise versions - a callback is registered and
+control is relinquished to the event loop. However, <tt class="docutils literal">await</tt> lets us express
+this process in a very natural syntax that addresses some of the biggest issues
+with callbacks and promises.</p>
+<p><a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2018/async-socket-server/primeserver-asyncawait.js">Here is our prime server again</a>,
+now written with <tt class="docutils literal">await</tt>:</p>
+<div class="highlight"><pre><span></span><span class="k">async</span><span class="w"> </span><span class="kd">function</span><span class="w"> </span><span class="nx">onConnData</span><span class="p">(</span><span class="nx">d</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">num</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">utils</span><span class="p">.</span><span class="nx">buf2num</span><span class="p">(</span><span class="nx">d</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;num %d&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">num</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">try</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">cachekey</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;primecache:&#39;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">num</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">cached</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redisGetAsync</span><span class="p">(</span><span class="nx">cachekey</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">cached</span><span class="w"> </span><span class="o">===</span><span class="w"> </span><span class="kc">null</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="kd">var</span><span class="w"> </span><span class="nx">computed</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">isPrimeAsync</span><span class="p">(</span><span class="nx">num</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="k">await</span><span class="w"> </span><span class="nx">redisSetAsync</span><span class="p">(</span><span class="nx">cachekey</span><span class="p">,</span><span class="w"> </span><span class="nx">computed</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="nx">conn</span><span class="p">.</span><span class="nx">write</span><span class="p">(</span><span class="nx">computed</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s1">&#39;\n&#39;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;cached num %d is %s&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">num</span><span class="p">,</span><span class="w"> </span><span class="nx">cached</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="nx">conn</span><span class="p">.</span><span class="nx">write</span><span class="p">(</span><span class="nx">cached</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s1">&#39;\n&#39;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">catch</span><span class="w"> </span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;error:&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This reads just like a blocking version <a class="footnote-reference" href="index.html#footnote-5" id="footnote-reference-5">[5]</a>, but in fact there is no blocking
+here; for example, with this line:</p>
+<div class="highlight"><pre><span></span><span class="kd">var</span><span class="w"> </span><span class="nx">cached</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">await</span><span class="w"> </span><span class="nx">redisGetAsync</span><span class="p">(</span><span class="nx">cachekey</span><span class="p">);</span><span class="w"></span>
+</pre></div>
+<p>A &quot;get&quot; request will be issued with the Redis client, and a callback will be
+registered for when data is ready. Until it's ready, the event loop will be
+free to do other work (like handle concurrent requests). Once it's ready and
+the callback fires, the result is assigned into <tt class="docutils literal">cached</tt>. We no longer have to
+split up our code into a tower of callbacks or a chain of <tt class="docutils literal">then</tt> clauses - we
+can write it in a natural sequential order. We still have to be mindful of
+blocking operations and be very careful about what is invoked inside callbacks,
+but it's a big improvement regardless.</p>
+</div>
+<div class="section" id="conclusion">
+<h2>Conclusion</h2>
+<p>This post has been a whirlwind tour of some idioms of asynchronous programming,
+adding modern abstractions on top of the bare-bones <tt class="docutils literal">libuv</tt> based servers
+of part 4. This information should be sufficient to understand most asynchronous
+code being written today.</p>
+<p>A separate question is - is it worth it? Asynchronous code obviously brings with
+it some unique programming challenges. Is this the best way to handle high-load
+concurrency? I'm keenly interested in the comparison of this model of
+programming with the more &quot;traditional&quot; thread-based model, but this is a large
+topic I'll have to defer to a future post.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td><p class="first">The main value proposition of Node.js is using the same language on the
+server and on the client. Client-side programmers are already familiar
+with JS, by necessity, so not having to learn another language to program
+server-side is a plus.</p>
+<p class="last">Interestingly, this choice also affects the fundamental architecture and
+&quot;way&quot; of Node.js; since JS is a single-threaded language, Node.js adopted
+this model and had to turn to asynchronous APIs to support concurrency.
+In fact, the <tt class="docutils literal">libuv</tt> framework we covered in part 4 was developed as
+a portability layer to support Node.js.</p>
+</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td><p class="first">Since the idea is emulate CPU-intensive work, this is just a hack to
+avoid using huge primes as inputs. For anything but very large primes,
+even this naive algorithm executes extremely quickly so it's hard to
+see real delays.</p>
+<p class="last">Since Node.js doesn't have a <tt class="docutils literal">sleep</tt> function (the idea of <tt class="docutils literal">sleep</tt> is
+contrary to the philosophy of Node.js), we simulate it here with a busy
+loop checking the time. The important bit is to keep the CPU occupied,
+emulating and intensive computation.</p>
+</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>Note that we don't strictly have to wait for the cache write to complete
+before returning the answer, but this results in the cleanest protocol
+since it gives us a natural place to return errors.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-4">[4]</a></td><td>There's much more to say on the relative merits of synchronous vs.
+callback-based programming, but I'll leave it to another time.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-5">[5]</a></td><td>I wrote a blocking version of this exact server in Python, using a thread
+pool for concurrency; <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2018/async-socket-server/primeserver-py-blocking.py">the full code is here</a>.
+Feel free to compare the <tt class="docutils literal">await</tt> based <tt class="docutils literal">onConnData</tt> with the
+<tt class="docutils literal">handle_client_data</tt> function. I switched to Python for this task
+because writing blocking code in Node.js is a bit like pissing against
+the wind.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

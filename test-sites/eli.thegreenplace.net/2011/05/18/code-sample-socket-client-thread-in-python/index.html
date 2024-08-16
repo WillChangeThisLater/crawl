@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Code sample - socket client thread in Python - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../../index.html" class="navbar-brand">
+                <img src="../../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="../code-sample-socket-client-thread-in-python.html"
+                       rel="bookmark"
+                       title="Permalink to Code sample - socket client thread in Python">
+                        Code sample - socket client thread in Python
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> May 18, 2011 at 18:04</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../../tag/python.html">Python</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>When creating a GUI that has to communicate with the outer world, a common stumbling block that comes up is how to combine GUI code with I/O. I/O, whether HTTP requests, RPC protocols, plain socket communication or the serial port, tends to be blocking in nature, which doesn't play well with GUI code. No one wants their GUI to &quot;freeze&quot; while the program is blocking on a <tt class="docutils literal">read</tt> call from a socket.</p>
+<p>There are many solutions to this issue, the two most common of which are:</p>
+<ol class="arabic simple">
+<li>Doing the I/O in a separate thread</li>
+<li>Using asynchronous I/O with callbacks integrated into the GUI event loop</li>
+</ol>
+<p>In my opinion, option 1 is the simpler of the two, and it's the one I usually end up with. Here I want to present a simple code sample that implements a socket client thread in Python. Although this class is general enough to be used in many scenarios, I see it more as a pattern than as a completed black-box. Networking code tends to depend on a lot of factors, and it's easy to modify this sample to various scenarios. For example, while this is a client, re-implementing a similar server is easy. Without further ado, here's the code:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">import</span> <span style="color: #00007f">socket</span>
+<span style="color: #00007f; font-weight: bold">import</span> <span style="color: #00007f">struct</span>
+<span style="color: #00007f; font-weight: bold">import</span> <span style="color: #00007f">threading</span>
+<span style="color: #00007f; font-weight: bold">import</span> <span style="color: #00007f">Queue</span>
+
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">ClientCommand</span>(<span style="color: #00007f">object</span>):
+    <span style="color: #7f007f">&quot;&quot;&quot; A command to the client thread.</span>
+<span style="color: #7f007f">        Each command type has its associated data:</span>
+
+<span style="color: #7f007f">        CONNECT:    (host, port) tuple</span>
+<span style="color: #7f007f">        SEND:       Data string</span>
+<span style="color: #7f007f">        RECEIVE:    None</span>
+<span style="color: #7f007f">        CLOSE:      None</span>
+<span style="color: #7f007f">    &quot;&quot;&quot;</span>
+    CONNECT, SEND, RECEIVE, CLOSE = <span style="color: #00007f">range</span>(<span style="color: #007f7f">4</span>)
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">__init__</span>(<span style="color: #00007f">self</span>, <span style="color: #00007f">type</span>, data=<span style="color: #00007f">None</span>):
+        <span style="color: #00007f">self</span>.type = <span style="color: #00007f">type</span>
+        <span style="color: #00007f">self</span>.data = data
+
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">ClientReply</span>(<span style="color: #00007f">object</span>):
+    <span style="color: #7f007f">&quot;&quot;&quot; A reply from the client thread.</span>
+<span style="color: #7f007f">        Each reply type has its associated data:</span>
+
+<span style="color: #7f007f">        ERROR:      The error string</span>
+<span style="color: #7f007f">        SUCCESS:    Depends on the command - for RECEIVE it&#39;s the received</span>
+<span style="color: #7f007f">                    data string, for others None.</span>
+<span style="color: #7f007f">    &quot;&quot;&quot;</span>
+    ERROR, SUCCESS = <span style="color: #00007f">range</span>(<span style="color: #007f7f">2</span>)
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">__init__</span>(<span style="color: #00007f">self</span>, <span style="color: #00007f">type</span>, data=<span style="color: #00007f">None</span>):
+        <span style="color: #00007f">self</span>.type = <span style="color: #00007f">type</span>
+        <span style="color: #00007f">self</span>.data = data
+
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">SocketClientThread</span>(threading.Thread):
+    <span style="color: #7f007f">&quot;&quot;&quot; Implements the threading.Thread interface (start, join, etc.) and</span>
+<span style="color: #7f007f">        can be controlled via the cmd_q Queue attribute. Replies are</span>
+<span style="color: #7f007f">        placed in the reply_q Queue attribute.</span>
+<span style="color: #7f007f">    &quot;&quot;&quot;</span>
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">__init__</span>(<span style="color: #00007f">self</span>, cmd_q=<span style="color: #00007f">None</span>, reply_q=<span style="color: #00007f">None</span>):
+        <span style="color: #00007f">super</span>(SocketClientThread, <span style="color: #00007f">self</span>).__init__()
+        <span style="color: #00007f">self</span>.cmd_q = cmd_q <span style="color: #0000aa">or</span> Queue.Queue()
+        <span style="color: #00007f">self</span>.reply_q = reply_q <span style="color: #0000aa">or</span> Queue.Queue()
+        <span style="color: #00007f">self</span>.alive = threading.Event()
+        <span style="color: #00007f">self</span>.alive.set()
+        <span style="color: #00007f">self</span>.socket = <span style="color: #00007f">None</span>
+
+        <span style="color: #00007f">self</span>.handlers = {
+            ClientCommand.CONNECT: <span style="color: #00007f">self</span>._handle_CONNECT,
+            ClientCommand.CLOSE: <span style="color: #00007f">self</span>._handle_CLOSE,
+            ClientCommand.SEND: <span style="color: #00007f">self</span>._handle_SEND,
+            ClientCommand.RECEIVE: <span style="color: #00007f">self</span>._handle_RECEIVE,
+        }
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">run</span>(<span style="color: #00007f">self</span>):
+        <span style="color: #00007f; font-weight: bold">while</span> <span style="color: #00007f">self</span>.alive.isSet():
+            <span style="color: #00007f; font-weight: bold">try</span>:
+                <span style="color: #007f00"># Queue.get with timeout to allow checking self.alive</span>
+                cmd = <span style="color: #00007f">self</span>.cmd_q.get(<span style="color: #00007f">True</span>, <span style="color: #007f7f">0.1</span>)
+                <span style="color: #00007f">self</span>.handlers[cmd.type](cmd)
+            <span style="color: #00007f; font-weight: bold">except</span> Queue.Empty <span style="color: #00007f; font-weight: bold">as</span> e:
+                <span style="color: #00007f; font-weight: bold">continue</span>
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">join</span>(<span style="color: #00007f">self</span>, timeout=<span style="color: #00007f">None</span>):
+        <span style="color: #00007f">self</span>.alive.clear()
+        threading.Thread.join(<span style="color: #00007f">self</span>, timeout)
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">_handle_CONNECT</span>(<span style="color: #00007f">self</span>, cmd):
+        <span style="color: #00007f; font-weight: bold">try</span>:
+            <span style="color: #00007f">self</span>.socket = socket.socket(
+                socket.AF_INET, socket.SOCK_STREAM)
+            <span style="color: #00007f">self</span>.socket.connect((cmd.data[<span style="color: #007f7f">0</span>], cmd.data[<span style="color: #007f7f">1</span>]))
+            <span style="color: #00007f">self</span>.reply_q.put(<span style="color: #00007f">self</span>._success_reply())
+        <span style="color: #00007f; font-weight: bold">except</span> IOError <span style="color: #00007f; font-weight: bold">as</span> e:
+            <span style="color: #00007f">self</span>.reply_q.put(<span style="color: #00007f">self</span>._error_reply(<span style="color: #00007f">str</span>(e)))
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">_handle_CLOSE</span>(<span style="color: #00007f">self</span>, cmd):
+        <span style="color: #00007f">self</span>.socket.close()
+        reply = ClientReply(ClientReply.SUCCESS)
+        <span style="color: #00007f">self</span>.reply_q.put(reply)
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">_handle_SEND</span>(<span style="color: #00007f">self</span>, cmd):
+        header = struct.pack(<span style="color: #7f007f">&#39;&lt;L&#39;</span>, <span style="color: #00007f">len</span>(cmd.data))
+        <span style="color: #00007f; font-weight: bold">try</span>:
+            <span style="color: #00007f">self</span>.socket.sendall(header + cmd.data)
+            <span style="color: #00007f">self</span>.reply_q.put(<span style="color: #00007f">self</span>._success_reply())
+        <span style="color: #00007f; font-weight: bold">except</span> IOError <span style="color: #00007f; font-weight: bold">as</span> e:
+            <span style="color: #00007f">self</span>.reply_q.put(<span style="color: #00007f">self</span>._error_reply(<span style="color: #00007f">str</span>(e)))
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">_handle_RECEIVE</span>(<span style="color: #00007f">self</span>, cmd):
+        <span style="color: #00007f; font-weight: bold">try</span>:
+            header_data = <span style="color: #00007f">self</span>._recv_n_bytes(<span style="color: #007f7f">4</span>)
+            <span style="color: #00007f; font-weight: bold">if</span> <span style="color: #00007f">len</span>(header_data) == <span style="color: #007f7f">4</span>:
+                msg_len = struct.unpack(<span style="color: #7f007f">&#39;&lt;L&#39;</span>, header_data)[<span style="color: #007f7f">0</span>]
+                data = <span style="color: #00007f">self</span>._recv_n_bytes(msg_len)
+                <span style="color: #00007f; font-weight: bold">if</span> <span style="color: #00007f">len</span>(data) == msg_len:
+                    <span style="color: #00007f">self</span>.reply_q.put(<span style="color: #00007f">self</span>._success_reply(data))
+                    <span style="color: #00007f; font-weight: bold">return</span>
+            <span style="color: #00007f">self</span>.reply_q.put(<span style="color: #00007f">self</span>._error_reply(<span style="color: #7f007f">&#39;Socket closed prematurely&#39;</span>))
+        <span style="color: #00007f; font-weight: bold">except</span> IOError <span style="color: #00007f; font-weight: bold">as</span> e:
+            <span style="color: #00007f">self</span>.reply_q.put(<span style="color: #00007f">self</span>._error_reply(<span style="color: #00007f">str</span>(e)))
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">_recv_n_bytes</span>(<span style="color: #00007f">self</span>, n):
+        <span style="color: #7f007f">&quot;&quot;&quot; Convenience method for receiving exactly n bytes from</span>
+<span style="color: #7f007f">            self.socket (assuming it&#39;s open and connected).</span>
+<span style="color: #7f007f">        &quot;&quot;&quot;</span>
+        data = <span style="color: #7f007f">&#39;&#39;</span>
+        <span style="color: #00007f; font-weight: bold">while</span> <span style="color: #00007f">len</span>(data) &lt; n:
+            chunk = <span style="color: #00007f">self</span>.socket.recv(n - <span style="color: #00007f">len</span>(data))
+            <span style="color: #00007f; font-weight: bold">if</span> chunk == <span style="color: #7f007f">&#39;&#39;</span>:
+                <span style="color: #00007f; font-weight: bold">break</span>
+            data += chunk
+        <span style="color: #00007f; font-weight: bold">return</span> data
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">_error_reply</span>(<span style="color: #00007f">self</span>, errstr):
+        <span style="color: #00007f; font-weight: bold">return</span> ClientReply(ClientReply.ERROR, errstr)
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">_success_reply</span>(<span style="color: #00007f">self</span>, data=<span style="color: #00007f">None</span>):
+        <span style="color: #00007f; font-weight: bold">return</span> ClientReply(ClientReply.SUCCESS, data)
+</pre></div>
+<p><tt class="docutils literal">SocketClientThread</tt> is the main class here. It's a Python thread that can be started and terminated (joined), and communicated with by passing it commands and getting back replies. <tt class="docutils literal">ClientCommand</tt> and <tt class="docutils literal">ClientReply</tt> are simple data classes to encapsulate these commands and replies.</p>
+<p>This code, while simple, demonstrates many patterns in Python threading and networking code. Here's a brief description of some points of interest, in no particular order:</p>
+<ul>
+<li><p class="first">The standard <tt class="docutils literal">Queue.Queue</tt> is used to pass data between the thread and the user code. <tt class="docutils literal">Queue</tt> is a great tool in a Python programmer's toolbox - I use it all the time to decouple multi-threaded code. The biggest difficulty in writing multi-threaded programs is protecting shared data. A <tt class="docutils literal">Queue</tt> makes this a non-issue, essentially transforming the sharing model into message passing, which is much simpler to use safely.</p>
+<p>You will notice that <tt class="docutils literal">SocketClientThread</tt> uses two queues, one for getting commands from the main thread, the other for passing replies. This is a common idiom that works well for most scenarios.</p>
+</li>
+<li><p class="first">In general, you can't force a thread to die in Python. If you need to manually terminate threads, they have to agree to die. The <tt class="docutils literal">alive</tt> attribute of <tt class="docutils literal">SocketClientThread</tt> demonstrates one common and safe way to achieve it. <tt class="docutils literal">alive</tt> is a <tt class="docutils literal">threading.Event</tt> - a thread-safe flag that can be cleared in the main thread by calling <tt class="docutils literal">alive.clear()</tt> (which is done in the <tt class="docutils literal">join</tt> method). The communication thread occasionally checks if this flag is still set and if not, it exits gracefully.</p>
+<p>There is a very important implementation detail here. Note how the thread's <tt class="docutils literal">run</tt> method is implemented. The loop runs while <tt class="docutils literal">alive</tt> is set, but to actually be able to execute this test, the loop can't block. So pulling commands from the command queue is done with <tt class="docutils literal">get(True, 0.1)</tt>, which means the action is blocking but with a 100 millisecond timeout. This has two benefits: on one hand, it doesn't block indefinitely, and at most 100 ms will pass until the thread notices that its <tt class="docutils literal">alive</tt> flag is clear. On the other hand, since this does block for 100 ms, the thread doesn't just spin on the CPU while waiting for commands. In fact, its CPU utilization is negligible. Note that the thread can still block and refuse to die if it's waiting on the socket's <tt class="docutils literal">recv</tt> with no data coming in.</p>
+</li>
+<li><p class="first"><tt class="docutils literal">SocketClientThread</tt> uses a TCP socket, which will transmit all data faithfully, but can do so in chunks of unpredictable size. This requires to delimit the messages somehow, to let the other side know when a message begins and ends. I'm using the length prefix technique here. Before a message is sent, its length is sent as a packed 4-byte little-endian integer. When a message is received, first 4 bytes are received to unpack the length, and then the actual message can be received since we now know how long it is.</p>
+</li>
+<li><p class="first">For the same reason as stated in the previous bullet, some care must be taken when sending and receiving data on a TCP socket. Under network load, it's not guaranteed that it will actually send or receive all the bytes you expected in one try. To handle this potential problem while sending, Python provides the <tt class="docutils literal">socket.sendall</tt> function. When receiving, it's just a bit more tricky, requiring to loop on <tt class="docutils literal">recv</tt> until the correct amount of bytes has been received.</p>
+</li>
+</ul>
+<p>To show an example of how to use <tt class="docutils literal">SocketClientThread</tt>, 
+<a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2011/socket_client_thread_sample">this code</a> also contains a sample GUI implemented with PyQt. This GUI uses the client thread to connect to a server (by default <tt class="docutils literal">localhost:50007</tt>), send &quot;hello&quot; and wait for a reply. In the mean time, the GUI keeps painting a pretty circle animation to demonstrate it's not blocked by the socket operations. To achieve this effect, the GUI employs yet another interesting idiom - a timer which is used to periodically check if <tt class="docutils literal">SocketClientThread</tt> placed new data in its reply queue, by calling <tt class="docutils literal">reply_q.get(block=False)</tt>. This timer + non-blocking <tt class="docutils literal">get</tt> combination allows effective communication between the thread and the GUI.</p>
+<p>I hope this code sample will be useful to others. If you have any questions about it, don't hesitate to ask in a comment or send me an email.</p>
+<p>P.S. As almost all samples posted here, this code is in the public domain.</p>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../../theme/js/count.js"></script>
+</body>
+</html>

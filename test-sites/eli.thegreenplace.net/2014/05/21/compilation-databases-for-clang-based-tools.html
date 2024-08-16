@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Compilation databases for Clang-based tools - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="compilation-databases-for-clang-based-tools.html"
+                       rel="bookmark"
+                       title="Permalink to Compilation databases for Clang-based tools">
+                        Compilation databases for Clang-based tools
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> May 21, 2014 at 22:09</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/compilation.html">Compilation</a>
+        ,
+    <a href="../../../tag/llvm-clang.html">LLVM & Clang</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>If you're interested in writing analysis and source-rewriting tools with Clang's libTooling, you may have run into the following ominous error while trying to invoke a tool on some code:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ clang-check -analyze div0.c
+LLVM ERROR: Could not auto-detect compilation database for file &quot;div0.c&quot;
+No compilation database found in /tmp or any parent directory
+json-compilation-database: Error while opening JSON database:
+     No such file or directory
+</pre></div>
+<p>So what's a <em>compilation database</em>, why do Clang tools need it, and how do you go about creating one?</p>
+<div class="section" id="motivation-faithfully-reproducing-a-compilation">
+<h3>Motivation - faithfully reproducing a compilation</h3>
+<p>Unlike many other source analysis tools (for example - syntax coloring in editors) which only provide approximate parsing of C++ source, Clang tools are the real thing. The same compiler frontend that's used to actually parse and compile source is used to build the AST for analysis. This is great because it means you never get false positives; but it also means the analysis tools need the complete information available to the compiler when looking at source files.</p>
+<p>When we compile code we pass all kinds of flags to the compiler. Warning flags, language-version flags, etc. But most importantly - macro definitions (<tt class="docutils literal"><span class="pre">-D</span></tt>)) and include directories (<tt class="docutils literal"><span class="pre">-I</span></tt>). Without the latter, <a class="reference external" href="../../../2011/05/02/the-context-sensitivity-of-cs-grammar-revisited/index.html">it's not even possible to parse the source code properly</a>. Historically, a &quot;classical&quot; C compiler pipeline used to run the preprocessor (<tt class="docutils literal">cpp</tt>) to take care of these before the compiler would even see the file. These days modern compilers like Clang combine preprocessing with parsing, but the fundamentals remain in place.</p>
+<p>OK then, we need to know which flags the code was compiled with. How do we pass this information to tools?</p>
+</div>
+<div class="section" id="fixed-compilation-database">
+<h3>Fixed compilation database</h3>
+<p>This is where the concept of &quot;compilation database&quot; comes in. In simple terms, it's a collection of exact compilation commands for a set of files. I'll discuss it in more detail shortly, but first a brief detour into specifying the commands in a simple way that doesn't require a special file.</p>
+<p>A &quot;fixed&quot; compilation database allows us to pass the compilation flags to a tool on the command-line, following a special token <tt class="docutils literal"><span class="pre">--</span></tt>. Here's a complete example that will demonstrate what I mean. Consider this code:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">#define DODIV(a, b) ((a) / (b))</span>
+
+<span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">test</span>(<span style="color: #00007f; font-weight: bold">int</span> z) {
+  <span style="color: #00007f; font-weight: bold">if</span> (z == <span style="color: #007f7f">0</span>) {
+<span style="color: #007f00">#ifdef FOO</span>
+    <span style="color: #00007f; font-weight: bold">return</span> DODIV(<span style="color: #007f7f">1</span>, z);
+<span style="color: #007f00">#else</span>
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">1</span> - z;
+<span style="color: #007f00">#endif</span>
+  }
+  <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">1</span> + z;
+}
+</pre></div>
+<p>Running <tt class="docutils literal"><span class="pre">clang-check</span></tt> simply as shown in the beginning of the post results in an error message. If we tack a <tt class="docutils literal"><span class="pre">--</span></tt> to the end of the command-line, however, it works:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ clang-check -analyze div0.c --
+</pre></div>
+<p>By &quot;works&quot; here I mean &quot;does not die with an error&quot;. But it doesn't report anything either, while I'd expect it to detect a division by zero in the <tt class="docutils literal">if (z == 0)</tt> case <a class="footnote-reference" href="compilation-databases-for-clang-based-tools.html#id6" id="id1">[1]</a>.</p>
+<p>This is because we didn't provide any compiler flags. So the analysis assumed the file is compiled like so:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ clang -c div0.c
+</pre></div>
+<p>Indeed, note that the &quot;divide by 0&quot; error happens only if the <tt class="docutils literal">FOO</tt> macro is defined. It's not defined here, so the analyzer is quiet <a class="footnote-reference" href="compilation-databases-for-clang-based-tools.html#id7" id="id2">[2]</a>. Let's define it then:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ $clang-check -analyze div0.c -- -DFOO
+/tmp/div0.c:6:12: warning: Division by zero
+    return DODIV(1, z);
+           ^~~~~~~~~~~
+/tmp/div0.c:1:26: note: expanded from macro &#39;DODIV&#39;
+#define DODIV(a, b) ((a) / (b))
+                     ~~~~^~~~~
+1 warning generated.
+</pre></div>
+<p>So providing compilation commands to tools on the command-line is easy. However, if you want to run analyses/transformations over larger projects for which some sort of build system already exists, you'll probably find a real compilation database more useful.</p>
+</div>
+<div class="section" id="json-compilation-database">
+<h3>JSON compilation database</h3>
+<p>When Clang tools complain they can't find a compilation database, what they actually mean is a specially named JSON file in either the same directory as the file being processed or in one of its parent directories. The <a class="reference external" href="http://clang.llvm.org/docs/JSONCompilationDatabase.html">JSON compilation database</a> is very simple. Here's an example:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">[
+{
+  <span style="color: #7f007f">&quot;directory&quot;</span>: <span style="color: #7f007f">&quot;/tmp&quot;</span>,
+  <span style="color: #7f007f">&quot;command&quot;</span>: <span style="color: #7f007f">&quot;gcc div0.c&quot;</span>,
+  <span style="color: #7f007f">&quot;file&quot;</span>: <span style="color: #7f007f">&quot;/tmp/div0.c&quot;</span>
+},
+{
+  <span style="color: #7f007f">&quot;directory&quot;</span>: <span style="color: #7f007f">&quot;/tmp&quot;</span>,
+  <span style="color: #7f007f">&quot;command&quot;</span>: <span style="color: #7f007f">&quot;gcc -DFOO div0.c&quot;</span>,
+  <span style="color: #7f007f">&quot;file&quot;</span>: <span style="color: #7f007f">&quot;/tmp/div0.c&quot;</span>
+}
+]
+</pre></div>
+<p>It's just a list of entries, each of which consists of these fields:</p>
+<ul class="simple">
+<li>File: the file to which the compilation applies</li>
+<li>Command: the exact compilation command used</li>
+<li>Directory: the directory from which the compilation is executed <a class="footnote-reference" href="compilation-databases-for-clang-based-tools.html#id8" id="id4">[3]</a></li>
+</ul>
+<p>As you can see above, there may be multiple entries for the same file. This is not a mistake - it's entirely plausible that the same file gets compiled multiple times inside a project, each time with different options.</p>
+<p>If you paste this into a file name <tt class="docutils literal">compile_commands.json</tt> and place it in the same directory (or any of its parents) with the file you want to run the analysis on, the tool will work without requiring the <tt class="docutils literal"><span class="pre">--</span></tt> part, because it can find the file in the compilation database and infer the compilation command on its own. If the tool finds more than one entry for a file, it just runs multiple times, once per entry. As far as the tool is concerned, two compilations of the same file can be entirely different due to differences in flags.</p>
+</div>
+<div class="section" id="compilation-database-for-transformation-tools">
+<h3>Compilation database for transformation tools</h3>
+<p>Source transformation tools use a compilation database similarly to analysis tools. Consider this contrived example:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">#include &lt;stdlib.h&gt;</span>
+
+<span style="color: #00007f; font-weight: bold">int</span>* foo() {
+<span style="color: #007f00">#ifdef FOO</span>
+  <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">0</span>;
+<span style="color: #007f00">#else</span>
+  <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">NULL</span>;
+<span style="color: #007f00">#endif</span>
+}
+</pre></div>
+<p>Let's save this file as <tt class="docutils literal">nullptr.cpp</tt> and run <tt class="docutils literal"><span class="pre">clang-modernize</span> <span class="pre">-use-nullptr</span></tt> on it to transform all &quot;NULL-pointer like&quot; constants to an actual <tt class="docutils literal">nullptr</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ $LLVMGH/clang-modernize -use-nullptr -summary nullptr.cpp --
+Transform: UseNullptr - Accepted: 1
+$ cat nullptr.cpp
+#include &lt;stdlib.h&gt;
+
+int* foo() {
+#ifdef FOO
+  return 0;
+#else
+  return nullptr;
+#endif
+}
+</pre></div>
+<p>As expected, <tt class="docutils literal"><span class="pre">clang-modernize</span></tt> only replaced within the <tt class="docutils literal">#else</tt> clause because <tt class="docutils literal">FOO</tt> is not defined. We already know how to define it on the command line. We also know that a hypothetical compilation database could provide two entries for <tt class="docutils literal">nullptr.cpp</tt> - one with and one without <tt class="docutils literal"><span class="pre">-DFOO</span></tt>. In this case, <tt class="docutils literal"><span class="pre">clang-modernize</span></tt> would actually run twice over the same file and replace both the <tt class="docutils literal">0</tt> and the <tt class="docutils literal">NULL</tt>.</p>
+</div>
+<div class="section" id="creating-a-compilation-database-for-your-project">
+<h3>Creating a compilation database for your project</h3>
+<p>By now we have a good understanding of how to provide Clang tools with  compilation flags for simple files. What about whole projects, however? Assume you have a large existing project and you want to run tools on its source code. You already have a build system of some sort that compiles all the files. How do you tell Clang tools which flags are suitable for any file in the project?</p>
+<p>There are a few good options. A reasonably recent version of the CMake build tool supports emitting compilation databases <a class="footnote-reference" href="compilation-databases-for-clang-based-tools.html#id9" id="id5">[4]</a>. All you need is to run the <tt class="docutils literal">cmake</tt> step with the  <tt class="docutils literal"><span class="pre">-DCMAKE_EXPORT_COMPILE_COMMANDS</span></tt> flag, and CMake will take it from there, emitting a <tt class="docutils literal">compile_commands.json</tt> file into your build directory.</p>
+<p>If you're not using CMake, there are other options. The Ninja build tool can also emit a compilation database since version 1.2, so a Gyp/Ninja combination should be good too.</p>
+<p>If your project doesn't use either, you should be able to roll your own without too much difficulty. Tools like <a class="reference external" href="https://github.com/rizsotto/Bear">Build EAR</a> may be helpful here.</p>
+<p>By the way, it should be clear that large projects is precisely the raison d'être of compilation databases. A single &quot;database&quot; file contains complete information about all the source files in the project, providing Clang tools with the compilation commands required to do their tasks.</p>
+</div>
+<div class="section" id="a-custom-compilation-database">
+<h3>A custom compilation database</h3>
+<p>It may be the case that you have a very specialized build system that already keeps some sort of record of the flags used to build each file. This is sometimes the case in large companies with monolithic code bases. For such scenarios, you'll be happy to find out that this aspect of Clang tools is fully customizable, because compilation database readers are based on a plugin system. The <tt class="docutils literal">CompilationDatabase</tt> interface (<tt class="docutils literal">clang/include/clang/Tooling/CompilationDatabase.h</tt>) is something you can implement on your own. The same header file that defines the interface also defines <tt class="docutils literal">CompilationDatabasePlugin</tt>, which can be used to link your own compilation database readers to Clang tools.</p>
+<p>The existing JSON compilation database implementation (<tt class="docutils literal">clang/lib/Tooling/JSONCompilationDatabase.cpp</tt>) is implemented as such a plugin, so there's a handy in-tree example for rolling your own.</p>
+</div>
+<div class="section" id="final-words">
+<h3>Final words</h3>
+<p>For most users of Clang tools and people interested in writing custom tools, this post contains way too much information. Most chances are you won't need all of this. But I felt it's important, for the sake of completeness, to describe in full detail what compilation databases are, and how they tie into the large picture.</p>
+<p>This will help me focus on more internals and examples of Clang tooling in future posts without worrying about compilation databases again.</p>
+<img class="align-center" src="../../../images/hline.jpg" style="width: 320px; height: 5px;" />
+<table class="docutils footnote" frame="void" id="id6" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="compilation-databases-for-clang-based-tools.html#id1">[1]</a></td><td><tt class="docutils literal"><span class="pre">clang-check</span></tt> is the Clang static analysis tool; it performs control-flow based analysis that can detect cases like this.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id7" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="compilation-databases-for-clang-based-tools.html#id2">[2]</a></td><td>To motivate this - you wouldn't want the analyzer to bug you about &quot;errors&quot; in code that's <tt class="docutils literal">#if 0</tt>-ed out, or hidden behind an <tt class="docutils literal">#ifdef</tt> for a different compiler/platform, would you?</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id8" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="compilation-databases-for-clang-based-tools.html#id4">[3]</a></td><td>Note that this is critical for things like relative paths to <tt class="docutils literal"><span class="pre">-I</span></tt> - the tool needs to know where the compiler was actually invoked from to find the directories.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id9" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="compilation-databases-for-clang-based-tools.html#id5">[4]</a></td><td>This is what the upstream LLVM project uses for its own needs.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="compilation-databases-for-clang-based-tools.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

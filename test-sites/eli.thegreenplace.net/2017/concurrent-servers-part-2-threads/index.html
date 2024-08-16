@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Concurrent Servers: Part 2 - Threads - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Concurrent Servers: Part 2 - Threads">
+                        Concurrent Servers: Part 2 - Threads
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> October 04, 2017 at 05:24</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/concurrency.html">Concurrency</a>
+        ,
+    <a href="../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../tag/python.html">Python</a>
+        ,
+    <a href="../../tag/network-programming.html">Network Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This is part 2 of a series on writing concurrent network servers. <a class="reference external" href="../concurrent-servers-part-1-introduction/index.html">Part 1</a>
+presented the protocol implemented by the server, as well as the code for a
+simple sequential server, as a baseline for the series.</p>
+<p>In this part, we're going to look at multi-threading as one approach to
+concurrency, with a bare-bones threaded server implementation in C, as well as a
+thread pool based implementation in Python.</p>
+<p>All posts in the series:</p>
+<ul class="simple">
+<li><a class="reference external" href="../concurrent-servers-part-1-introduction/index.html">Part 1 - Introduction</a></li>
+<li><a class="reference external" href="index.html">Part 2 - Threads</a></li>
+<li><a class="reference external" href="../concurrent-servers-part-3-event-driven/index.html">Part 3 - Event-driven</a></li>
+<li><a class="reference external" href="../concurrent-servers-part-4-libuv/index.html">Part 4 - libuv</a></li>
+<li><a class="reference external" href="../concurrent-servers-part-5-redis-case-study/index.html">Part 5 - Redis case study</a></li>
+<li><a class="reference external" href="../../2018/concurrent-servers-part-6-callbacks-promises-and-asyncawait/index.html">Part 6 - Callbacks, Promises and async/await</a></li>
+</ul>
+<div class="section" id="the-multi-threaded-approach-to-concurrent-server-design">
+<h2>The multi-threaded approach to concurrent server design</h2>
+<p>When discussing the performance of the sequential server in part 1, it was
+immediately obvious that a lot of compute resources are wasted while the server
+processes a client connection. Even assuming a client that sends messages
+immediately and doesn't do any waiting, network communication is still involved;
+networks tend to be millions (or more) times slower than a modern CPU, so the
+CPU running the sequential server will spend the vast majority of time in
+gloriuos boredom waiting for new socket traffic to arrive.</p>
+<p>Here's a chart showing how sequential client processing happens over time:</p>
+<img alt="Sequential client-handling flow" class="align-center" src="../../images/2017/sequential-flow.png" />
+<p>The diagrams shows 3 clients. The diamond shapes denote the client's &quot;arrival
+time&quot; (the time at which the client attempted to connect to the server). The
+black lines denote &quot;wait time&quot; (the time clients spent waiting for the server to
+actually accept their connection), and the colored bars denote actual
+&quot;processing time&quot; (the time server and client are interacting using the
+protocol). At the end of the colored bar, the client disconnects.</p>
+<p>In the diagram above, even though the green and orange clients arrived shortly
+after the blue one, they have to wait for a while until the server is done with
+the blue client. At this point the green client is accepted, while the orange
+one has to wait even longer.</p>
+<p>A multi-threaded server would launch multiple control threads, letting the OS
+manage concurrency on the CPU (and across multiple CPU cores). When a client
+connects, a thread is created to serve it, while the server is ready to accept
+more clients in the main thread. The time chart for this mode looks like the
+following:</p>
+<img alt="Concurrent client-handling flow" class="align-center" src="../../images/2017/concurrent-flow.png" />
+</div>
+<div class="section" id="one-thread-per-client-in-c-using-pthreads">
+<h2>One thread per client, in C using pthreads</h2>
+<p>Our <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/async-socket-server/threaded-server.c">first code sample</a>
+in this post is a simple &quot;one thread per client&quot; server, written in C using the
+foundational <a class="reference external" href="../../2010/04/05/pthreads-as-a-case-study-of-good-api-design.html">pthreads API</a>
+for multi-threading. Here's the main loop:</p>
+<div class="highlight"><pre><span></span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr_in</span><span class="w"> </span><span class="n">peer_addr</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kt">socklen_t</span><span class="w"> </span><span class="n">peer_addr_len</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">peer_addr</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">newsockfd</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">      </span><span class="n">accept</span><span class="p">(</span><span class="n">sockfd</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">peer_addr</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">peer_addr_len</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">newsockfd</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">perror_die</span><span class="p">(</span><span class="s">&quot;ERROR on accept&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">report_peer_connected</span><span class="p">(</span><span class="o">&amp;</span><span class="n">peer_addr</span><span class="p">,</span><span class="w"> </span><span class="n">peer_addr_len</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">pthread_t</span><span class="w"> </span><span class="n">the_thread</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">thread_config_t</span><span class="o">*</span><span class="w"> </span><span class="n">config</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">thread_config_t</span><span class="o">*</span><span class="p">)</span><span class="n">malloc</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">config</span><span class="p">));</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">config</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">die</span><span class="p">(</span><span class="s">&quot;OOM&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="n">config</span><span class="o">-&gt;</span><span class="n">sockfd</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">newsockfd</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">pthread_create</span><span class="p">(</span><span class="o">&amp;</span><span class="n">the_thread</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="n">server_thread</span><span class="p">,</span><span class="w"> </span><span class="n">config</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Detach the thread - when it&#39;s done, its resources will be cleaned up.</span>
+<span class="w">  </span><span class="c1">// Since the main thread lives forever, it will outlive the serving threads.</span>
+<span class="w">  </span><span class="n">pthread_detach</span><span class="p">(</span><span class="n">the_thread</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>And this is the <tt class="docutils literal">server_thread</tt> function:</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="nf">server_thread</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">arg</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">thread_config_t</span><span class="o">*</span><span class="w"> </span><span class="n">config</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">thread_config_t</span><span class="o">*</span><span class="p">)</span><span class="n">arg</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">sockfd</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">config</span><span class="o">-&gt;</span><span class="n">sockfd</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">free</span><span class="p">(</span><span class="n">config</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// This cast will work for Linux, but in general casting pthread_id to an</span>
+<span class="w">  </span><span class="c1">// integral type isn&#39;t portable.</span>
+<span class="w">  </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="p">)</span><span class="n">pthread_self</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Thread %lu created to handle connection with socket %d</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"></span>
+<span class="w">         </span><span class="n">sockfd</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">serve_connection</span><span class="p">(</span><span class="n">sockfd</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Thread %lu done</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">id</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The thread &quot;configuration&quot; is passed as a <tt class="docutils literal">thread_config_t</tt> structure:</p>
+<div class="highlight"><pre><span></span><span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">sockfd</span><span class="p">;</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="n">thread_config_t</span><span class="p">;</span><span class="w"></span>
+</pre></div>
+<p>The <tt class="docutils literal">pthread_create</tt> call in the main loop launches a new thread that runs the
+<tt class="docutils literal">server_thread</tt> function. This thread terminates when <tt class="docutils literal">server_thread</tt>
+returns. In turn, <tt class="docutils literal">server_thread</tt> returns when <tt class="docutils literal">serve_connection</tt> returns.
+<tt class="docutils literal">serve_connection</tt> is exactly the same function from part 1.</p>
+<p>In part 1 we used a script to launch multiple clients concurrently and observe
+how the server handles them. Let's do the same with the multithreaded server:</p>
+<div class="highlight"><pre><span></span>$ python3.6 simple-client.py  -n 3 localhost 9090
+INFO:2017-09-20 06:31:56,632:conn1 connected...
+INFO:2017-09-20 06:31:56,632:conn2 connected...
+INFO:2017-09-20 06:31:56,632:conn0 connected...
+INFO:2017-09-20 06:31:56,632:conn1 sending b&#39;^abc$de^abte$f&#39;
+INFO:2017-09-20 06:31:56,632:conn2 sending b&#39;^abc$de^abte$f&#39;
+INFO:2017-09-20 06:31:56,632:conn0 sending b&#39;^abc$de^abte$f&#39;
+INFO:2017-09-20 06:31:56,633:conn1 received b&#39;b&#39;
+INFO:2017-09-20 06:31:56,633:conn2 received b&#39;b&#39;
+INFO:2017-09-20 06:31:56,633:conn0 received b&#39;b&#39;
+INFO:2017-09-20 06:31:56,670:conn1 received b&#39;cdbcuf&#39;
+INFO:2017-09-20 06:31:56,671:conn0 received b&#39;cdbcuf&#39;
+INFO:2017-09-20 06:31:56,671:conn2 received b&#39;cdbcuf&#39;
+INFO:2017-09-20 06:31:57,634:conn1 sending b&#39;xyz^123&#39;
+INFO:2017-09-20 06:31:57,634:conn2 sending b&#39;xyz^123&#39;
+INFO:2017-09-20 06:31:57,634:conn1 received b&#39;234&#39;
+INFO:2017-09-20 06:31:57,634:conn0 sending b&#39;xyz^123&#39;
+INFO:2017-09-20 06:31:57,634:conn2 received b&#39;234&#39;
+INFO:2017-09-20 06:31:57,634:conn0 received b&#39;234&#39;
+INFO:2017-09-20 06:31:58,635:conn1 sending b&#39;25$^ab0000$abab&#39;
+INFO:2017-09-20 06:31:58,635:conn2 sending b&#39;25$^ab0000$abab&#39;
+INFO:2017-09-20 06:31:58,636:conn1 received b&#39;36bc1111&#39;
+INFO:2017-09-20 06:31:58,636:conn2 received b&#39;36bc1111&#39;
+INFO:2017-09-20 06:31:58,637:conn0 sending b&#39;25$^ab0000$abab&#39;
+INFO:2017-09-20 06:31:58,637:conn0 received b&#39;36bc1111&#39;
+INFO:2017-09-20 06:31:58,836:conn2 disconnecting
+INFO:2017-09-20 06:31:58,836:conn1 disconnecting
+INFO:2017-09-20 06:31:58,837:conn0 disconnecting
+</pre></div>
+<p>Indeed, all clients connected at the same time, and their communication with
+the server occurs concurrently.</p>
+</div>
+<div class="section" id="challenges-with-one-thread-per-client">
+<h2>Challenges with one thread per client</h2>
+<p>Even though threads are fairly efficient in terms of resource usage on modern
+OSes, the approach outlined in the previous section can still present challenges
+with some workloads.</p>
+<p>Imagine a scenario where many clients are connecting simultaneously, and some
+of the sessions are long-lived. This means that many threads may be active at
+the same time in the server. Too many threads can consume a large amount of
+memory and CPU time just for the context switching <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>. An alternative way to
+look at it is as a security problem: this design makes it the server an easy
+target for a <a class="reference external" href="https://en.wikipedia.org/wiki/Denial-of-service_attack">DoS attack</a> - connect a few
+100,000s of clients at the same time and let them all sit idle - this will
+likely kill the server due to excessive resource usage.</p>
+<p>A larger problem occurs when there's a non-trivial amount of CPU-bound
+computation the server has to do for each client. In this case, swamping the
+server  is considerably easier - just a few dozen clients can bring a server to
+its knees.</p>
+<p>For these reasons, it's prudent the do some <em>rate-limiting</em> on the number of
+concurrent clients handled by a multi-threaded server. There's a number of ways
+to do this. The simplest that comes to mind is simply count the number of
+clients currently connected and restrict that number to some quantity (that was
+determined by careful benchmarking, hopefully). A variation on this approach
+that's very popular in concurrent application design is using a <em>thread pool</em>.</p>
+</div>
+<div class="section" id="thread-pools">
+<h2>Thread pools</h2>
+<p>The idea of a <a class="reference external" href="https://en.wikipedia.org/wiki/Thread_pool">thread pool</a> is
+simple, yet powerful. The server creates a number of working threads that all
+expect to get tasks from some queue. This is the &quot;pool&quot;. Then, each client
+connection is dispatched as a task to the pool. As long as there's an idle
+thread in the pool, it's handed the task. If all the threads in the pool are
+currently busy, the server blocks until the pool accepts the task (which happens
+after one of the busy threads finished processing its current task and went back
+to an idle state).</p>
+<p>Here's a diagram showing a pool of 4 threads, each processing a task. Tasks
+(client connections in our case) are waiting until one of the threads in the
+pool is ready to accept new tasks.</p>
+<object class="align-center" data="../../images/2017/threadpooldiagram.svg" type="image/svg+xml">Thread pool diagram</object>
+<p>It should be fairly obvious that the thread pool approach provides a
+rate-limiting mechanism in its very definition. We can decide ahead of time how
+many threads we want our server to have. Then, this is the maximal number of
+clients processed concurrently - the rest are waiting until one of the threads
+becomes free. If we have 8 threads in the pool, 8 is the maximal number of
+concurrent clients the server handles - even if thousands are attempting to
+connect simultaneously.</p>
+<p>How do we decide how many threads should be in the pool? By a careful analysis
+of the problem domain, benchmarking, experimentation and also by the HW we have.
+If we have a single-core cloud instance that's one answer, if we have a 100-core
+dual socket server available, the answer is different. Picking the
+thread pool size can also be done dynamically at runtime based on load - I'll
+touch upon this topic in future posts in this series.</p>
+<p>Servers that use thread pools manifest <em>graceful degradation</em> in the face of
+high load - clients are accepted at some steady rate, potentially slower than
+their rate of arrival for some periods of time; that said, no matter how many
+clients are trying to connect simultaneously, the server will remain responsive
+and will just churn through the backlog of clients to its best ability. Contrast
+this with the one-thread-per-client server which can merrily accept a large
+number of clients until it gets overloaded, at which point it's likely to either
+crash or start working very slowly for <em>all</em> processed clients due to resource
+exhaustion (such as virtual memory thrashing).</p>
+</div>
+<div class="section" id="using-a-thread-pool-for-our-network-server">
+<h2>Using a thread pool for our network server</h2>
+<p>For <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/async-socket-server/threadpool-server.py">this variation of the server</a>
+I've switched to Python, which comes with a robust implementation of a thread
+pool in the standard library (<tt class="docutils literal">ThreadPoolExecutor</tt> from the
+<tt class="docutils literal">concurrent.futures</tt> module) <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.</p>
+<p>This server creates a thread pool, then loops to accept new clients on the main
+listening socket. Each connected client is dispatched into the pool with
+<tt class="docutils literal">submit</tt>:</p>
+<div class="highlight"><pre><span></span><span class="n">pool</span> <span class="o">=</span> <span class="n">ThreadPoolExecutor</span><span class="p">(</span><span class="n">args</span><span class="o">.</span><span class="n">n</span><span class="p">)</span>
+<span class="n">sockobj</span> <span class="o">=</span> <span class="n">socket</span><span class="o">.</span><span class="n">socket</span><span class="p">(</span><span class="n">socket</span><span class="o">.</span><span class="n">AF_INET</span><span class="p">,</span> <span class="n">socket</span><span class="o">.</span><span class="n">SOCK_STREAM</span><span class="p">)</span>
+<span class="n">sockobj</span><span class="o">.</span><span class="n">setsockopt</span><span class="p">(</span><span class="n">socket</span><span class="o">.</span><span class="n">SOL_SOCKET</span><span class="p">,</span> <span class="n">socket</span><span class="o">.</span><span class="n">SO_REUSEADDR</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+<span class="n">sockobj</span><span class="o">.</span><span class="n">bind</span><span class="p">((</span><span class="s1">&#39;localhost&#39;</span><span class="p">,</span> <span class="n">args</span><span class="o">.</span><span class="n">port</span><span class="p">))</span>
+<span class="n">sockobj</span><span class="o">.</span><span class="n">listen</span><span class="p">(</span><span class="mi">15</span><span class="p">)</span>
+
+<span class="k">try</span><span class="p">:</span>
+    <span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
+        <span class="n">client_socket</span><span class="p">,</span> <span class="n">client_address</span> <span class="o">=</span> <span class="n">sockobj</span><span class="o">.</span><span class="n">accept</span><span class="p">()</span>
+        <span class="n">pool</span><span class="o">.</span><span class="n">submit</span><span class="p">(</span><span class="n">serve_connection</span><span class="p">,</span> <span class="n">client_socket</span><span class="p">,</span> <span class="n">client_address</span><span class="p">)</span>
+<span class="k">except</span> <span class="ne">KeyboardInterrupt</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+    <span class="nb">print</span><span class="p">(</span><span class="n">e</span><span class="p">)</span>
+    <span class="n">sockobj</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+</pre></div>
+<p>The <tt class="docutils literal">serve_connection</tt> function is very similar to its C counterpart, serving
+a single client until the client disconnects, while following our protocol:</p>
+<div class="highlight"><pre><span></span><span class="n">ProcessingState</span> <span class="o">=</span> <span class="n">Enum</span><span class="p">(</span><span class="s1">&#39;ProcessingState&#39;</span><span class="p">,</span> <span class="s1">&#39;WAIT_FOR_MSG IN_MSG&#39;</span><span class="p">)</span>
+
+
+<span class="k">def</span> <span class="nf">serve_connection</span><span class="p">(</span><span class="n">sockobj</span><span class="p">,</span> <span class="n">client_address</span><span class="p">):</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;</span><span class="si">{0}</span><span class="s1"> connected&#39;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">client_address</span><span class="p">))</span>
+    <span class="n">sockobj</span><span class="o">.</span><span class="n">sendall</span><span class="p">(</span><span class="sa">b</span><span class="s1">&#39;*&#39;</span><span class="p">)</span>
+    <span class="n">state</span> <span class="o">=</span> <span class="n">ProcessingState</span><span class="o">.</span><span class="n">WAIT_FOR_MSG</span>
+
+    <span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">buf</span> <span class="o">=</span> <span class="n">sockobj</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="mi">1024</span><span class="p">)</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="n">buf</span><span class="p">:</span>
+                <span class="k">break</span>
+        <span class="k">except</span> <span class="ne">IOError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="k">break</span>
+        <span class="k">for</span> <span class="n">b</span> <span class="ow">in</span> <span class="n">buf</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">state</span> <span class="o">==</span> <span class="n">ProcessingState</span><span class="o">.</span><span class="n">WAIT_FOR_MSG</span><span class="p">:</span>
+                <span class="k">if</span> <span class="n">b</span> <span class="o">==</span> <span class="nb">ord</span><span class="p">(</span><span class="sa">b</span><span class="s1">&#39;^&#39;</span><span class="p">):</span>
+                    <span class="n">state</span> <span class="o">=</span> <span class="n">ProcessingState</span><span class="o">.</span><span class="n">IN_MSG</span>
+            <span class="k">elif</span> <span class="n">state</span> <span class="o">==</span> <span class="n">ProcessingState</span><span class="o">.</span><span class="n">IN_MSG</span><span class="p">:</span>
+                <span class="k">if</span> <span class="n">b</span> <span class="o">==</span> <span class="nb">ord</span><span class="p">(</span><span class="sa">b</span><span class="s1">&#39;$&#39;</span><span class="p">):</span>
+                    <span class="n">state</span> <span class="o">=</span> <span class="n">ProcessingState</span><span class="o">.</span><span class="n">WAIT_FOR_MSG</span>
+                <span class="k">else</span><span class="p">:</span>
+                    <span class="n">sockobj</span><span class="o">.</span><span class="n">send</span><span class="p">(</span><span class="nb">bytes</span><span class="p">([</span><span class="n">b</span> <span class="o">+</span> <span class="mi">1</span><span class="p">]))</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="k">assert</span> <span class="kc">False</span>
+
+    <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;</span><span class="si">{0}</span><span class="s1"> done&#39;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">client_address</span><span class="p">))</span>
+    <span class="n">sys</span><span class="o">.</span><span class="n">stdout</span><span class="o">.</span><span class="n">flush</span><span class="p">()</span>
+    <span class="n">sockobj</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+</pre></div>
+<p>Let's see how the thread pool size affects the blocking behavior for multiple
+concurrent clients. For demonstration purposes, I'll run the threadpool server
+with a pool size of 2 (only two threads are created to service clients):</p>
+<div class="highlight"><pre><span></span>$ python3.6 threadpool-server.py -n 2
+</pre></div>
+<p>And in a separate terminal, let's run the client simulator again, with 3
+concurrent clients:</p>
+<div class="highlight"><pre><span></span>$ python3.6 simple-client.py  -n 3 localhost 9090
+INFO:2017-09-22 05:58:52,815:conn1 connected...
+INFO:2017-09-22 05:58:52,827:conn0 connected...
+INFO:2017-09-22 05:58:52,828:conn1 sending b&#39;^abc$de^abte$f&#39;
+INFO:2017-09-22 05:58:52,828:conn0 sending b&#39;^abc$de^abte$f&#39;
+INFO:2017-09-22 05:58:52,828:conn1 received b&#39;b&#39;
+INFO:2017-09-22 05:58:52,828:conn0 received b&#39;b&#39;
+INFO:2017-09-22 05:58:52,867:conn1 received b&#39;cdbcuf&#39;
+INFO:2017-09-22 05:58:52,867:conn0 received b&#39;cdbcuf&#39;
+INFO:2017-09-22 05:58:53,829:conn1 sending b&#39;xyz^123&#39;
+INFO:2017-09-22 05:58:53,829:conn0 sending b&#39;xyz^123&#39;
+INFO:2017-09-22 05:58:53,830:conn1 received b&#39;234&#39;
+INFO:2017-09-22 05:58:53,831:conn0 received b&#39;2&#39;
+INFO:2017-09-22 05:58:53,831:conn0 received b&#39;34&#39;
+INFO:2017-09-22 05:58:54,831:conn1 sending b&#39;25$^ab0000$abab&#39;
+INFO:2017-09-22 05:58:54,832:conn1 received b&#39;36bc1111&#39;
+INFO:2017-09-22 05:58:54,832:conn0 sending b&#39;25$^ab0000$abab&#39;
+INFO:2017-09-22 05:58:54,833:conn0 received b&#39;36bc1111&#39;
+INFO:2017-09-22 05:58:55,032:conn1 disconnecting
+INFO:2017-09-22 05:58:55,032:conn2 connected...
+INFO:2017-09-22 05:58:55,033:conn2 sending b&#39;^abc$de^abte$f&#39;
+INFO:2017-09-22 05:58:55,033:conn0 disconnecting
+INFO:2017-09-22 05:58:55,034:conn2 received b&#39;b&#39;
+INFO:2017-09-22 05:58:55,071:conn2 received b&#39;cdbcuf&#39;
+INFO:2017-09-22 05:58:56,036:conn2 sending b&#39;xyz^123&#39;
+INFO:2017-09-22 05:58:56,036:conn2 received b&#39;234&#39;
+INFO:2017-09-22 05:58:57,037:conn2 sending b&#39;25$^ab0000$abab&#39;
+INFO:2017-09-22 05:58:57,038:conn2 received b&#39;36bc1111&#39;
+INFO:2017-09-22 05:58:57,238:conn2 disconnecting
+</pre></div>
+<p>Recall the behavior of previously discussed servers:</p>
+<ol class="arabic simple">
+<li>In the sequential server, all connections were serialized. One finished, and
+only then the next started.</li>
+<li>In the thread-per-client server earlier in this post, all connections wer
+accepted and serviced concurrently.</li>
+</ol>
+<p>Here we see another possibility: two connections are serviced concurrently, and
+only when one of them is done the third is admitted. This is a direct result of
+the thread pool size set to 2. For a more realistic use case we'd set the thread
+pool size to much higher, depending on the machine and the exact protocol. This
+buffering behavior of thread pools is well understood - I've written about it
+more in detail <a class="reference external" href="../clojure-concurrency-and-blocking-with-coreasync/index.html">just a few months ago</a>
+in the context of Clojure's <tt class="docutils literal">core.async</tt> module.</p>
+</div>
+<div class="section" id="summary-and-next-steps">
+<h2>Summary and next steps</h2>
+<p>This post discusses multi-threading as a means of concurrency in network
+servers. The one-thread-per-client approach is presented for an initial
+discussion, but this method is not common in practice since it's a security
+hazard.</p>
+<p>Thread pools are much more common, and most popular programming languages have
+solid implementations (for some, like Python, it's in the standard library). The
+thread pool server presented here doesn't suffer from the problems of
+one-thread-per-client.</p>
+<p>However, threads are not the only way to handle multiple clients concurrently.
+In the next post we're going to look at some solutions using <em>asynchronous</em>, or
+<em>event-driven</em> programming.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>To be fair, modern Linux kernels can tolerate a significant number of
+concurrent threads - as long as these threads are mostly blocked on I/O,
+of course. <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/async-socket-server/threadspammer.c">Here's a sample program</a>
+that launches a configurable number of threads that sleep in a loop,
+waking up every 50 ms. On my 4-core Linux machine I can easily launch
+10000 threads; even though these threads sleep almost all the time, they
+still consume between one and two cores for the context switching. Also,
+they occupy 80 GB of virtual memory (8 MB is the default per-thread stack
+size for Linux). More realistic threads that actually use memory and not
+just sleep in a loop can therefore exhaust the physical memory of a
+machine fairly quickly.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>Implementing a thread pool from scratch is a fun exercise, but I'll leave
+it for another day. I've written about hand-rolled <a class="reference external" href="../../2011/12/27/python-threads-communication-and-stopping.html">thread pools for
+specific tasks</a>
+in the past. That's in Python; doing it in C would be more challenging,
+but shouldn't take more than a few of hours for an experienced
+programmer.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

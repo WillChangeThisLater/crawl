@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Position Independent Code (PIC) in shared libraries on x64 - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="position-independent-code-pic-in-shared-libraries-on-x64.html"
+                       rel="bookmark"
+                       title="Permalink to Position Independent Code (PIC) in shared libraries on x64">
+                        Position Independent Code (PIC) in shared libraries on x64
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> November 11, 2011 at 15:10</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/assembly.html">Assembly</a>
+        ,
+    <a href="../../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../../tag/linkers-and-loaders.html">Linkers and loaders</a>
+        ,
+    <a href="../../../tag/linux.html">Linux</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p><a class="reference external" href="../03/position-independent-code-pic-in-shared-libraries/index.html">The previous article</a> explained how position independent code (PIC) works, with code compiled for the x86 architecture as an example. I promised to cover PIC on x64 <a class="footnote-reference" href="position-independent-code-pic-in-shared-libraries-on-x64.html#id8" id="id1">[1]</a> in a separate article, so here we are. This article will go into much less detail, since it assumes an understanding of how PIC works in theory. In general, the idea is similar for both platforms, but some details differ because of unique features of each architecture.</p>
+<div class="section" id="rip-relative-addressing">
+<h3>RIP-relative addressing</h3>
+<p>On x86, while function references (with the <tt class="docutils literal">call</tt> instruction) use relative offsets from the instruction pointer, data references (with the <tt class="docutils literal">mov</tt> instruction) only support absolute addresses. As we've seen in the previous article, this makes PIC code somewhat less efficient, since PIC by its nature requires making all offsets IP-relative; absolute addresses and position independence don't go well together.</p>
+<p>x64 fixes that, with a new &quot;RIP-relative addressing mode&quot;, which is the default for all 64-bit <tt class="docutils literal">mov</tt> instructions that reference memory (it's used for other instructions as well, such as <tt class="docutils literal">lea</tt>). A quote from the &quot;Intel Architecture Manual vol 2a&quot;:</p>
+<blockquote>
+A new addressing form, RIP-relative (relative instruction-pointer) addressing, is implemented in 64-bit mode. An effective address is formed by adding displacement to the 64-bit RIP of the next instruction.</blockquote>
+<p>The displacement used in RIP-relative mode is 32 bits in size. Since it should be useful for both positive and negative offsets, roughly +/- 2GB is the maximal offset from RIP supported by this addressing mode.</p>
+</div>
+<div class="section" id="x64-pic-with-data-references-an-example">
+<h3>x64 PIC with data references - an example</h3>
+<p>For easier comparison, I will use the same C source as in the data reference example of the previous article:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">int</span> myglob = <span style="color: #007f7f">42</span>;
+
+<span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">ml_func</span>(<span style="color: #00007f; font-weight: bold">int</span> a, <span style="color: #00007f; font-weight: bold">int</span> b)
+{
+    <span style="color: #00007f; font-weight: bold">return</span> myglob + a + b;
+}
+</pre></div>
+<p>Let's look at the disassembly of <tt class="docutils literal">ml_func</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">00000000000005ec &lt;ml_func&gt;:
+ 5ec:   55                      push   rbp
+ 5ed:   48 89 e5                mov    rbp,rsp
+ 5f0:   89 7d fc                mov    DWORD PTR [rbp-0x4],edi
+ 5f3:   89 75 f8                mov    DWORD PTR [rbp-0x8],esi
+ 5f6:   48 8b 05 db 09 20 00    mov    rax,QWORD PTR [rip+0x2009db]
+ 5fd:   8b 00                   mov    eax,DWORD PTR [rax]
+ 5ff:   03 45 fc                add    eax,DWORD PTR [rbp-0x4]
+ 602:   03 45 f8                add    eax,DWORD PTR [rbp-0x8]
+ 605:   c9                      leave
+ 606:   c3                      ret
+</pre></div>
+<p>The most interesting instruction here is at <tt class="docutils literal">0x5f6</tt>: it places the address of <tt class="docutils literal">myglobal</tt> into <tt class="docutils literal">rax</tt>, by referencing an entry in the GOT. As we can see, it uses RIP relative addressing. Since it's relative to the address of the next instruction, what we actually get is <tt class="docutils literal">0x5fd + 0x2009db = 0x200fd8</tt>. So the GOT entry holding the address of <tt class="docutils literal">myglob</tt> is at <tt class="docutils literal">0x200fd8</tt>. Let's check if it makes sense:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ readelf -S libmlpic_dataonly.so
+There are 35 section headers, starting at offset 0x13a8:
+
+Section Headers:
+  [Nr] Name              Type             Address           Offset
+       Size              EntSize          Flags  Link  Info  Align
+
+[...]
+  [20] .got              PROGBITS         0000000000200fc8  00000fc8
+       0000000000000020  0000000000000008  WA       0     0     8
+[...]
+</pre></div>
+<p>GOT starts at <tt class="docutils literal">0x200fc8</tt>, so <tt class="docutils literal">myglob</tt> is in its third entry. We can also see the relocation inserted for the GOT reference to <tt class="docutils literal">myglob</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ readelf -r libmlpic_dataonly.so
+
+Relocation section &#39;.rela.dyn&#39; at offset 0x450 contains 5 entries:
+  Offset          Info           Type           Sym. Value    Sym. Name + Addend
+[...]
+000000200fd8  000500000006 R_X86_64_GLOB_DAT 0000000000201010 myglob + 0
+[...]
+</pre></div>
+<p>Indeed, a relocation entry for <tt class="docutils literal">0x200fd8</tt> telling the dynamic linker to place the address of <tt class="docutils literal">myglob</tt> into it once the final address of this symbol is known.</p>
+<p>So it should be quite clear how the address of <tt class="docutils literal">myglob</tt> is obtained in the code. The next instruction in the disassembly (at <tt class="docutils literal">0x5fd</tt>) then dereferences the address to get the value of <tt class="docutils literal">myglob</tt> into <tt class="docutils literal">eax</tt> <a class="footnote-reference" href="position-independent-code-pic-in-shared-libraries-on-x64.html#id9" id="id2">[2]</a>.</p>
+</div>
+<div class="section" id="x64-pic-with-function-calls-an-example">
+<h3>x64 PIC with function calls - an example</h3>
+<p>Now let's see how function calls work with PIC code on x64. Once again, we'll use the same example from the previous article:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">int</span> myglob = <span style="color: #007f7f">42</span>;
+
+<span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">ml_util_func</span>(<span style="color: #00007f; font-weight: bold">int</span> a)
+{
+    <span style="color: #00007f; font-weight: bold">return</span> a + <span style="color: #007f7f">1</span>;
+}
+
+<span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">ml_func</span>(<span style="color: #00007f; font-weight: bold">int</span> a, <span style="color: #00007f; font-weight: bold">int</span> b)
+{
+    <span style="color: #00007f; font-weight: bold">int</span> c = b + ml_util_func(a);
+    myglob += c;
+    <span style="color: #00007f; font-weight: bold">return</span> b + myglob;
+}
+</pre></div>
+<p>Disassembling <tt class="docutils literal">ml_func</tt>, we get:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">000000000000064b &lt;ml_func&gt;:
+ 64b:   55                      push   rbp
+ 64c:   48 89 e5                mov    rbp,rsp
+ 64f:   48 83 ec 20             sub    rsp,0x20
+ 653:   89 7d ec                mov    DWORD PTR [rbp-0x14],edi
+ 656:   89 75 e8                mov    DWORD PTR [rbp-0x18],esi
+ 659:   8b 45 ec                mov    eax,DWORD PTR [rbp-0x14]
+ 65c:   89 c7                   mov    edi,eax
+ 65e:   e8 fd fe ff ff          call   560 &lt;ml_util_func@plt&gt;
+ [... snip more code ...]
+</pre></div>
+<p>The call is, as before, to <tt class="docutils literal">ml_util_func&#64;plt</tt>. Let's see what's there:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">0000000000000560 &lt;ml_util_func@plt&gt;:
+ 560:   ff 25 a2 0a 20 00       jmp    QWORD PTR [rip+0x200aa2]
+ 566:   68 01 00 00 00          push   0x1
+ 56b:   e9 d0 ff ff ff          jmp    540 &lt;_init+0x18&gt;
+</pre></div>
+<p>So, the GOT entry holding the actual address of <tt class="docutils literal">ml_util_func</tt> is at <tt class="docutils literal">0x200aa2 + 0x566 = 0x201008</tt>.</p>
+<p>And there's a relocation for it, as expected:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ readelf -r libmlpic.so
+
+Relocation section &#39;.rela.dyn&#39; at offset 0x480 contains 5 entries:
+[...]
+
+Relocation section &#39;.rela.plt&#39; at offset 0x4f8 contains 2 entries:
+  Offset          Info           Type           Sym. Value    Sym. Name + Addend
+[...]
+000000201008  000600000007 R_X86_64_JUMP_SLO 000000000000063c ml_util_func + 0
+</pre></div>
+</div>
+<div class="section" id="performance-implications">
+<h3>Performance implications</h3>
+<p>In both examples, it can be seen that PIC on x64 requires less instructions than on x86. On x86, the GOT address is loaded into some base register (<tt class="docutils literal">ebx</tt> by convention) in two steps - first the address of the instruction is obtained with a special function call, and then the offset to GOT is added. Both steps aren't required on x64, since the relative offset to GOT is known to the linker and can simply be encoded in the instruction itself with RIP relative addressing.</p>
+<p>When calling a function, there's also no need to prepare the GOT address in <tt class="docutils literal">ebx</tt> for the trampoline, as the x86 code does, since the trampoline just accesses its GOT entry directly through RIP-relative addressing.</p>
+<p>So PIC on x64 still requires extra instructions when compared to non-PIC code, but the additional cost is smaller. The indirect cost of tying down a register to use as the GOT pointer (which is painful on x86) is also gone, since no such register is needed with RIP-relative addressing <a class="footnote-reference" href="position-independent-code-pic-in-shared-libraries-on-x64.html#id10" id="id3">[3]</a>. All in all, x64 PIC results in a much smaller performance hit than on x86, making it much more attractive. So attractive, in fact, that it's the default method for writing shared libraries for this architecture.</p>
+</div>
+<div class="section" id="extra-credit-non-pic-code-on-x64">
+<h3>Extra credit: Non-PIC code on x64</h3>
+<p>Not only does <tt class="docutils literal">gcc</tt> encourage you to use PIC for shared libraries on x64, it requires it by default. For instance, if we compile the first example without <tt class="docutils literal"><span class="pre">-fpic</span></tt> <a class="footnote-reference" href="position-independent-code-pic-in-shared-libraries-on-x64.html#id11" id="id4">[4]</a> and then try to link it into a shared library (with <tt class="docutils literal"><span class="pre">-shared</span></tt>), we'll get an error from the linker, something like this:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">/usr/bin/ld: ml_nopic_dataonly.o: relocation R_X86_64_PC32 against symbol `myglob&#39; can not be used when making a shared object; recompile with -fPIC
+/usr/bin/ld: final link failed: Bad value
+collect2: ld returned 1 exit status
+</pre></div>
+<p>What's going on? Let's look at the disassembly of <tt class="docutils literal">ml_nopic_dataonly.o</tt> <a class="footnote-reference" href="position-independent-code-pic-in-shared-libraries-on-x64.html#id12" id="id5">[5]</a>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">0000000000000000 &lt;ml_func&gt;:
+   0:   55                      push   rbp
+   1:   48 89 e5                mov    rbp,rsp
+   4:   89 7d fc                mov    DWORD PTR [rbp-0x4],edi
+   7:   89 75 f8                mov    DWORD PTR [rbp-0x8],esi
+   a:   8b 05 00 00 00 00       mov    eax,DWORD PTR [rip+0x0]
+  10:   03 45 fc                add    eax,DWORD PTR [rbp-0x4]
+  13:   03 45 f8                add    eax,DWORD PTR [rbp-0x8]
+  16:   c9                      leave
+  17:   c3                      ret
+</pre></div>
+<p>Note how <tt class="docutils literal">myglob</tt> is accessed here, in instruction at address <tt class="docutils literal">0xa</tt>. It expects the linker to patch in a relocation to the actual location of <tt class="docutils literal">myglob</tt> into the operand of the instruction (so no GOT redirection is required):</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ readelf -r ml_nopic_dataonly.o
+
+Relocation section &#39;.rela.text&#39; at offset 0xb38 contains 1 entries:
+  Offset          Info           Type           Sym. Value    Sym. Name + Addend
+00000000000c  000f00000002 R_X86_64_PC32     0000000000000000 myglob - 4
+[...]
+</pre></div>
+<p>Here is the <tt class="docutils literal">R_X86_64_PC32</tt> relocation the linker was complaining about. It just can't link an object with such relocation into a shared library. Why? Because the displacement of the <tt class="docutils literal">mov</tt> (the part that's added to <tt class="docutils literal">rip</tt>) must fit in 32 bits, and when a code gets into a shared library, we just can't know in advance that 32 bits will be enough. After all, this is a full 64-bit architecture, with a vast address space. The symbol may eventually be found in some shared library that's farther away from the reference than 32 bits will allow to reference. This makes <tt class="docutils literal">R_X86_64_PC32</tt> an invalid relocation for shared libraries on x64.</p>
+<p>But can we still somehow create non-PIC code on x64? Yes! We should be instructing the compiler to use the &quot;large code model&quot;, by adding the <tt class="docutils literal"><span class="pre">-mcmodel=large</span></tt> flag. The topic of code models is interesting, but explaining it would just take us too far from the real goal of this article <a class="footnote-reference" href="position-independent-code-pic-in-shared-libraries-on-x64.html#id13" id="id6">[6]</a>. So I'll just say briefly that a code model is a kind of agreement between the programmer and the compiler, where the programmer makes a certain promise to the compiler about the size of offsets the program will be using. In exchange, the compiler can generate better code.</p>
+<p>It turns out that to make the compiler generate non-PIC code on x64 that actually pleases the linker, only the large code model is suitable, because it's the least restrictive. Remember how I explained why the simple relocation isn't good enough on x64, for fear of an offset which will get farther than 32 bits away during linking? Well, the large code model basically gives up on all offset assumptions and uses the largest 64-bit offsets for all its data references. This makes load-time relocations always safe, and enables non-PIC code generation on x64. Let's see the disassembly of the first example compiled without <tt class="docutils literal"><span class="pre">-fpic</span></tt> and with <tt class="docutils literal"><span class="pre">-mcmodel=large</span></tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">0000000000000000 &lt;ml_func&gt;:
+   0:   55                      push   rbp
+   1:   48 89 e5                mov    rbp,rsp
+   4:   89 7d fc                mov    DWORD PTR [rbp-0x4],edi
+   7:   89 75 f8                mov    DWORD PTR [rbp-0x8],esi
+   a:   48 b8 00 00 00 00 00    mov    rax,0x0
+  11:   00 00 00
+  14:   8b 00                   mov    eax,DWORD PTR [rax]
+  16:   03 45 fc                add    eax,DWORD PTR [rbp-0x4]
+  19:   03 45 f8                add    eax,DWORD PTR [rbp-0x8]
+  1c:   c9                      leave
+  1d:   c3                      ret
+</pre></div>
+<p>The instruction at address <tt class="docutils literal">0xa</tt> places the address of <tt class="docutils literal">myglob</tt> into <tt class="docutils literal">rax</tt>. Note that its argument is currently 0, which tells us to expect a relocation. Note also that it has a full 64-bit address argument. Moreover, the argument is absolute and not RIP-relative <a class="footnote-reference" href="position-independent-code-pic-in-shared-libraries-on-x64.html#id14" id="id7">[7]</a>. Note also that two instructions are actually required here to get the <em>value</em> of <tt class="docutils literal">myglob</tt> into <tt class="docutils literal">eax</tt>. This is one reason why the large code model is less efficient than the alternatives.</p>
+<p>Now let's see the relocations:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ readelf -r ml_nopic_dataonly.o
+
+Relocation section &#39;.rela.text&#39; at offset 0xb40 contains 1 entries:
+  Offset          Info           Type           Sym. Value    Sym. Name + Addend
+00000000000c  000f00000001 R_X86_64_64       0000000000000000 myglob + 0
+[...]
+</pre></div>
+<p>Note the relocation type has changed to <tt class="docutils literal">R_X86_64_64</tt>, which is an absolute relocation that can have a 64-bit value. It's acceptable by the linker, which will now gladly agree to link this object file into a shared library.</p>
+<p>Some judgmental thinking may bring you to ponder why the compiler generated code that isn't suitable for load-time relocation by default. The answer to this is simple. Don't forget that code also tends to get directly linked into executables, which don't require load-time relocations at all. Therefore, by default the compiler assumes the small code model to generate the most efficient code. If you know your code is going to get into a shared library, and you don't want PIC, then just tell it to use the large code model explicitly. I think <tt class="docutils literal">gcc</tt>'s behavior makes sense here.</p>
+<p>Another thing to think about is why there are no problems with PIC code using the small code model. The reason is that the GOT is always located in the same shared library as the code that references it, and unless a single shared library is big enough for a 32-bit address space, there should be no problems addressing the PIC with 32-bit RIP-relative offsets. Such huge shared libraries are unlikely, but in case you're working on one, the AMD64 ABI has a &quot;large PIC code model&quot; for this purpose.</p>
+</div>
+<div class="section" id="conclusion">
+<h3>Conclusion</h3>
+<p>This article complements its predecessor by showing how PIC works on the x64 architecture. This architecture has a new addressing mode that helps PIC code be faster, and thus makes it more desirable for shared libraries than on x86, where the cost is higher. Since x64 is currently the most popular architecture used in servers, desktops and laptops, this is important to know. Therefore, I tried to focus on additional aspects of compiling code into shared libraries, such as non-PIC code. If you have any questions and/or suggestions on future directions to explore, please let me know in the comments or by email.</p>
+<img class="align-center" src="../../../images/hline.jpg" style="width: 320px; height: 5px;" />
+<table class="docutils footnote" frame="void" id="id8" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="position-independent-code-pic-in-shared-libraries-on-x64.html#id1">[1]</a></td><td>As always, I'm using x64 as a convenient short name for the architecture known as x86-64, AMD64 or Intel 64.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id9" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="position-independent-code-pic-in-shared-libraries-on-x64.html#id2">[2]</a></td><td>Into <tt class="docutils literal">eax</tt> and not <tt class="docutils literal">rax</tt> because the type of <tt class="docutils literal">myglob</tt> is <tt class="docutils literal">int</tt>, which is still 32-bit on x64.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id10" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="position-independent-code-pic-in-shared-libraries-on-x64.html#id3">[3]</a></td><td>By the way, it would be much less &quot;painful&quot; to tie down a register on x64, since it has twice as many GPRs as x86.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id11" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="position-independent-code-pic-in-shared-libraries-on-x64.html#id4">[4]</a></td><td>It also happens if we explicitly specify we don't want PIC by passing <tt class="docutils literal"><span class="pre">-fno-pic</span></tt> to <tt class="docutils literal">gcc</tt>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id12" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="position-independent-code-pic-in-shared-libraries-on-x64.html#id5">[5]</a></td><td>Note that unlike other disassembly listings we've been looking at in this and the previous article, this is an object file, not a shared library or executable. Therefore it will contain some relocations for the linker.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id13" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="position-independent-code-pic-in-shared-libraries-on-x64.html#id6">[6]</a></td><td>For some good information on this subject, take a look at the AMD64 ABI, and <tt class="docutils literal">man gcc</tt>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id14" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="position-independent-code-pic-in-shared-libraries-on-x64.html#id7">[7]</a></td><td>Some assemblers call this instruction <tt class="docutils literal">movabs</tt> to distinguish it from the other <tt class="docutils literal">mov</tt> instructions that accept a relative argument. The Intel architecture manual, however, keeps naming it just <tt class="docutils literal">mov</tt>. Its opcode format is <tt class="docutils literal">REX.W + B8 + rd</tt>.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="position-independent-code-pic-in-shared-libraries-on-x64.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

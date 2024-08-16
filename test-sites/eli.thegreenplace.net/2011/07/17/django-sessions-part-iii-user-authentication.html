@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Django sessions - part III: User authentication - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="django-sessions-part-iii-user-authentication.html"
+                       rel="bookmark"
+                       title="Permalink to Django sessions - part III: User authentication">
+                        Django sessions - part III: User authentication
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> July 17, 2011 at 06:13</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/django.html">Django</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>In the previous two articles of this series we learned how Django implements sessions, thus allowing the abstraction of persistent state in a web application. The session framework can be employed by developers to implement all kinds of interesting features for their application, but Django also uses it for its own needs. Specifically, Django's user authentication system relies on the session framework to do its job.</p>
+<p>The user authentication system allows users to log in and out of the application, and act based on a set of permissions. Borrowing from <a class="reference external" href="http://www.djangobook.com/en/2.0/chapter14/">the Django Book</a>:</p>
+<p>This system is often referred to as an <em>auth/auth</em> (authentication and authorization) system. That name recognizes that dealing with users is often a two-step process. We need to</p>
+<ol class="arabic simple">
+<li>Verify (<em>authenticate</em>) that a user is who he or she claims to be (usually by checking a username and password against a database of users)</li>
+<li>Verify that the user is <em>authorized</em> to perform some given operation (usually by checking against a table of permissions)</li>
+</ol>
+<p>In this, the final part of the series, I want to explain how Django's user authentication is implemented. I will focus on item 1 in the list above - <em>authentication</em>, which makes actual use of sessions <a class="footnote-reference" href="django-sessions-part-iii-user-authentication.html#id7" id="id1">[1]</a>.</p>
+<div class="section" id="snooping-on-http-traffic">
+<h3>Snooping on HTTP traffic</h3>
+<p>Before diving into the source code of Django, let's see how authentication looks when viewed from the level of HTTP traffic. I'll be using this view to test things:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">test_user</span>(request):
+    user_str = <span style="color: #00007f">str</span>(request.user)
+    <span style="color: #00007f; font-weight: bold">if</span> request.user.is_authenticated():
+        <span style="color: #00007f; font-weight: bold">return</span> HttpResponse(<span style="color: #7f007f">&#39;%s is logged in&#39;</span> % user_str)
+    <span style="color: #00007f; font-weight: bold">else</span>:
+        <span style="color: #00007f; font-weight: bold">return</span> HttpResponse(<span style="color: #7f007f">&#39;%s is not logged in&#39;</span> % user_str)
+</pre></div>
+<p>Before I logged in, I get the message &quot;AnonymousUser is not logged in&quot;. The server doesn't return any cookie.</p>
+<p>When I log in with Django's default login template, more interesting things can be observed. The login form sends a POST request to the server, with my login information in the form data:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">username:eliben
+password:password
+</pre></div>
+<p>Assuming this is a valid username/password pair, the server sends back a session ID in a cookie:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">Set-Cookie:sessionid=4980ec04546e434c1ea13c675fafbc98;
+</pre></div>
+<p>What is this session? As we saw in the previous article, it's a key into the <tt class="docutils literal">django_session</tt> DB table. Decoding the session data from the table, I get:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">{&#39;_auth_user_id&#39;: 1, &#39;_auth_user_backend&#39;: &#39;django.contrib.auth.backends.ModelBackend&#39;}
+[26/Jun/2011 11:28:48] &quot;GET /user/ HTTP/1.1&quot; 200 19
+</pre></div>
+<p>By looking into the <tt class="docutils literal">auth_user</tt> table, I can indeed see that <tt class="docutils literal">eliben</tt> is the user with ID = 1. Also, in subsequent requests to the server, my browser sends the aforementioned session ID in a cookie, as expected.</p>
+<p>When I log out, the server sends a different session ID, which now contains an empty dictionary - no user is logged in.</p>
+</div>
+<div class="section" id="auth-middleware">
+<h3>Auth middleware</h3>
+<p>Similarly to the path we've taken with sessions, it's instrumental to first see how authentication middleware is implemented. Or in other words, <em>how did the &quot;user&quot; attribute get into my HTTP request</em>?</p>
+<p>The answer is in <tt class="docutils literal">contrib/auth/middleware.py</tt> <a class="footnote-reference" href="django-sessions-part-iii-user-authentication.html#id8" id="id2">[2]</a>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">LazyUser</span>(<span style="color: #00007f">object</span>):
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">__get__</span>(<span style="color: #00007f">self</span>, request, obj_type=<span style="color: #00007f">None</span>):
+        <span style="color: #00007f; font-weight: bold">if</span> <span style="color: #0000aa">not</span> <span style="color: #00007f">hasattr</span>(request, <span style="color: #7f007f">&#39;_cached_user&#39;</span>):
+            <span style="color: #00007f; font-weight: bold">from</span> <span style="color: #00007f">django.contrib.auth</span> <span style="color: #00007f; font-weight: bold">import</span> get_user
+            request._cached_user = get_user(request)
+        <span style="color: #00007f; font-weight: bold">return</span> request._cached_user
+
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">AuthenticationMiddleware</span>(<span style="color: #00007f">object</span>):
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">process_request</span>(<span style="color: #00007f">self</span>, request):
+        request.__class__.user = LazyUser()
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">None</span>
+</pre></div>
+<p>Behold, we've encountered a rare sighting of one of Python's more obscure, and yet powerful features - descriptors. Explaining descriptors fully will take an article of its own, so I kindly direct you to google it <a class="footnote-reference" href="django-sessions-part-iii-user-authentication.html#id9" id="id3">[3]</a>. Here I'll just briefly explain how this specific code works.</p>
+<p><tt class="docutils literal">AuthenticationMiddleware</tt> is a middleware class, implementing the <tt class="docutils literal">process_request</tt> hook. What it does is attach the <tt class="docutils literal">LazyUser</tt> <em>descriptor</em> to the <tt class="docutils literal">user</tt> attribute of the request class. The <tt class="docutils literal">LazyUser</tt> descriptor implements <tt class="docutils literal">__get__</tt>, which will get called when we access <tt class="docutils literal">request.user</tt> in our views. This <tt class="docutils literal">__get__</tt> simply caches the user object in another attribute of the request class - <tt class="docutils literal">_cached_user</tt>, making sure the possibly costly <tt class="docutils literal">get_user</tt> operation doesn't get fully executed for each access to the <tt class="docutils literal">user</tt> attribute.</p>
+</div>
+<div class="section" id="finding-the-active-user">
+<h3>Finding the active user</h3>
+<p>Recall that <tt class="docutils literal">request.user</tt> gets us the currently logged-in user, if there is one. Let's see how this gets done. In the code sample above, the user is accessed with <tt class="docutils literal">get_user(request)</tt>. Here's <tt class="docutils literal">get_user</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">get_user</span>(request):
+    <span style="color: #00007f; font-weight: bold">from</span> <span style="color: #00007f">django.contrib.auth.models</span> <span style="color: #00007f; font-weight: bold">import</span> AnonymousUser
+    <span style="color: #00007f; font-weight: bold">try</span>:
+        user_id = request.session[SESSION_KEY]
+        backend_path = request.session[BACKEND_SESSION_KEY]
+        backend = load_backend(backend_path)
+        user = backend.get_user(user_id) <span style="color: #0000aa">or</span> AnonymousUser()
+    <span style="color: #00007f; font-weight: bold">except</span> KeyError:
+        user = AnonymousUser()
+    <span style="color: #00007f; font-weight: bold">return</span> user
+</pre></div>
+<p>Looking at the beginning of the file this function is defined in (<tt class="docutils literal">auth/__init__.py</tt>), we see:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">SESSION_KEY = <span style="color: #7f007f">&#39;_auth_user_id&#39;</span>
+BACKEND_SESSION_KEY = <span style="color: #7f007f">&#39;_auth_user_backend&#39;</span>
+</pre></div>
+<p>So what <tt class="docutils literal">get_user</tt> does is just try to extract the user from the current session. Recall from the HTTP snooping section that when a user is actually logged in, the <tt class="docutils literal">_auth_user_id</tt> and <tt class="docutils literal">_auth_user_backend</tt> entries are set in the session dictionary. <tt class="docutils literal">get_user</tt> reads them, and turns to the auth backend to fetch the user object, with the <tt class="docutils literal">backend.get_user</tt> method.</p>
+<p>The default auth backend is <tt class="docutils literal">auth.backends.ModelBackend</tt> - the DB backed user model (contained in all those <tt class="docutils literal">auth_*</tt> tables that get added to your DB when the auth framework is enabled). Its <tt class="docutils literal">get_user</tt> method simply does this:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">get_user</span>(<span style="color: #00007f">self</span>, user_id):
+    <span style="color: #00007f; font-weight: bold">try</span>:
+        <span style="color: #00007f; font-weight: bold">return</span> User.objects.get(pk=user_id)
+    <span style="color: #00007f; font-weight: bold">except</span> User.DoesNotExist:
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">None</span>
+</pre></div>
+<p>Standard Django code for fetching data from a DB, where <tt class="docutils literal">User</tt> is a model defined in <tt class="docutils literal">contrib/auth/models.py</tt>.</p>
+</div>
+<div class="section" id="the-user-model">
+<h3>The User model</h3>
+<p><tt class="docutils literal">User</tt> is a fairly standard Django model with a bunch of fields and helper methods that help decoding them. The most interesting part, IMHO, and the one I'll focus here on is setting and verifying the user's password. Here's the <tt class="docutils literal">set_password</tt> method:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">set_password</span>(<span style="color: #00007f">self</span>, raw_password):
+    <span style="color: #00007f; font-weight: bold">if</span> raw_password <span style="color: #0000aa">is</span> <span style="color: #00007f">None</span>:
+        <span style="color: #00007f">self</span>.set_unusable_password()
+    <span style="color: #00007f; font-weight: bold">else</span>:
+        <span style="color: #00007f; font-weight: bold">import</span> <span style="color: #00007f">random</span>
+        algo = <span style="color: #7f007f">&#39;sha1&#39;</span>
+        salt = get_hexdigest(algo, <span style="color: #00007f">str</span>(random.random()), <span style="color: #00007f">str</span>(random.random()))[:<span style="color: #007f7f">5</span>]
+        hsh = get_hexdigest(algo, salt, raw_password)
+        <span style="color: #00007f">self</span>.password = <span style="color: #7f007f">&#39;%s$%s$%s&#39;</span> % (algo, salt, hsh)
+</pre></div>
+<p>We see this uses the accepted modern approach - instead of storing the password itself (in <em>plaintext</em>), a cryptographic hash is computed and stored. Further, the password is <a class="reference external" href="http://en.wikipedia.org/wiki/Password_salt">salted</a>, to defeat a potential <a class="reference external" href="http://en.wikipedia.org/wiki/Rainbow_table">rainbow table</a> cracking attack. The password's hash, together with the salt value and the algorithm used for the hashing (which is <tt class="docutils literal">SHA1</tt> by default) are then stored in the database, separated by dollar signs. For example, here's my user's <tt class="docutils literal">password</tt> field:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">sha1$f0670$2a0781bd8f2361042ebdf0cd1b3ce1e8be3f8dcc
+</pre></div>
+<p>To verify the password, the <tt class="docutils literal">check_password</tt> function is invoked <a class="footnote-reference" href="django-sessions-part-iii-user-authentication.html#id10" id="id4">[4]</a>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">check_password</span>(raw_password, enc_password):
+    <span style="color: #7f007f">&quot;&quot;&quot;</span>
+<span style="color: #7f007f">    Returns a boolean of whether the raw_password was correct. Handles</span>
+<span style="color: #7f007f">    encryption formats behind the scenes.</span>
+<span style="color: #7f007f">    &quot;&quot;&quot;</span>
+    algo, salt, hsh = enc_password.split(<span style="color: #7f007f">&#39;$&#39;</span>)
+    <span style="color: #00007f; font-weight: bold">return</span> constant_time_compare(hsh, get_hexdigest(algo, salt, raw_password))
+</pre></div>
+<p>It computes the hash on the password provided and compares it to the one stored in the DB. What is this <tt class="docutils literal">constant_time_compare</tt> call about though? This is a function that compares two strings in time that depends on the length of the strings, but not the amount of matching characters in the beginning. Such comparison is important cryptographically, to thwart <a class="reference external" href="http://en.wikipedia.org/wiki/Timing_attack">timing attacks</a>.</p>
+</div>
+<div class="section" id="logging-in">
+<h3>Logging in</h3>
+<p>Django provides a powerful and versatile <tt class="docutils literal">login</tt> view (in <tt class="docutils literal">django.contrib.auth.views</tt>) to allow an application implement logging-in functionality. What this view does is explained quite well in Django's auth's docs. Here, I will focus on <em>how it works</em>.</p>
+<p><tt class="docutils literal">login</tt> is your typical form-handling Django view. If it gets a <tt class="docutils literal">GET</tt> request, it displays the login form. On the other hand, for a <tt class="docutils literal">POST</tt> request, it tries to log the user in. This is the interesting part.</p>
+<p>On first sight, it's hard to see where exactly the login authentication is handled. The <tt class="docutils literal">POST</tt> request handling part of the <tt class="docutils literal">login</tt> view is:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">if</span> request.method == <span style="color: #7f007f">&quot;POST&quot;</span>:
+    form = authentication_form(data=request.POST)
+    <span style="color: #00007f; font-weight: bold">if</span> form.is_valid():
+        netloc = urlparse.urlparse(redirect_to)[<span style="color: #007f7f">1</span>]
+
+        <span style="color: #007f00"># Use default setting if redirect_to is empty</span>
+        <span style="color: #00007f; font-weight: bold">if</span> <span style="color: #0000aa">not</span> redirect_to:
+            redirect_to = settings.LOGIN_REDIRECT_URL
+
+        <span style="color: #007f00"># Security check -- don&#39;t allow redirection to a different</span>
+        <span style="color: #007f00"># host.</span>
+        <span style="color: #00007f; font-weight: bold">elif</span> netloc <span style="color: #0000aa">and</span> netloc != request.get_host():
+            redirect_to = settings.LOGIN_REDIRECT_URL
+
+        <span style="color: #007f00"># Okay, security checks complete. Log the user in.</span>
+        auth_login(request, form.get_user())
+
+        <span style="color: #00007f; font-weight: bold">if</span> request.session.test_cookie_worked():
+            request.session.delete_test_cookie()
+
+        <span style="color: #00007f; font-weight: bold">return</span> HttpResponseRedirect(redirect_to)
+</pre></div>
+<p>After some head scratching and stunning feats of reverse engineering <a class="footnote-reference" href="django-sessions-part-iii-user-authentication.html#id11" id="id5">[5]</a>, it became clear that the authentication happens in the call <tt class="docutils literal">form.is_valid</tt>. This call invokes (after some steps <a class="footnote-reference" href="django-sessions-part-iii-user-authentication.html#id12" id="id6">[6]</a>) <tt class="docutils literal">AuthenticationForm.clean</tt>, which itself calls <tt class="docutils literal">authenticate</tt>. A bit down the road, the flow of control reaches <tt class="docutils literal">ModelBackend.authenticate</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">authenticate</span>(<span style="color: #00007f">self</span>, username=<span style="color: #00007f">None</span>, password=<span style="color: #00007f">None</span>):
+    <span style="color: #00007f; font-weight: bold">try</span>:
+        user = User.objects.get(username=username)
+        <span style="color: #00007f; font-weight: bold">if</span> user.check_password(password):
+            <span style="color: #00007f; font-weight: bold">return</span> user
+    <span style="color: #00007f; font-weight: bold">except</span> User.DoesNotExist:
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">None</span>
+</pre></div>
+<p>And we've already seen the definition of <tt class="docutils literal">check_password</tt> in section &quot;The User model&quot;.
+Alright, so now we know how the <tt class="docutils literal">login</tt> view authenticates the user. What does it do next? After some more checks, the <tt class="docutils literal">auth_login</tt> function is called, which is an alias for <tt class="docutils literal">django.contrib.auth.login</tt>. This function uses the session framework to save the cookie we've seen in the first section of this article.</p>
+</div>
+<div class="section" id="summary">
+<h3>Summary</h3>
+<p>This concludes the article on how user authentication works, and also the <a class="reference external" href="../../06/24/how-django-sessions-work-introduction/index.html">3-article series on Django sessions</a>. Sessions in general and user logins in particular are one aspect of web applications we take for granted. It just works, <em>automagically</em>. And yet, as I hope these articles have demonstrated, the magic that happens under the hood isn't really difficult to understand. Sure, there are a lot of concepts to grasp and code to read, but with some determination enlightenment is just around the corner.</p>
+<img class="align-center" src="../../../images/hline.jpg" style="width: 320px; height: 5px;" />
+<table class="docutils footnote" frame="void" id="id7" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="django-sessions-part-iii-user-authentication.html#id1">[1]</a></td><td><em>Authorization</em> is a simple matter of keeping tables of users, groups and permissions.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id8" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="django-sessions-part-iii-user-authentication.html#id2">[2]</a></td><td>Just a reminder: at the time of writing this series of articles, the latest released version of Django is 1.3, which is what I'm looking at here. In this particular code sample I've removed a longish assertion line from <tt class="docutils literal">process_request</tt>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id9" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="django-sessions-part-iii-user-authentication.html#id3">[3]</a></td><td>But start with <a class="reference external" href="http://users.rcn.com/python/download/Descriptor.htm">this excellent article</a> by Raymond Hettinger.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id10" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="django-sessions-part-iii-user-authentication.html#id4">[4]</a></td><td>It's invoked by the <tt class="docutils literal">check_password</tt> method which also handles a backwards-compatibility issue, which I don't cover here.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id11" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="django-sessions-part-iii-user-authentication.html#id5">[5]</a></td><td>I'm kidding :-) All it took was 30 seconds to strategically insert <tt class="docutils literal">traceback.print_stack()</tt> into <tt class="docutils literal">User.check_password</tt> and see where it's being called from when I log in.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id12" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="django-sessions-part-iii-user-authentication.html#id6">[6]</a></td><td>According to the Django docs, the <tt class="docutils literal">clean</tt> method of a subclass of <tt class="docutils literal">Form</tt> is responsible for whole-form validation. Not the most intuitive nomenclature, I'd say.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="django-sessions-part-iii-user-authentication.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

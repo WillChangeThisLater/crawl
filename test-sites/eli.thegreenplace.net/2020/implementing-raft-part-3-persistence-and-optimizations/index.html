@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Implementing Raft: Part 3 - Persistence and Optimizations - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Implementing Raft: Part 3 - Persistence and Optimizations">
+                        Implementing Raft: Part 3 - Persistence and Optimizations
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> March 05, 2020 at 06:12</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/concurrency.html">Concurrency</a>
+        ,
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/network-programming.html">Network Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This is Part 3 in a series of posts describing the Raft distributed consensus
+algorithm and its complete implementation in Go. Here is a list of
+posts in the series:</p>
+<ul class="simple">
+<li><a class="reference external" href="../implementing-raft-part-0-introduction/index.html">Part 0: Introduction</a></li>
+<li><a class="reference external" href="../implementing-raft-part-1-elections/index.html">Part 1: Elections</a></li>
+<li><a class="reference external" href="../implementing-raft-part-2-commands-and-log-replication/index.html">Part 2: Commands and log replication</a></li>
+<li>Part 3: Persistence and optimizations (this post)</li>
+</ul>
+<p>In this part we'll complete our basic implementation of Raft, by adding
+persistence and some optimizations. All the code for this part is located in
+<a class="reference external" href="https://github.com/eliben/raft/tree/main/part3">this directory</a>.</p>
+<div class="section" id="persistence">
+<h2>Persistence</h2>
+<p>The goal of a consensus algorithm like Raft is to create a system that has
+higher availability than its parts by replicating a task across isolated
+servers. So far, we've been focusing on the fault scenario of <em>network
+partitions</em>, where some servers in the cluster become disconnected from others
+(or from clients). Another mode of failure is <em>crashes</em>, wherein a server stops
+working and restarts.</p>
+<p>While for other servers it appears like a network partition - a server got
+temporarily disconnected, for the crashed server itself the situation is quite
+different because by restarting all its volatile memory state is lost.</p>
+<p>Precisely for this reason, Figure 2 in the Raft paper clearly marks which state
+should be <em>persistent</em>; persistent state is written and flushed to nonvolatile
+storage every time it's updated. Whatever state has to be persisted by a server
+is persisted before the server issues the next RPC or replies to an ongoing
+RPC.</p>
+<p>Raft can get by with persisting only a subset of its state, namely:</p>
+<ul class="simple">
+<li><tt class="docutils literal">currentTerm</tt> - the latest term this server has observed</li>
+<li><tt class="docutils literal">votedFor</tt> - the peer ID for whom this server voted in the latest term</li>
+<li><tt class="docutils literal">log</tt> - Raft log entries</li>
+</ul>
+<p><strong>Q:</strong> Why are <tt class="docutils literal">commitIndex</tt> and <tt class="docutils literal">lastApplied</tt> volatile?</p>
+<p><strong>A:</strong> <tt class="docutils literal">commitIndex</tt> is volatile because Raft can figure out a correct value
+for it after a reboot using just the persistent state. Once a leader
+successfully gets a new log entry committed, it knows everything before that
+point is also committed. A follower that crashes and comes back up will be told
+about the right <tt class="docutils literal">commitIndex</tt> whenever the current leader sends it an AE.</p>
+<p><tt class="docutils literal">lastApplied</tt> starts at zero after a reboot because the basic Raft algorithm
+assumes the service (e.g., a key/value database) doesn’t keep any persistent
+state. Thus its state needs to be completely recreated by replaying all log
+entries. This is rather inefficient, of course, so many optimization ideas
+are possible. Raft supports <em>snapshotting</em> the log when it grows large; this
+is described in section 6 of the Raft paper, and is out of scope for this series
+of posts.</p>
+</div>
+<div class="section" id="command-delivery-semantics">
+<h2>Command delivery semantics</h2>
+<p>In Raft, depending on circumstances a command may be delivered to a client more
+than once. There are several scenarios in which this can happen, including
+crashes an restarts (when a log is replayed again).</p>
+<p>In terms of message delivery semantics, Raft is in the <em>at-least-once</em> camp.
+Once a command is submitted, it <em>will</em> be replicated to all clients eventually,
+but some clients may see the same command more than once. Therefore, it's
+recommended that commands carry unique IDs and clients ignore commands that
+were already delivered. This is described in a bit more detail in section 8
+of the Raft paper.</p>
+</div>
+<div class="section" id="storage-interface">
+<h2>Storage interface</h2>
+<p>To implement persistence, we're adding the following interface to the code:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">Storage</span><span class="w"> </span><span class="kd">interface</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Set</span><span class="p">(</span><span class="nx">key</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">value</span><span class="w"> </span><span class="p">[]</span><span class="kt">byte</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">Get</span><span class="p">(</span><span class="nx">key</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="p">([]</span><span class="kt">byte</span><span class="p">,</span><span class="w"> </span><span class="kt">bool</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// HasData returns true iff any Sets were made on this Storage.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">HasData</span><span class="p">()</span><span class="w"> </span><span class="kt">bool</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>You can think of it as a map from string to a generic byte slice, backed by a
+persistent store.</p>
+</div>
+<div class="section" id="restoring-and-saving-state">
+<h2>Restoring and saving state</h2>
+<p>The CM constructor will now take a <tt class="docutils literal">Storage</tt> as an argument and call:</p>
+<div class="highlight"><pre><span></span><span class="k">if</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">storage</span><span class="p">.</span><span class="nx">HasData</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">restoreFromStorage</span><span class="p">(</span><span class="nx">cm</span><span class="p">.</span><span class="nx">storage</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The <tt class="docutils literal">restoreFromStorage</tt> method is also new. It loads the persisted state
+variables from storage, deserializing them using the standard <tt class="docutils literal">encoding/gob</tt>
+package:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">cm</span><span class="w"> </span><span class="o">*</span><span class="nx">ConsensusModule</span><span class="p">)</span><span class="w"> </span><span class="nx">restoreFromStorage</span><span class="p">(</span><span class="nx">storage</span><span class="w"> </span><span class="nx">Storage</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">termData</span><span class="p">,</span><span class="w"> </span><span class="nx">found</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">storage</span><span class="p">.</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;currentTerm&quot;</span><span class="p">);</span><span class="w"> </span><span class="nx">found</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">d</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">gob</span><span class="p">.</span><span class="nx">NewDecoder</span><span class="p">(</span><span class="nx">bytes</span><span class="p">.</span><span class="nx">NewBuffer</span><span class="p">(</span><span class="nx">termData</span><span class="p">))</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">d</span><span class="p">.</span><span class="nx">Decode</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">cm</span><span class="p">.</span><span class="nx">currentTerm</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;currentTerm not found in storage&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">votedData</span><span class="p">,</span><span class="w"> </span><span class="nx">found</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">storage</span><span class="p">.</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;votedFor&quot;</span><span class="p">);</span><span class="w"> </span><span class="nx">found</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">d</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">gob</span><span class="p">.</span><span class="nx">NewDecoder</span><span class="p">(</span><span class="nx">bytes</span><span class="p">.</span><span class="nx">NewBuffer</span><span class="p">(</span><span class="nx">votedData</span><span class="p">))</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">d</span><span class="p">.</span><span class="nx">Decode</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">cm</span><span class="p">.</span><span class="nx">votedFor</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;votedFor not found in storage&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">logData</span><span class="p">,</span><span class="w"> </span><span class="nx">found</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">storage</span><span class="p">.</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;log&quot;</span><span class="p">);</span><span class="w"> </span><span class="nx">found</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">d</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">gob</span><span class="p">.</span><span class="nx">NewDecoder</span><span class="p">(</span><span class="nx">bytes</span><span class="p">.</span><span class="nx">NewBuffer</span><span class="p">(</span><span class="nx">logData</span><span class="p">))</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">d</span><span class="p">.</span><span class="nx">Decode</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">cm</span><span class="p">.</span><span class="nx">log</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;log not found in storage&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The mirror method is <tt class="docutils literal">persistToStorage</tt> - it encodes and saves all these
+state variables to the provided <tt class="docutils literal">Storage</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">cm</span><span class="w"> </span><span class="o">*</span><span class="nx">ConsensusModule</span><span class="p">)</span><span class="w"> </span><span class="nx">persistToStorage</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">termData</span><span class="w"> </span><span class="nx">bytes</span><span class="p">.</span><span class="nx">Buffer</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">gob</span><span class="p">.</span><span class="nx">NewEncoder</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">termData</span><span class="p">).</span><span class="nx">Encode</span><span class="p">(</span><span class="nx">cm</span><span class="p">.</span><span class="nx">currentTerm</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">storage</span><span class="p">.</span><span class="nx">Set</span><span class="p">(</span><span class="s">&quot;currentTerm&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">termData</span><span class="p">.</span><span class="nx">Bytes</span><span class="p">())</span><span class="w"></span>
+
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">votedData</span><span class="w"> </span><span class="nx">bytes</span><span class="p">.</span><span class="nx">Buffer</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">gob</span><span class="p">.</span><span class="nx">NewEncoder</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">votedData</span><span class="p">).</span><span class="nx">Encode</span><span class="p">(</span><span class="nx">cm</span><span class="p">.</span><span class="nx">votedFor</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">storage</span><span class="p">.</span><span class="nx">Set</span><span class="p">(</span><span class="s">&quot;votedFor&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">votedData</span><span class="p">.</span><span class="nx">Bytes</span><span class="p">())</span><span class="w"></span>
+
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">logData</span><span class="w"> </span><span class="nx">bytes</span><span class="p">.</span><span class="nx">Buffer</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">gob</span><span class="p">.</span><span class="nx">NewEncoder</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">logData</span><span class="p">).</span><span class="nx">Encode</span><span class="p">(</span><span class="nx">cm</span><span class="p">.</span><span class="nx">log</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">storage</span><span class="p">.</span><span class="nx">Set</span><span class="p">(</span><span class="s">&quot;log&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">logData</span><span class="p">.</span><span class="nx">Bytes</span><span class="p">())</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>We implement persistence simply by calling <tt class="docutils literal">pesistToStorage</tt> at every point
+in which these state variables change. If you look at the diff between the
+CM's code in Part 2 and this part, you'll see them sprinkled in a handful of
+places.</p>
+<p>Naturally, this is not the most efficient way to do persistence, but it's simple
+and it works, so it's enough for our needs here. The largest inefficiency is
+saving the whole log, which can be large in real applications. To really address
+this, Raft has a <em>log compaction</em> mechanism which is described in section 7 of
+the paper. We're not going to implement compaction, but feel free to add it to
+our implementation as an exercise.</p>
+</div>
+<div class="section" id="crash-resiliency">
+<h2>Crash resiliency</h2>
+<p>With persistence implemented, our Raft cluster becomes somewhat resilient to
+crashes. As long as a minority of peers in a cluster crashes and restarts at
+some later point, the cluster will remain available to clients (perhaps after a
+short delay where a new leader is elected, in case the leader was one of the
+crashed peers). As a reminder, a Raft cluster with 2N+1 servers will tolerate
+N failed servers and will remain available as long as the other N+1 servers
+remain connected to each other.</p>
+<p>If you look at the tests for this part, you'll notice that many new tests were
+added. Crash resiliency makes it possible to test a much larger portfolio of
+contrived scenarios which are also described in the paper to some degree. It's
+highly recommended to run a couple of crash tests and observe what's happening.</p>
+</div>
+<div class="section" id="unreliable-rpc-delivery">
+<h2>Unreliable RPC delivery</h2>
+<p>Since we're ramping up testing in this part, another aspect of resiliency I'd
+like to bring to your attention is unreliable RPC delivery. So far we've assumed
+that RPCs sent between connected servers will arrive to their destination,
+perhaps with a small delay. If you look in <tt class="docutils literal">server.go</tt>, you'll notice it uses
+a type called <tt class="docutils literal">RPCProxy</tt> to implement these delays, among other things. Each
+RPC is delayed by 1-5 ms to simulate the real world for peers located in the
+same data center.</p>
+<p>Another thing <tt class="docutils literal">RPCProxy</tt> lets us implement is optional <em>unreliable</em> delivery.
+With the <tt class="docutils literal">RAFT_UNRELIABLE_RPC</tt> env var on, once in a while RPCs will be
+delayed significantly (by 75 ms), or dropped altogether. This simulates
+real-world network glitches.</p>
+<p>We can rerun all our tests with <tt class="docutils literal">RAFT_UNRELIABLE_RPC</tt> on and observe how
+the Raft cluster behaves in the presence of these faults - another highly
+recommended exercise. If you're feeling extra motivated, adjust <tt class="docutils literal">RPCProxy</tt>
+to not only delay RPC requests, but also RPC <em>replies</em>. This should require just
+a handful of additional lines of code.</p>
+</div>
+<div class="section" id="optimizing-sending-appendentries">
+<h2>Optimizing sending AppendEntries</h2>
+<p>The current leader implementation has a major inefficiency, as I've briefly
+noted in <a class="reference external" href="../implementing-raft-part-2-commands-and-log-replication/index.html">Part 2</a>.
+Leaders send AEs in <tt class="docutils literal">leaderSendHeartbeats</tt>, which is invoked by a ticking
+timer every 50 ms. Suppose a new command is submitted; instead of notifying
+followers about it immediately, the leader will wait until the next 50 ms
+boundary. It gets even worse, because <em>two</em> AE round-trips are needed to notify
+followers that a command is committed. Here's a diagram showing how it works
+right now:</p>
+<img alt="Timing diagram with AE on 50 ms boundaries" class="align-center" src="../../images/2020/appendentries-50ms-boundary.png" />
+<p>At time (1) the leader sends a heartbeat AE to a follower, and gets a response
+back within a few ms. A new command is submitted, say, 35 ms later. The leader
+waits until (2) the next 50 ms boundary to send the updated log to the follower.
+The follower replies that the command was added to the log successfully (3). At
+this point the leader has advanced its commit index (assuming it got a majority)
+and can immediately notify followers, but it waits until the <em>next</em> 50 ms
+boundary (4) to do so. Finally, when the follower receives the updated
+<tt class="docutils literal">leaderCommit</tt> it can notify its own client about a new committed command.</p>
+<p>Much of the time passed between <tt class="docutils literal">Submit(X)</tt> at the leader and <tt class="docutils literal">commitChan &lt;-
+X</tt> at the follower is an unnecessary artifact of our implementation.</p>
+<p>What we really want is for the sequence to look like this, instead:</p>
+<img alt="Timing diagram with AE on 50 ms boundaries" class="align-center" src="../../images/2020/appendentries-immediate.png" />
+<p>This is exactly what the <a class="reference external" href="https://github.com/eliben/raft/tree/main/part3">code for this part</a> does. Let's see the new
+parts of the implementation, starting with <tt class="docutils literal">startLeader</tt>. As usual, the lines
+that are different from the previous part are highlighted:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">cm</span><span class="w"> </span><span class="o">*</span><span class="nx">ConsensusModule</span><span class="p">)</span><span class="w"> </span><span class="nx">startLeader</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">Leader</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">peerId</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">peerIds</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">cm</span><span class="p">.</span><span class="nx">nextIndex</span><span class="p">[</span><span class="nx">peerId</span><span class="p">]</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">cm</span><span class="p">.</span><span class="nx">log</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">cm</span><span class="p">.</span><span class="nx">matchIndex</span><span class="p">[</span><span class="nx">peerId</span><span class="p">]</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="o">-</span><span class="mi">1</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;becomes Leader; term=%d, nextIndex=%v, matchIndex=%v; log=%v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">currentTerm</span><span class="p">,</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">nextIndex</span><span class="p">,</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">matchIndex</span><span class="p">,</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">log</span><span class="p">)</span><span class="w"></span>
+
+<span class="hll"><span class="w">  </span><span class="c1">// This goroutine runs in the background and sends AEs to peers:</span><span class="w"></span>
+</span><span class="hll"><span class="w">  </span><span class="c1">// * Whenever something is sent on triggerAEChan</span><span class="w"></span>
+</span><span class="hll"><span class="w">  </span><span class="c1">// * ... Or every 50 ms, if no events occur on triggerAEChan</span><span class="w"></span>
+</span><span class="hll"><span class="w">  </span><span class="k">go</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">heartbeatTimeout</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Duration</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+</span><span class="hll"><span class="w">    </span><span class="c1">// Immediately send AEs to peers.</span><span class="w"></span>
+</span><span class="hll"><span class="w">    </span><span class="nx">cm</span><span class="p">.</span><span class="nx">leaderSendAEs</span><span class="p">()</span><span class="w"></span>
+</span><span class="hll">
+</span><span class="hll"><span class="w">    </span><span class="nx">t</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">NewTimer</span><span class="p">(</span><span class="nx">heartbeatTimeout</span><span class="p">)</span><span class="w"></span>
+</span><span class="hll"><span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="nx">t</span><span class="p">.</span><span class="nx">Stop</span><span class="p">()</span><span class="w"></span>
+</span><span class="hll"><span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+</span><span class="hll"><span class="w">      </span><span class="nx">doSend</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="kc">false</span><span class="w"></span>
+</span><span class="hll"><span class="w">      </span><span class="k">select</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+</span><span class="hll"><span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="o">&lt;-</span><span class="nx">t</span><span class="p">.</span><span class="nx">C</span><span class="p">:</span><span class="w"></span>
+</span><span class="hll"><span class="w">        </span><span class="nx">doSend</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+</span><span class="hll">
+</span><span class="hll"><span class="w">        </span><span class="c1">// Reset timer to fire again after heartbeatTimeout.</span><span class="w"></span>
+</span><span class="hll"><span class="w">        </span><span class="nx">t</span><span class="p">.</span><span class="nx">Stop</span><span class="p">()</span><span class="w"></span>
+</span><span class="hll"><span class="w">        </span><span class="nx">t</span><span class="p">.</span><span class="nx">Reset</span><span class="p">(</span><span class="nx">heartbeatTimeout</span><span class="p">)</span><span class="w"></span>
+</span><span class="hll"><span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&lt;-</span><span class="nx">cm</span><span class="p">.</span><span class="nx">triggerAEChan</span><span class="p">:</span><span class="w"></span>
+</span><span class="hll"><span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+</span><span class="hll"><span class="w">          </span><span class="nx">doSend</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+</span><span class="hll"><span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+</span><span class="hll"><span class="w">          </span><span class="k">return</span><span class="w"></span>
+</span><span class="hll"><span class="w">        </span><span class="p">}</span><span class="w"></span>
+</span><span class="hll">
+</span><span class="hll"><span class="w">        </span><span class="c1">// Reset timer for heartbeatTimeout.</span><span class="w"></span>
+</span><span class="hll"><span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">!</span><span class="nx">t</span><span class="p">.</span><span class="nx">Stop</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+</span><span class="hll"><span class="w">          </span><span class="o">&lt;-</span><span class="nx">t</span><span class="p">.</span><span class="nx">C</span><span class="w"></span>
+</span><span class="hll"><span class="w">        </span><span class="p">}</span><span class="w"></span>
+</span><span class="hll"><span class="w">        </span><span class="nx">t</span><span class="p">.</span><span class="nx">Reset</span><span class="p">(</span><span class="nx">heartbeatTimeout</span><span class="p">)</span><span class="w"></span>
+</span><span class="hll"><span class="w">      </span><span class="p">}</span><span class="w"></span>
+</span><span class="hll">
+</span><span class="hll"><span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">doSend</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+</span><span class="hll"><span class="w">        </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+</span><span class="hll"><span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nx">Leader</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+</span><span class="hll"><span class="w">          </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+</span><span class="hll"><span class="w">          </span><span class="k">return</span><span class="w"></span>
+</span><span class="hll"><span class="w">        </span><span class="p">}</span><span class="w"></span>
+</span><span class="hll"><span class="w">        </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+</span><span class="hll"><span class="w">        </span><span class="nx">cm</span><span class="p">.</span><span class="nx">leaderSendAEs</span><span class="p">()</span><span class="w"></span>
+</span><span class="hll"><span class="w">      </span><span class="p">}</span><span class="w"></span>
+</span><span class="hll"><span class="w">    </span><span class="p">}</span><span class="w"></span>
+</span><span class="hll"><span class="w">  </span><span class="p">}(</span><span class="mi">50</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Millisecond</span><span class="p">)</span><span class="w"></span>
+</span><span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Instead of just waiting for a 50 ms ticker, the loop in <tt class="docutils literal">startLeader</tt> is
+waiting on one of two possible events:</p>
+<ul class="simple">
+<li>A send on <tt class="docutils literal">cm.triggerAEChan</tt></li>
+<li>A timer counting 50 ms</li>
+</ul>
+<p>We'll see what triggers <tt class="docutils literal">cm.triggerAEChan</tt> soon. This is the signal that an
+AE should be sent <em>now</em>. The timer resets whenever the channel is triggered,
+implementing the heartbeat logic - if the leader has nothing new to report, it
+will wait at most 50 ms.</p>
+<p>Note also that the method that actually sends the AEs is renamed from
+<tt class="docutils literal">leaderSendHeartbeats</tt> to <tt class="docutils literal">leaderSendAEs</tt>, to better reflect its purpose in
+the new code.</p>
+<p>One of the methods that triggers <tt class="docutils literal">cm.triggerAEChan</tt> is, as we'd expect,
+<tt class="docutils literal">Submit</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">cm</span><span class="w"> </span><span class="o">*</span><span class="nx">ConsensusModule</span><span class="p">)</span><span class="w"> </span><span class="nx">Submit</span><span class="p">(</span><span class="nx">command</span><span class="w"> </span><span class="kd">interface</span><span class="p">{})</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;Submit received by %v: %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">state</span><span class="p">,</span><span class="w"> </span><span class="nx">command</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nx">Leader</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">cm</span><span class="p">.</span><span class="nx">log</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nb">append</span><span class="p">(</span><span class="nx">cm</span><span class="p">.</span><span class="nx">log</span><span class="p">,</span><span class="w"> </span><span class="nx">LogEntry</span><span class="p">{</span><span class="nx">Command</span><span class="p">:</span><span class="w"> </span><span class="nx">command</span><span class="p">,</span><span class="w"> </span><span class="nx">Term</span><span class="p">:</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">currentTerm</span><span class="p">})</span><span class="w"></span>
+<span class="hll"><span class="w">    </span><span class="nx">cm</span><span class="p">.</span><span class="nx">persistToStorage</span><span class="p">()</span><span class="w"></span>
+</span><span class="w">    </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;... log=%v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">log</span><span class="p">)</span><span class="w"></span>
+<span class="hll"><span class="w">    </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+</span><span class="hll"><span class="w">    </span><span class="nx">cm</span><span class="p">.</span><span class="nx">triggerAEChan</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="kd">struct</span><span class="p">{}{}</span><span class="w"></span>
+</span><span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="hll"><span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+</span><span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="kc">false</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The changes are:</p>
+<ul class="simple">
+<li>Whenever a new command is submitted, <tt class="docutils literal">cm.persistToStorage</tt> is called to
+persist the new log entry. This is not related to the heartbeat optimization,
+but I point it out here anyway because it's wasn't done in Part 2 and was
+described earlier in this post.</li>
+<li>An empty struct is sent on <tt class="docutils literal">cm.triggerAEChan</tt>.
+This will notify the loop in the leader goroutine.</li>
+<li>The lock handling is reordered a bit; we don't want to hold the lock while
+sending on <tt class="docutils literal">cm.triggerAEChan</tt> since this can cause a deadlock in some cases.</li>
+</ul>
+<p>Can you guess where the other place in the code where <tt class="docutils literal">cm.triggerAEChan</tt>
+would be notified?</p>
+<p>It's in the code that handles AE replies in the leader and advances the commit
+index. I won't reproduce the whole method here, only the small part of the
+code that changes:</p>
+<div class="highlight"><pre><span></span><span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">commitIndex</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nx">savedCommitIndex</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;leader sets commitIndex := %d&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">commitIndex</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Commit index changed: the leader considers new entries to be</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// committed. Send new entries on the commit channel to this</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// leader&#39;s clients, and notify followers by sending them AEs.</span><span class="w"></span>
+<span class="w">    </span><span class="nx">cm</span><span class="p">.</span><span class="nx">newCommitReadyChan</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="kd">struct</span><span class="p">{}{}</span><span class="w"></span>
+<span class="hll"><span class="w">    </span><span class="nx">cm</span><span class="p">.</span><span class="nx">triggerAEChan</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="kd">struct</span><span class="p">{}{}</span><span class="w"></span>
+</span><span class="w">  </span><span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This is a significant optimization that makes our implementation react to new
+commands much faster than before.</p>
+</div>
+<div class="section" id="batching-command-submission">
+<h2>Batching command submission</h2>
+<p>The code in the previous section may have left you feeling a bit uncomfortable.
+There's a lot of activity now being triggered by each call to <tt class="docutils literal">Submit</tt> - the
+leader immediately broadcasts RPCs to all followers. What happens if we want to
+submit multiple commands at once? The network connecting the Raft cluster will
+likely get <em>flooded</em> by RPCs.</p>
+<p>While it may seem inefficient, it's actually safe. Raft RPCs are all
+<em>idempotent</em>, meaning that getting an RPC with essentially the same information
+multiple times does no harm.</p>
+<p>If you're worried about the network traffic in the presence of frequent submits
+of many commands at once, <em>batching</em> should be easy to implement. The simplest
+way to do this is to provide a way to pass a whole slice of commands into
+<tt class="docutils literal">Submit</tt>. Very little code in the Raft implementation has to change as a
+result, and the client will be able to submit a whole group of commands without
+incurring too much RPC traffic. Try it as an exercise!</p>
+</div>
+<div class="section" id="optimizing-appendentries-conflict-resolution">
+<h2>Optimizing AppendEntries conflict resolution</h2>
+<p>Another optimization I'd like to discuss in this post is for reducing the number
+of rejected AEs required for a leader to bring a follower up-to-date in some
+scenarios. Recall that the <tt class="docutils literal">nextIndex</tt> mechanism begins at the very end of
+the log and decrements by one each time a follower rejects an AE. In rare cases
+the follower can be severely out of date, and the process to update it will
+take a long time because each RPC round-trip only advances by one entry.</p>
+<p>The paper describes this optimization at the very end of section 5.3, but
+doesn't provide much details about implementing it. To implement this, we'll
+extend the AE reply message with new fields:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">AppendEntriesReply</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Term</span><span class="w">    </span><span class="kt">int</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Success</span><span class="w"> </span><span class="kt">bool</span><span class="w"></span>
+
+<span class="hll"><span class="w">  </span><span class="c1">// Faster conflict resolution optimization (described near the end of section</span><span class="w"></span>
+</span><span class="hll"><span class="w">  </span><span class="c1">// 5.3 in the paper.)</span><span class="w"></span>
+</span><span class="hll"><span class="w">  </span><span class="nx">ConflictIndex</span><span class="w"> </span><span class="kt">int</span><span class="w"></span>
+</span><span class="hll"><span class="w">  </span><span class="nx">ConflictTerm</span><span class="w">  </span><span class="kt">int</span><span class="w"></span>
+</span><span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>You can see the additional changes in the <a class="reference external" href="https://github.com/eliben/raft/tree/main/part3">code for this part</a>. Two places have to
+change:</p>
+<ul class="simple">
+<li><tt class="docutils literal">AppendEntries</tt> is the AE RPC handler; when followers reject an AE, they
+fill in <tt class="docutils literal">ConflictIndex</tt> and <tt class="docutils literal">ConflictTerm</tt>.</li>
+<li><tt class="docutils literal">leaderSendAEs</tt> is updated at the point where it receives these AE replies,
+and uses <tt class="docutils literal">ConflictIndex</tt> and <tt class="docutils literal">ConflictTerm</tt> to backtrack <tt class="docutils literal">nextIndex</tt>
+more efficiently.</li>
+</ul>
+<p>The Raft paper says:</p>
+<blockquote>
+In practice, we doubt this optimization is necessary, since failures happen
+infrequently and it is unlikely that there will be many inconsistent entries.</blockquote>
+<p>And I absolutely agree. To be able to test this optimization, I had to come up
+with a rather contrived test; IMHO the chances of such scenarios happening in
+real life are very low, and the one-time gain of a couple hundred milliseconds
+doesn't warrant the code complication. I'm showing it here just as an example
+of the many optimizations that can be applied to the <em>uncommon</em> cases in Raft;
+in terms of coding, it's a neat example of how the Raft algorithm can be
+slightly modified to change its behavior in some corner cases.</p>
+<p>Raft was designed to make the common case fairly fast, at the expense of
+performance in uncommon cases (where failures actually happen). I believe this
+is the absolutely correct design choice. Optimizations like the more immediate
+AE delivery described in the previous section are essential, because they
+directly affect the common path.</p>
+<p>On the other hand, optimizations like conflict indices for faster backtracking
+are, while technically interesting, not really important in practice because
+they provide a limited benefit in scenarios that happen during &lt;0.01% of the
+lifetime of a typical cluster.</p>
+</div>
+<div class="section" id="conclusion">
+<h2>Conclusion</h2>
+<p>This concludes our series of 4 posts about the Raft distributed consensus
+algorithm. Thanks for reading!</p>
+<p>For any questions or comments about these posts or the code, please send me an
+email or open an <a class="reference external" href="https://github.com/eliben/raft/issues">issue on GitHub</a>.</p>
+<p>If you're interested in checking out industrial-strength, battle tested
+implementations of Raft in Go, I recommend:</p>
+<ul class="simple">
+<li><a class="reference external" href="https://pkg.go.dev/go.etcd.io/etcd/raft/v3">etcd/raft</a> is the Raft
+part of etcd, which is a distributed key-value database.</li>
+<li><a class="reference external" href="https://github.com/hashicorp/raft">hashicorp/raft</a> is a standalone Raft
+consensus module that can be tied to different clients.</li>
+</ul>
+<p>These implement all the features of the Raft paper, including:</p>
+<ul class="simple">
+<li>Section 6: Cluster membership changes - if one Raft server comes offline
+permanently, it's useful to be able to replace it with another without
+bringing the whole cluster down.</li>
+<li>Section 7: Log compaction - in real applications the log grows very large
+and it becomes impractical to fully persist it for every change or fully
+replay it in case of crashes. Log compaction defines a checkpointing mechanism
+that makes it possible for Raft clusters to replicate very large logs
+efficiently.</li>
+</ul>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

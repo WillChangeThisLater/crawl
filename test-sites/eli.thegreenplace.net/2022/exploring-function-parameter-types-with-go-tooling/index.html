@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Exploring function parameter types with Go tooling - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Exploring function parameter types with Go tooling">
+                        Exploring function parameter types with Go tooling
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> July 09, 2022 at 06:24</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/go-tooling.html">Go tooling</a>
+        ,
+    <a href="../../tag/compilation.html">Compilation</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>I enjoy hacking on <a class="reference external" href="../../tag/go-tooling.html">Go tooling</a>
+(Go programs that analyze and manipulate other Go programs), and a few weeks ago
+an <a class="reference external" href="https://stackoverflow.com/questions/72091466/examining-fields-of-a-struct-by-reference-via-static-analysis">interesting Stack Overflow question</a>
+caught my attention. Given a function with a parameter of some structure type:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">foo</span><span class="p">(</span><span class="nx">param</span><span class="w"> </span><span class="nx">SomeType</span><span class="p">)</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+</pre></div>
+<p>How can we examine the fields of <tt class="docutils literal">SomeType</tt>?</p>
+<p>The reason I found this question interesting is because it's very representative
+of the problems Go tool writers typically face:</p>
+<ol class="arabic simple">
+<li>Find something in the code (e.g. a function)</li>
+<li>Analyze this thing (e.g. check its parameters)</li>
+<li>Find something else based on the analysis (e.g. the fields of the parameters'
+types)</li>
+</ol>
+<p>Let's see how to write such a tool; the post presents the tool in pieces, with
+the <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2022/go-tool-func-param-types">full code on GitHub</a>.</p>
+<div class="section" id="step-0-setting-up">
+<h2>Step 0: setting up</h2>
+<p>As usual, we'll be using the <a class="reference external" href="https://pkg.go.dev/golang.org/x/tools/go/packages?tab=doc">x/tools/go/packages</a> package <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>. In
+this day an age, we expect the input to be a Go <em>module</em>, and the tool will
+look for a path to the module as its sole command-line argument:</p>
+<div class="highlight"><pre><span></span><span class="kd">var</span><span class="w"> </span><span class="nx">fset</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">token</span><span class="p">.</span><span class="nx">NewFileSet</span><span class="p">()</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">const</span><span class="w"> </span><span class="nx">mode</span><span class="w"> </span><span class="nx">packages</span><span class="p">.</span><span class="nx">LoadMode</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">packages</span><span class="p">.</span><span class="nx">NeedName</span><span class="w"> </span><span class="o">|</span><span class="w"></span>
+<span class="w">    </span><span class="nx">packages</span><span class="p">.</span><span class="nx">NeedTypes</span><span class="w"> </span><span class="o">|</span><span class="w"></span>
+<span class="w">    </span><span class="nx">packages</span><span class="p">.</span><span class="nx">NeedSyntax</span><span class="w"> </span><span class="o">|</span><span class="w"></span>
+<span class="w">    </span><span class="nx">packages</span><span class="p">.</span><span class="nx">NeedTypesInfo</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Parse</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">NArg</span><span class="p">()</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;Expecting a single argument: directory of module&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">cfg</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">packages</span><span class="p">.</span><span class="nx">Config</span><span class="p">{</span><span class="nx">Fset</span><span class="p">:</span><span class="w"> </span><span class="nx">fset</span><span class="p">,</span><span class="w"> </span><span class="nx">Mode</span><span class="p">:</span><span class="w"> </span><span class="nx">mode</span><span class="p">,</span><span class="w"> </span><span class="nx">Dir</span><span class="p">:</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Args</span><span class="p">()[</span><span class="mi">0</span><span class="p">]}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">pkgs</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">packages</span><span class="p">.</span><span class="nx">Load</span><span class="p">(</span><span class="nx">cfg</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;./...&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">pkg</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">pkgs</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">processPackage</span><span class="p">(</span><span class="nx">pkg</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>After it loads all the code, <tt class="docutils literal">main</tt> iterates over all the packages found in
+the input module and invokes <tt class="docutils literal">processPackage</tt> for each.</p>
+</div>
+<div class="section" id="step-1-finding-functions">
+<h2>Step 1: finding functions</h2>
+<p>This part is very simple. A package in Go consists of multiple source files;
+each file has an AST representation, and we we can use <tt class="docutils literal">ast.Inspect</tt> to find
+all the function declarations as follows <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">processPackage</span><span class="p">(</span><span class="nx">pkg</span><span class="w"> </span><span class="o">*</span><span class="nx">packages</span><span class="p">.</span><span class="nx">Package</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">fileAst</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">pkg</span><span class="p">.</span><span class="nx">Syntax</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Inspect</span><span class="p">(</span><span class="nx">fileAst</span><span class="p">,</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">n</span><span class="w"> </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Node</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">funcDecl</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">n</span><span class="p">.(</span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">FuncDecl</span><span class="p">);</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">processFuncDecl</span><span class="p">(</span><span class="nx">funcDecl</span><span class="p">,</span><span class="w"> </span><span class="nx">pkg</span><span class="p">.</span><span class="nx">TypesInfo</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+<span class="w">    </span><span class="p">})</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Note that we're extracting <tt class="docutils literal">TypesInfo</tt> from the <tt class="docutils literal">packages.Package</tt> struct.
+This is the type information populated by the type checker because we've set
+the <tt class="docutils literal">packages.NeedTypesInfo</tt> flag in <tt class="docutils literal">LoadMode</tt>. This is an important
+prerequisite for step 3.</p>
+</div>
+<div class="section" id="step-2-analyzing-function-parameters">
+<h2>Step 2: analyzing function parameters</h2>
+<p>With a function declaration in our hands, we can walk over its parameter list
+and examine the type of each parameter:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">processFuncDecl</span><span class="p">(</span><span class="nx">fd</span><span class="w"> </span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">FuncDecl</span><span class="p">,</span><span class="w"> </span><span class="nx">tinfo</span><span class="w"> </span><span class="o">*</span><span class="nx">types</span><span class="p">.</span><span class="nx">Info</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;=== Function&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">fd</span><span class="p">.</span><span class="nx">Name</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">field</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">fd</span><span class="p">.</span><span class="nx">Type</span><span class="p">.</span><span class="nx">Params</span><span class="p">.</span><span class="nx">List</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">names</span><span class="w"> </span><span class="p">[]</span><span class="kt">string</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">name</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">field</span><span class="p">.</span><span class="nx">Names</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">names</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nb">append</span><span class="p">(</span><span class="nx">names</span><span class="p">,</span><span class="w"> </span><span class="nx">name</span><span class="p">.</span><span class="nx">Name</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;param:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">strings</span><span class="p">.</span><span class="nx">Join</span><span class="p">(</span><span class="nx">names</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;, &quot;</span><span class="p">))</span><span class="w"></span>
+<span class="w">    </span><span class="nx">processTypeExpr</span><span class="p">(</span><span class="nx">field</span><span class="p">.</span><span class="nx">Type</span><span class="p">,</span><span class="w"> </span><span class="nx">tinfo</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Note that in Go, multiple parameters can share a type - as in <tt class="docutils literal">func foo(a, b
+int)</tt>; this code collects all the names of a field into a single slice for
+reporting. <tt class="docutils literal">processTypeExpr</tt> is then invoked to process the actual field
+type.</p>
+</div>
+<div class="section" id="step-3-finding-the-types-of-struct-fields">
+<h2>Step 3: finding the types of struct fields</h2>
+<p>Analyzing the actual parameter type is the most involved part of our
+tool. There are two ways to reason about a type in Go source code - the basic
+syntax level, and a semantic level.</p>
+<p>On the syntax level, a type is what the parser sees and is represented by
+<tt class="docutils literal">ast.Expr</tt>. For example, for type <tt class="docutils literal">*T</tt>, this would be an <tt class="docutils literal">ast.StarExpr</tt>
+with whatever <tt class="docutils literal">T</tt> is in its <tt class="docutils literal">X</tt> field. Our <tt class="docutils literal">processFuncDecl</tt> function
+focuses on this syntax level, and it passes an <tt class="docutils literal">ast.Expr</tt> to
+<tt class="docutils literal">processTypeExpr</tt> to represent the type.</p>
+<p>On the semantic level, the tooling infrastructure runs a full type checker (from
+the stdlib <tt class="docutils literal">go/types</tt> package) to determine a mapping between names and actual
+types in the code.</p>
+<p>Thinking about it differently, the syntax level is what we see by just looking
+at the code - <tt class="docutils literal">MyType</tt> is an identifier, but for the Go compiler (and
+tooling) it can carry a deeper (semantic) meaning - a reference to some type.</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">processTypeExpr</span><span class="p">(</span><span class="nx">e</span><span class="w"> </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Expr</span><span class="p">,</span><span class="w"> </span><span class="nx">tinfo</span><span class="w"> </span><span class="o">*</span><span class="nx">types</span><span class="p">.</span><span class="nx">Info</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">switch</span><span class="w"> </span><span class="nx">tyExpr</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">e</span><span class="p">.(</span><span class="kd">type</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">case</span><span class="w"> </span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">StarExpr</span><span class="p">:</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;  pointer to...&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">processTypeExpr</span><span class="p">(</span><span class="nx">tyExpr</span><span class="p">.</span><span class="nx">X</span><span class="p">,</span><span class="w"> </span><span class="nx">tinfo</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">case</span><span class="w"> </span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">ArrayType</span><span class="p">:</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;  slice or array of...&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">processTypeExpr</span><span class="p">(</span><span class="nx">tyExpr</span><span class="p">.</span><span class="nx">Elt</span><span class="p">,</span><span class="w"> </span><span class="nx">tinfo</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">default</span><span class="p">:</span><span class="w"></span>
+<span class="w">    </span><span class="k">switch</span><span class="w"> </span><span class="nx">ty</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">tinfo</span><span class="p">.</span><span class="nx">Types</span><span class="p">[</span><span class="nx">e</span><span class="p">].</span><span class="nx">Type</span><span class="p">.(</span><span class="kd">type</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="o">*</span><span class="nx">types</span><span class="p">.</span><span class="nx">Basic</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;  basic =&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">ty</span><span class="p">.</span><span class="nx">Name</span><span class="p">())</span><span class="w"></span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="o">*</span><span class="nx">types</span><span class="p">.</span><span class="nx">Named</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;  name =&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">ty</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="nx">uty</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">ty</span><span class="p">.</span><span class="nx">Underlying</span><span class="p">()</span><span class="w"></span>
+<span class="w">      </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;  type =&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">ty</span><span class="p">.</span><span class="nx">Underlying</span><span class="p">())</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">sty</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">uty</span><span class="p">.(</span><span class="o">*</span><span class="nx">types</span><span class="p">.</span><span class="nx">Struct</span><span class="p">);</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;  fields:&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="nx">processStructParamType</span><span class="p">(</span><span class="nx">sty</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;  pos =&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">fset</span><span class="p">.</span><span class="nx">Position</span><span class="p">(</span><span class="nx">ty</span><span class="p">.</span><span class="nx">Obj</span><span class="p">().</span><span class="nx">Pos</span><span class="p">()))</span><span class="w"></span>
+<span class="w">    </span><span class="k">default</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;  unnamed type =&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">ty</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">sty</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">ty</span><span class="p">.(</span><span class="o">*</span><span class="nx">types</span><span class="p">.</span><span class="nx">Struct</span><span class="p">);</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;  fields:&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="nx">processStructParamType</span><span class="p">(</span><span class="nx">sty</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This function is recursively peeling off pointers and arrays/slices off the
+type, but eventually ends up in the <tt class="docutils literal">default</tt> clause of the switch. This is
+where it queries the <tt class="docutils literal">types.Info</tt> that was passed in to see what type it's
+dealing with. There are &quot;basic&quot; types like <tt class="docutils literal">string</tt>, named types like
+<tt class="docutils literal">MyType</tt> and even unnamed types like <tt class="docutils literal">struct {x int}</tt> <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>.</p>
+<p>The type mapping has some quirks that may be surprising when working with it for
+the first time. For example, <tt class="docutils literal">ast.SelectorExpr</tt> types that are used to
+identify dot-separated names like <tt class="docutils literal">http.Handler</tt>; these have mappings in
+<tt class="docutils literal">types.Info</tt> (which maps AST nodes to their types). However, pointer types
+like <tt class="docutils literal">*MyType</tt> do not have direct mappings, and the <tt class="docutils literal">ast.StarExpr</tt> has to be
+peeled off first. With some experience and judicious use of AST dumping these
+rules aren't hard to figure out, though.</p>
+<p>Finally, here's the helper for reporting all fields of a struct:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">processStructParamType</span><span class="p">(</span><span class="nx">sty</span><span class="w"> </span><span class="o">*</span><span class="nx">types</span><span class="p">.</span><span class="nx">Struct</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="nx">sty</span><span class="p">.</span><span class="nx">NumFields</span><span class="p">();</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">field</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">sty</span><span class="p">.</span><span class="nx">Field</span><span class="p">(</span><span class="nx">i</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;    &quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">field</span><span class="p">.</span><span class="nx">Name</span><span class="p">(),</span><span class="w"> </span><span class="nx">field</span><span class="p">.</span><span class="nx">Type</span><span class="p">())</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This is where the tool's final destination is. Whatever you need from these
+struct field types, you can do here.</p>
+</div>
+<div class="section" id="sample-run">
+<h2>Sample run</h2>
+<p>Suppose we have an input module with a single package <tt class="docutils literal">main</tt>, with this file
+(<tt class="docutils literal">main.go</tt>):</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span><span class="w"> </span><span class="nx">main</span><span class="w"></span>
+
+<span class="kn">import</span><span class="w"> </span><span class="p">(</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;net/http&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;strings&quot;</span><span class="w"></span>
+<span class="p">)</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">foo</span><span class="p">(</span><span class="nx">x</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">u</span><span class="w"> </span><span class="nx">User</span><span class="p">,</span><span class="w"> </span><span class="nx">up</span><span class="w"> </span><span class="o">*</span><span class="nx">User</span><span class="p">,</span><span class="w"> </span><span class="nx">h</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">Handler</span><span class="p">,</span><span class="w"> </span><span class="nx">s</span><span class="w"> </span><span class="kd">struct</span><span class="p">{</span><span class="w"> </span><span class="nx">b</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">})</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">bar</span><span class="p">(</span><span class="nx">sb</span><span class="w"> </span><span class="o">*</span><span class="nx">strings</span><span class="p">.</span><span class="nx">Builder</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>And an additional file defining the <tt class="docutils literal">User</tt> type (<tt class="docutils literal">user.go</tt>):</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span><span class="w"> </span><span class="nx">main</span><span class="w"></span>
+
+<span class="kd">type</span><span class="w"> </span><span class="nx">User</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">id</span><span class="w">   </span><span class="kt">int</span><span class="w"></span>
+<span class="w">  </span><span class="nx">name</span><span class="w"> </span><span class="kt">string</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Now we can run our tool on this module, and get the following output:</p>
+<div class="highlight"><pre><span></span>=== Function foo
+param: x
+  basic = string
+param: u
+  name = example.com.User
+  type = struct{id int; name string}
+  fields:
+     id int
+     name string
+  pos = 2022/go-tool-func-param-types/sample-module/user.go:3:6
+param: up
+  pointer to...
+  name = example.com.User
+  type = struct{id int; name string}
+  fields:
+     id int
+     name string
+  pos = 2022/go-tool-func-param-types/sample-module/user.go:3:6
+param: h
+  name = net/http.Handler
+  type = interface{ServeHTTP(net/http.ResponseWriter, *net/http.Request)}
+  pos = $GOROOT/src/net/http/server.go:86:1
+param: s
+  unnamed type = struct{b bool}
+  fields:
+     b bool
+=== Function bar
+param: sb
+  pointer to...
+  name = strings.Builder
+  type = struct{addr *strings.Builder; buf []byte}
+  fields:
+     addr *strings.Builder
+     buf []byte
+  pos = $GOROOT/src/strings/builder.go:15:1
+</pre></div>
+<p>Notes:</p>
+<ul class="simple">
+<li>The tool correctly sees through pointer types to get to the underlying type</li>
+<li>For both named and unnamed struct types, the tool gets to the struct's fields
+and lists their names and types</li>
+<li>For named types, the tool reports where they are defined (file, line and
+column) - both for user-defined types and types in the standard library</li>
+</ul>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>For details on the basic usage of <tt class="docutils literal">x/tools/go/packages</tt>, see my
+earlier post on <a class="reference external" href="../../2020/writing-multi-package-analysis-tools-for-go/index.html">Writing multi-package analysis tools</a>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>Alternatively, we could iterate directly over the <tt class="docutils literal">Decl</tt> fields of
+the <tt class="docutils literal">packages.Package</tt>. I prefer using the inherently recursive
+<tt class="docutils literal">ast.Inspect</tt> because it works for a wider variety of scenarios and
+will find the declarations of unnamed functions within other functions as
+well.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>Note: this description does not intend to be complete in the sense of
+covering the entire Go spec. If you encounter additional cases not
+covered here, do an AST dump of the nodes you run into and consult the
+documentation to see how to deal with them.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

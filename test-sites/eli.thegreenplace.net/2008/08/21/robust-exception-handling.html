@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Robust exception handling - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="robust-exception-handling.html"
+                       rel="bookmark"
+                       title="Permalink to Robust exception handling">
+                        Robust exception handling 
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> August 21, 2008 at 10:27</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/programming.html">Programming</a>
+        ,
+    <a href="../../../tag/python.html">Python</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <h4>Executive introduction</h4>
+<ol>
+<li>Exceptions are important</li>
+<li>This article is mainly intended for my own consumption, so take it with a grain of salt</li>
+<li>The examples are in Python, but the ideas apply to most languages</li>
+</ol>
+<h4>Exceptions vs. error status codes</h4>
+<p>Exceptions are better than returning error status codes. Some languages (like Python) leave you with no choice but to handle exceptions, as the whole language core and standard libraries throw them. But even in languages where this is not so, you should prefer exceptions to error codes.</p>
+<p>In the Python world this is sometimes called the EAFP (Easier to Ask for Forgiveness than Permission) versus LBYL (Look Before You Leap) debate. To quote Alex Martelli<sup class="footnote"><a href="robust-exception-handling.html#fn1" title="Chapter 6 of " python in a nutshell&quot; by alex martelli&quot;>1</a></sup> (because I couldn't have said it better myself):</p>
+<blockquote>
+<p>A common idiom in other languages, sometimes known as "look before you leap" (LBYL), is to check in advance, before attempting an operation, for all circumstances that might make the operation invalid. This approach is not ideal for several reasons:</p>
+
+<p>1. The checks may diminish the readability and clarity of the common, mainstream cases where everything is okay.<br />
+2. The work needed for checking may duplicate a substantial part of the work done in the operation itself.<br />
+3. The programmer might easily err by omitting some needed check.<br />
+4. The situation might change between the moment the checks are performed and the moment the operation is attempted</p>
+</blockquote>
+<p>Here's an example of LBYL:</p>
+<pre lang="python">
+def do_something(filename):
+  if not can_open_file(filename):
+    return err(...)
+  f = open(filename)
+  ...
+</pre>
+<p>Suppose that <code>can_open_file</code> indicates whether the subsequent <code>open</code> call will succeed. Let's see how Alex's points apply here:</p>
+<ol>
+<li>In this case the diminished readability is less obvious, but when more error checks are added, it is. Anyone with enough experience in C is familiar with the bulks of error checking typical at the top of some functions<sup class="footnote"><a href="robust-exception-handling.html#fn2" title="Ned Batchelder proposes this example (C/C++):">2</a></sup>.</li>
+<li><code>can_open_file</code> definitely duplicates some of the checking done in <code>open</code>. Just because  <code>open</code> is a built-in, you feel less DRY-violation.</li>
+<li>How can you be sure you've covered everythin in <code>can_open_file</code> ? What if you have not ?</li>
+<li>Suppose you work in a multi-processing environment (no need to think far, a web application running on a server is a good example). Between your test with <code>can_open_file</code> and the actual call to <code>open</code>, some other process might have modified the file's properties, opened it, or deleted it. This is a hard-to-debug race condition.</li>
+</ol>
+<p>The same code with exception handling (EAFP):</p>
+<pre lang="python">def do_something(filename):
+  try:
+    f = open(filename)
+  except IOError, e:
+    raise MyApplicationsExceptionType(e.msg)
+    # could even pass whole traceback etc
+    # etc...
+</pre>
+<p>Suffers of none of these problems and provides greater flexibility. For example, in some cases you can skip the exception checking in <code>do_something</code> completely, because catching it at a higher level is more appropriate. This is difficult to do with error codes.</p>
+<h4>Never use exceptions for flow-control</h4>
+<p>Exceptions exist for exceptional situations: events that are not a part of normal execution. When a programmer calls <code>str.find('substring')</code> he doesn't expect an exception to be thrown if the substring isn't found. This is what he called <code>find</code> for. A better approach is to return a special value like <code>None</code> or -1. But if he called <code>str[idx]</code>, and <code>str</code> is shorter than <code>idx+1</code> characters, an exception is appropriate, because the user expected index <code>idx</code> to be valid, but it isn't - this is an unanticipated event.</p>
+<p>When used for flow-control, exceptions are like <code>goto</code>. There might be a few esoteric cases in which they're appropriate, but 99.99% of the time they are not.</p>
+<h4>Handle exceptions at the level that knows how to handle them</h4>
+<p>By their very nature, exceptions can propagate up a hierarchy and be caught at multiple levels. A questions rises - where is it appropriate to catch and handle an exception ?</p>
+<p>The best place is that piece of code that <em>can</em> handle the exception. For some exceptions, like programming errors (e.g. <code>IndexError, TypeError, NameError</code> etc.) exceptions are best left to the programmer / user, because "handling" them will just hide real bugs.</p>
+<p>If you have a complete application, it is not appropriate to just fail with an exception, of course. It's better to demonstrate a polite error message (or dialog) and thoroughly log the exception itself, which can later help in the investigation of the bug (kind of like the dialog Microsoft replaced BSODs with - you get a polite message and may send a detailed report to Microsoft).</p>
+<p>So before writing <code>try/except</code>, always ask yourself - "is this the right place to handle this exception ? do I have enough information to handle it here ?".</p>
+<p>This is also the reason why you should be extremely careful with <code>except:</code> clauses that catch everything. These will not only catch the exceptions you intended, but <em>all</em> of them.</p>
+<h4>Do not expose implementation details with exceptions</h4>
+<p>As I noted above, exceptions ride the express train up your implementation hierarchy. As such, they are prone to break encapsulation and expose implementation details. An example:</p>
+<p>Suppose you implement an object that manages an internal cache, using a file. An error may occur that that the object can't open its cache file for some reason. The underlying <code>open</code> function will throw <code>IOError</code>. Where should you catch it ?</p>
+<p>Do not leave it to the user of the object. This breaks encapsulation, since the user should not be aware that you're using a file at all. Maybe in the next version you'll use a database, or a web connection ?</p>
+<p>Rather, you should catch the exception in the object, wrap it with your own custom exception (say, <code>CachingFailedError</code>), and trying to preserve as much information as possible, propagate it up. The user of the object will then only have to catch your exception, and won't have to modify his code when you modify the underlying caching implementation. However, if during testing the user will want to investigate the source of the error, he will have all the information he needs to do so.</p>
+<p>Re-raising exceptions correctly is difficult<sup class="footnote"><a href="robust-exception-handling.html#fn3" title="Ian Bicking treats the topic with some depth, but I'll be glad to get more references.">3</a></sup>. Unfortunately there's no one-fit-all recipe - can you recover from the error ? can you provide extra informatin ? do you need the original exception ? do you need its traceback ?</p>
+<p>If all you need is to re-raise an exception with a more appropriate type, retaining the information stored in the old exception, do:</p>
+<pre lang="python">class StuffCachingError(Exception): pass
+
+def do_stuff():
+    try:
+        cache = open(filename)
+        # do stuff with cache
+    except IOError, e:
+        raise StuffCachingError('Caching error: %s' % e)
+</pre>
+<p>Benefits:</p>
+<ol>
+<li>You didn't expose the internal implementation to outside code. Now users of <code>do_stuff</code> can install handlers for <code>StuffCachingError</code>, without knowing you use files under the hood.</li>
+<li>If the user wants to investigate the error in depth, you've also provided the original exception in the error message, and he can do so.</li>
+</ol>
+<p>If you think you need to retain the original traceback as well (IMHO is most cases you don't have to), write:</p>
+<pre lang="python">class StuffCachingError(Exception): pass
+
+def do_stuff():
+    try:
+        cache = open('z.pyg')
+        # do stuff with cache
+    except IOError:
+        exc_class, exc, traceback = sys.exc_info()
+        my_exc = StuffCachingError('Caching error: %s' % exc)
+        raise my_exc.__class__, my_exc, traceback
+</pre>
+<p>Now <code>StuffCachingError</code> will be raised as before, but with the original traceback leading to the call to <code>open</code>.</p>
+<h4>Document the exceptions thrown by your code</h4>
+<p>A useful idiom when thinking about programs is in terms of contracts<sup class="footnote"><a href="robust-exception-handling.html#fn4" title="See Dan Weinreib's insightful treatment of the subject of contracts and exceptions here.">4</a></sup>. Put simply, each function/method has a contract with the outside world:</p>
+<ol>
+<li>What it expects from its argument or the state of the world when invoked</li>
+<li>The result(s) it returns</li>
+<li>Its side effects on the world</li>
+<li>The exceptions it throws</li>
+</ol>
+<p>For some reason, it is much more common to explicitly document the first three terms, but not the last one. I think this is wrong, and exceptions should be documented as well.</p>
+<p>Don't overdo it, of course. Writing "this code can throw NameError because I might have made a coding mistake" is superfluous at best. But thinking about which exceptions your code may throw will help you write better, safer and more encapsulated code. Maybe some exceptions must be hidden from the outside world (just like in the earlier tip on encapsulation). The user of your code must know which handlers to prepare, and which exceptions to propagate forward.</p>
+<center><img src="../../../images/hline.jpg" width="320" height="5" /></center>
+<p class="footnote" id="fn1"><sup>1</sup> Chapter 6 of "Python in a Nutshell" by Alex Martelli</p>
+<p class="footnote" id="fn2"><sup>2</sup> Ned Batchelder <a href="http://nedbatchelder.com/text/exceptions-vs-status.html">proposes</a> this example (C/C++):</p>
+<p>Using error codes:</p>
+<pre lang="cpp">STATUS DoSomething(int a, int b)
+{
+    STATUS st;
+    st = DoThing1(a);
+    if (st != SGOOD) return st;
+    st = DoThing2(b);
+    if (st != SGOOD) return st;
+    return SGOOD;
+}
+</pre>
+<p>Using exceptions:</p>
+<pre lang="cpp">void DoSomething(int a, int b)
+{
+    DoThing1(a);
+    DoThing2(b);
+}
+</pre>
+<p class="footnote" id="fn3"><sup>3</sup> Ian Bicking <a href="http://blog.ianbicking.org/2007/09/12/re-raising-exceptions/">treats the topic</a> with some depth, but I'll be glad to get more references.</p>
+<p class="footnote" id="fn4"><sup>4</sup> See Dan Weinreib's insightful treatment of the subject of contracts and exceptions <a href="http://dlweinreb.wordpress.com/2008/03/24/what-conditions-exceptions-are-really-about/">here</a>.</p>
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="robust-exception-handling.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

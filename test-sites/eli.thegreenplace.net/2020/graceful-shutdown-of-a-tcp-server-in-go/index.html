@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Graceful shutdown of a TCP server in Go - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Graceful shutdown of a TCP server in Go">
+                        Graceful shutdown of a TCP server in Go
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> January 21, 2020 at 05:34</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/concurrency.html">Concurrency</a>
+        ,
+    <a href="../../tag/network-programming.html">Network Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This post is going to discuss how to gracefully shut down a TCP server in Go.
+While servers typically never stop running (until the process is killed), in
+some scenarios - e.g. in tests - it's useful to shut them down in an orderly
+way.</p>
+<div class="section" id="high-level-structure-of-tcp-servers-in-go">
+<h2>High-level structure of TCP servers in Go</h2>
+<p>Let's start with a quick review of the high-level structure of TCP servers
+implemented in Go. Go provides some convenient abstractions on top of sockets.
+Here's pseudo-code for a typical server:</p>
+<div class="highlight"><pre><span></span><span class="nx">listener</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">net</span><span class="p">.</span><span class="nx">Listen</span><span class="p">(</span><span class="s">&quot;tcp&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">...</span><span class="w"> </span><span class="nx">address</span><span class="w"> </span><span class="o">...</span><span class="p">)</span><span class="w"></span>
+<span class="k">for</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">conn</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">listener</span><span class="p">.</span><span class="nx">Accept</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">go</span><span class="w"> </span><span class="nx">handler</span><span class="p">(</span><span class="nx">conn</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Where <tt class="docutils literal">handler</tt> is a blocking function that waits for commands from the
+client, does the required processing, and sends responses back.</p>
+<p>Given this structure, we should clarify what we mean by &quot;shutting a server
+down&quot;. It seems like there are two distinct functionalities a server is
+performing at any given time:</p>
+<ol class="arabic simple">
+<li>It listens for new connections</li>
+<li>It handles existing connections</li>
+</ol>
+<p>It's clear that we can stop listening for new connections, thus handling (1);
+but what about existing connections?</p>
+<p>Unfortunately, there's no easy answer here. The TCP protocol is too low level to
+resolve this question conclusively. If we want to design a widely applicable
+solution, we have to be conservative. Specifically, the safest approach is for
+the shutting down server to wait for clients to close their connections. This is
+the approach we'll examine initially.</p>
+</div>
+<div class="section" id="step-1-waiting-for-client-connections-to-shut-down">
+<h2>Step 1: waiting for client connections to shut down</h2>
+<p>In this solution, we're going to explicitly shut down the listener (stop
+accepting new connections), but will wait for clients to end <em>their</em>
+connections. This is a conservative approach, but it works very well in many
+scenarios where server shutdown is actually needed - such as tests. In a test,
+it's not hard to arrange for all the clients to close their connections before
+expecting the server to shut down.</p>
+<p>I'll be presenting the code piece by piece, but the full runnable code sample is
+<a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2020/tcp-server-shutdown/shutdown1/shutdown1.go">available here</a>.
+Let's start with the server type and the constructor:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">Server</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">listener</span><span class="w"> </span><span class="nx">net</span><span class="p">.</span><span class="nx">Listener</span><span class="w"></span>
+<span class="w">  </span><span class="nx">quit</span><span class="w">     </span><span class="kd">chan</span><span class="w"> </span><span class="kd">interface</span><span class="p">{}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">wg</span><span class="w">       </span><span class="nx">sync</span><span class="p">.</span><span class="nx">WaitGroup</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">NewServer</span><span class="p">(</span><span class="nx">addr</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="nx">Server</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">s</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">Server</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">quit</span><span class="p">:</span><span class="w"> </span><span class="nb">make</span><span class="p">(</span><span class="kd">chan</span><span class="w"> </span><span class="kd">interface</span><span class="p">{}),</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">l</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">net</span><span class="p">.</span><span class="nx">Listen</span><span class="p">(</span><span class="s">&quot;tcp&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">addr</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">s</span><span class="p">.</span><span class="nx">listener</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">l</span><span class="w"></span>
+<span class="w">  </span><span class="nx">s</span><span class="p">.</span><span class="nx">wg</span><span class="p">.</span><span class="nx">Add</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">go</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">serve</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">s</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p><tt class="docutils literal">NewServer</tt> creates a new <tt class="docutils literal">Server</tt> that listens for new connections in a
+background goroutine. In addition to a <tt class="docutils literal">net.Listener</tt>, the <tt class="docutils literal">Server</tt> struct
+contains a channel that's used to signal shutdown and a wait group to wait until
+all the server's goroutines are actually done.</p>
+<p>Here's the <tt class="docutils literal">serve</tt> method the constructor invokes:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">s</span><span class="w"> </span><span class="o">*</span><span class="nx">Server</span><span class="p">)</span><span class="w"> </span><span class="nx">serve</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">wg</span><span class="p">.</span><span class="nx">Done</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">conn</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">listener</span><span class="p">.</span><span class="nx">Accept</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">select</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="o">&lt;-</span><span class="nx">s</span><span class="p">.</span><span class="nx">quit</span><span class="p">:</span><span class="w"></span>
+<span class="w">        </span><span class="k">return</span><span class="w"></span>
+<span class="w">      </span><span class="k">default</span><span class="p">:</span><span class="w"></span>
+<span class="w">        </span><span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;accept error&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">s</span><span class="p">.</span><span class="nx">wg</span><span class="p">.</span><span class="nx">Add</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="k">go</span><span class="w"> </span><span class="kd">func</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">s</span><span class="p">.</span><span class="nx">handleConection</span><span class="p">(</span><span class="nx">conn</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="nx">s</span><span class="p">.</span><span class="nx">wg</span><span class="p">.</span><span class="nx">Done</span><span class="p">()</span><span class="w"></span>
+<span class="w">      </span><span class="p">}()</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It's a standard <tt class="docutils literal">Accept</tt> loop, except for the <tt class="docutils literal">select</tt>. What this <tt class="docutils literal">select</tt>
+does is check (in a non-blocking way) if there's an event (such as a send or a
+close) on the <tt class="docutils literal">s.quit</tt> channel when <tt class="docutils literal">Accept</tt> errors out. If there is, it
+means the error is caused by us closing the listener, and <tt class="docutils literal">serve</tt> returns
+quietly. If <tt class="docutils literal">Accept</tt> returns without errors, we run a connection handler <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>.</p>
+<p>Here's the <tt class="docutils literal">Stop</tt> method that tells the server to shut down gracefully:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">s</span><span class="w"> </span><span class="o">*</span><span class="nx">Server</span><span class="p">)</span><span class="w"> </span><span class="nx">Stop</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nb">close</span><span class="p">(</span><span class="nx">s</span><span class="p">.</span><span class="nx">quit</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">s</span><span class="p">.</span><span class="nx">listener</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">s</span><span class="p">.</span><span class="nx">wg</span><span class="p">.</span><span class="nx">Wait</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It starts by closing the <tt class="docutils literal">s.quit</tt> channel. Then it closes the listener. This
+will cause the <tt class="docutils literal">Accept</tt> call in <tt class="docutils literal">serve</tt> to return an error. Since <tt class="docutils literal">s.quit</tt>
+is already closed at this point, <tt class="docutils literal">serve</tt> will return.</p>
+<p>The last line in <tt class="docutils literal">Stop</tt> is waiting on <tt class="docutils literal">s.wg</tt>, which is also critical. Note
+that <tt class="docutils literal">serve</tt> notifies the wait group that it's done on return. But this is not
+the only goroutine we're waiting for. Each call to <tt class="docutils literal">handleConnection</tt> is
+wrapped by a <tt class="docutils literal">wg</tt> add/done pair as well. Therefore, <tt class="docutils literal">Stop</tt> will block until
+all the handlers have returned, <em>and</em> <tt class="docutils literal">serve</tt> stopped accepting new clients.
+This is a safe shutdown point.</p>
+<p>For completeness, here's is <tt class="docutils literal">handleConnection</tt>; the one here just reads client
+data and logs it, without sending anything back. Naturally, this part of the
+code will be different for each server:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">s</span><span class="w"> </span><span class="o">*</span><span class="nx">Server</span><span class="p">)</span><span class="w"> </span><span class="nx">handleConection</span><span class="p">(</span><span class="nx">conn</span><span class="w"> </span><span class="nx">net</span><span class="p">.</span><span class="nx">Conn</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">conn</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">buf</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">make</span><span class="p">([]</span><span class="kt">byte</span><span class="p">,</span><span class="w"> </span><span class="mi">2048</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">n</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">conn</span><span class="p">.</span><span class="nx">Read</span><span class="p">(</span><span class="nx">buf</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nx">io</span><span class="p">.</span><span class="nx">EOF</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;read error&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">n</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;received from %v: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">conn</span><span class="p">.</span><span class="nx">RemoteAddr</span><span class="p">(),</span><span class="w"> </span><span class="nb">string</span><span class="p">(</span><span class="nx">buf</span><span class="p">[:</span><span class="nx">n</span><span class="p">]))</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Using this server is simple:</p>
+<div class="highlight"><pre><span></span><span class="nx">s</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">NewServer</span><span class="p">(</span><span class="nx">addr</span><span class="p">)</span><span class="w"></span>
+<span class="c1">// do whatever here...</span><span class="w"></span>
+<span class="nx">s</span><span class="p">.</span><span class="nx">Stop</span><span class="p">()</span><span class="w"></span>
+</pre></div>
+<p>Recall that <tt class="docutils literal">NewServer</tt> returns a server but doesn't block. <tt class="docutils literal">s.Stop</tt> does
+block, however. In tests, what you'd do for graceful shutdown is:</p>
+<ol class="arabic simple">
+<li>Make sure all clients interacting with the server have closed their
+connections.</li>
+<li>Wait for <tt class="docutils literal">s.Stop</tt> to return.</li>
+</ol>
+</div>
+<div class="section" id="step-2-actively-closing-open-client-connections">
+<h2>Step 2: actively closing open client connections</h2>
+<p>In step 1, we expected all clients to close their connections before declaring
+the shutdown process successful. Here we'll look at a more aggressive approach,
+where on <tt class="docutils literal">Stop()</tt> the server will actively attempt to close open client
+connections. I'll present a technique that's both simple and robust first, at
+the cost of some performance. After that, we'll discuss some alternatives.</p>
+<p>The full code for this step is <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2020/tcp-server-shutdown/shutdown2/shutdown2.go">available too</a>.
+It's identical to step 1 except the code of <tt class="docutils literal">handleConection</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">s</span><span class="w"> </span><span class="o">*</span><span class="nx">Server</span><span class="p">)</span><span class="w"> </span><span class="nx">handleConection</span><span class="p">(</span><span class="nx">conn</span><span class="w"> </span><span class="nx">net</span><span class="p">.</span><span class="nx">Conn</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">conn</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">buf</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">make</span><span class="p">([]</span><span class="kt">byte</span><span class="p">,</span><span class="w"> </span><span class="mi">2048</span><span class="p">)</span><span class="w"></span>
+<span class="nx">ReadLoop</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">select</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="o">&lt;-</span><span class="nx">s</span><span class="p">.</span><span class="nx">quit</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"></span>
+<span class="w">    </span><span class="k">default</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="nx">conn</span><span class="p">.</span><span class="nx">SetDeadline</span><span class="p">(</span><span class="nx">time</span><span class="p">.</span><span class="nx">Now</span><span class="p">().</span><span class="nx">Add</span><span class="p">(</span><span class="mi">200</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Millisecond</span><span class="p">))</span><span class="w"></span>
+<span class="w">      </span><span class="nx">n</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">conn</span><span class="p">.</span><span class="nx">Read</span><span class="p">(</span><span class="nx">buf</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="nx">opErr</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">err</span><span class="p">.(</span><span class="o">*</span><span class="nx">net</span><span class="p">.</span><span class="nx">OpError</span><span class="p">);</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">opErr</span><span class="p">.</span><span class="nx">Timeout</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="k">continue</span><span class="w"> </span><span class="nx">ReadLoop</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nx">io</span><span class="p">.</span><span class="nx">EOF</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;read error&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">          </span><span class="k">return</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">n</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">return</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;received from %v: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">conn</span><span class="p">.</span><span class="nx">RemoteAddr</span><span class="p">(),</span><span class="w"> </span><span class="nb">string</span><span class="p">(</span><span class="nx">buf</span><span class="p">[:</span><span class="nx">n</span><span class="p">]))</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This handler sets a deadline on each socket read. The deadline duration here is
+200 ms, but it could be set to anything else that makes sense for your specific
+application. If a read returns with a timeout, it means the client has been
+idle for the timeout duration and the connection could be safe to close. So
+each iteration of the loop checks for <tt class="docutils literal">s.quit</tt> and returns if there's an event
+there.</p>
+<p>This approach is robust, in the sense that we're (most likely) not going to
+close connections while the client is actively sending something. It's also
+simple, since it limits all the extra logic to <tt class="docutils literal">handleConnection</tt>.</p>
+<p>There's a performance cost, of course. First, a <tt class="docutils literal">conn.Read</tt> call is issued
+once every 200 ms, which is slightly slower than a single blocking call; I'd
+say this is negligible, though. More seriously, every <tt class="docutils literal">Stop</tt> request will be
+delayed by 200 ms. This is probably OK in most scenarios where we want to
+shut down a server, but the deadline can be tweaked to fit specific protocol
+needs.</p>
+<p>An alternative to this design would be to keep track of all the open connections
+outside <tt class="docutils literal">handleConection</tt>, and force-close them when <tt class="docutils literal">Stop</tt> is called. This
+would likely be more efficient, at the cost of implementation complexity and
+some lack of robustness. Such a <tt class="docutils literal">Stop</tt> could easily close connections while
+clients are actively sending data, resulting in client errors.</p>
+<p>For inspiration on the right path to take, we can look at the stdlib's
+<tt class="docutils literal">http.Server.Shutdown</tt> method, which is documented as follows:</p>
+<blockquote>
+Shutdown gracefully shuts down the server without interrupting any active
+connections. Shutdown works by first closing all open listeners, then
+closing all idle connections, and then waiting indefinitely for connections
+to return to idle and then shut down</blockquote>
+<p>What does &quot;idle&quot; mean here? Roughly that the client hasn't sent any requests
+for some period of time. The HTTP server has advantage over a generic TCP
+server, because it's a higher-level protocol, so it knows the client
+communication pattern. In different protocols, different shutdown strategies
+may make sense.</p>
+<p>A different example is a protocol where the server initiates messages, or at
+least some of them. For example, a given connection may be in a state where
+the client is waiting for the server to send some event. It's usually safe for
+the server to close this connection on shutdown without waiting for anything.</p>
+</div>
+<div class="section" id="conclusion">
+<h2>Conclusion</h2>
+<p>I would summarize this post with two general guidelines:</p>
+<ol class="arabic simple">
+<li>Try to make shutdowns as safe as possible</li>
+<li>Think of the higher-level protocol</li>
+</ol>
+<p>I typically encounter the need to shut down a TCP server while writing tests. I
+want each test to be self-contained and clean up after itself, including all the
+client-server connections and listening servers. For this scenario, step 1 works
+very well. Once all client connections have been closed, <tt class="docutils literal">Server.Stop</tt> will
+return without any delays.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>Note the pattern of using a <tt class="docutils literal">WaitGroup</tt>: <tt class="docutils literal">wg.Add(1)</tt> is invoked
+<em>before</em> the <tt class="docutils literal">go</tt> statement launching the goroutine. This is done
+in the constructor before launching <tt class="docutils literal">go s.serve()</tt> as well. This
+pattern is important for safety. If we call <tt class="docutils literal">wg.Add(1)</tt> <em>inside</em> the
+goroutine, an execution sequence where <tt class="docutils literal">wg.Wait()</tt> is called before
+the goroutine had a chance to run could happen; since in this case
+nothing has been added to the <tt class="docutils literal">WaitGroup</tt> yet, <tt class="docutils literal">Wait</tt> will return;
+this is clearly an undesirable race.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

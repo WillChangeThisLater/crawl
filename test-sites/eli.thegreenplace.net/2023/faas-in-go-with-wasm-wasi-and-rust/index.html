@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>FAAS in Go with WASM, WASI and Rust - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to FAAS in Go with WASM, WASI and Rust">
+                        FAAS in Go with WASM, WASI and Rust
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> May 06, 2023 at 06:44</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/webassembly.html">WebAssembly</a>
+        ,
+    <a href="../../tag/rust.html">Rust</a>
+        ,
+    <a href="../../tag/plugins.html">Plugins</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This post is best described as a technology demonstration; it melds together
+web servers, plugins, WebAssembly, Go, Rust and ABIs. Here's what it shows:</p>
+<ul class="simple">
+<li>How to load WASM code with WASI in a Go environment and hook it up to a web
+server.</li>
+<li>How to implement web server plugins in any language that can be compiled to
+WASM.</li>
+<li>How to translate Go programs into WASM that uses WASI.</li>
+<li>How to translate Rust programs into WASM that uses WASI.</li>
+<li>How to write WAT (WebAssembly Text) code that uses WASI to interact with
+a non-JS environment.</li>
+</ul>
+<p>We're going to build a simple <strong>FAAS</strong> (Function as a Service) server in Go
+that lets us write <em>modules</em> in any language that has a WASM
+target. Comparing to existing technologies, it's something
+between GCP's <a class="reference external" href="https://cloud.google.com/functions">Cloud Functions</a>, <a class="reference external" href="https://cloud.google.com/run">Cloud
+Run</a> and good old <a class="reference external" href="https://en.wikipedia.org/wiki/Common_Gateway_Interface">CGI</a>.</p>
+<div class="section" id="design">
+<h2>Design</h2>
+<p>Let's start with a high-level diagram describing how the system works:</p>
+<img alt="Diagram showing flow of events in this program, also described below" class="align-center" src="../../images/2023/wasm-faas.png" />
+<p>The steps numbered in the diagram are:</p>
+<ol class="arabic simple">
+<li>The FAAS server receives an <tt class="docutils literal">HTTP GET</tt> request, with a path consisting of
+a module name (<tt class="docutils literal">func</tt> in the example in the diagram) and an arbitrary
+query string.</li>
+<li>The FAAS server finds and loads the WASM module corresponding to the module
+name it was provided, and invokes it with a description of the HTTP request.</li>
+<li>The module emits output to its stdout, which is captured by the FAAS server.</li>
+<li>The FAAS server uses the module's stdout as the contents of an HTTP Response
+to the request it received.</li>
+</ol>
+</div>
+<div class="section" id="the-faas-server">
+<h2>The FAAS server</h2>
+<p>We'll start our deep dive with the FAAS server itself (<a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2023/wasm-faas">full code here</a>). The
+HTTP handling part is straightforward:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">httpHandler</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">parts</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">strings</span><span class="p">.</span><span class="nx">Split</span><span class="p">(</span><span class="nx">strings</span><span class="p">.</span><span class="nx">Trim</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Path</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;/&quot;</span><span class="p">),</span><span class="w"> </span><span class="s">&quot;/&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">parts</span><span class="p">)</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">http</span><span class="p">.</span><span class="nx">Error</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;want /{modulename} prefix&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">StatusBadRequest</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">mod</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">parts</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;module %v requested with query %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">mod</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Query</span><span class="p">())</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">env</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">]</span><span class="kt">string</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="s">&quot;http_path&quot;</span><span class="p">:</span><span class="w">   </span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Path</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="s">&quot;http_method&quot;</span><span class="p">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">Method</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="s">&quot;http_host&quot;</span><span class="p">:</span><span class="w">   </span><span class="nx">req</span><span class="p">.</span><span class="nx">Host</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="s">&quot;http_query&quot;</span><span class="p">:</span><span class="w">  </span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Query</span><span class="p">().</span><span class="nx">Encode</span><span class="p">(),</span><span class="w"></span>
+<span class="w">    </span><span class="s">&quot;remote_addr&quot;</span><span class="p">:</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">RemoteAddr</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">modpath</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Sprintf</span><span class="p">(</span><span class="s">&quot;target/%v.wasm&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">mod</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;loading module %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">modpath</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">out</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">invokeWasmModule</span><span class="p">(</span><span class="nx">mod</span><span class="p">,</span><span class="w"> </span><span class="nx">modpath</span><span class="p">,</span><span class="w"> </span><span class="nx">env</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;error loading module %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">modpath</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">http</span><span class="p">.</span><span class="nx">Error</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;unable to find module &quot;</span><span class="o">+</span><span class="nx">modpath</span><span class="p">,</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">StatusNotFound</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// The module&#39;s stdout is written into the response.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprint</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nx">out</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">mux</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">NewServeMux</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">mux</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">httpHandler</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">http</span><span class="p">.</span><span class="nx">ListenAndServe</span><span class="p">(</span><span class="s">&quot;:8080&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">mux</span><span class="p">))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This server listens on port 8080 (feel free to change this or make it
+more configurable), and registers a catch-all handler for the root path. The
+handler parses the actual request URL to find the module name. It then stores
+some information to pass to the loaded module in the <tt class="docutils literal">env</tt> map.</p>
+<p>The loaded module is found with a filesystem lookup in the <tt class="docutils literal">target</tt> directory
+relative to the FAAS server binary. All of this is just for demonstration
+purposes and can be easily changed, of course. The handler then calls
+<tt class="docutils literal">invokeWasmModule</tt>, which we'll get to shortly. This function returns the
+invoked module's stdout, which the handler prints out into the HTTP response.</p>
+</div>
+<div class="section" id="running-wasm-code-in-go">
+<h2>Running WASM code in Go</h2>
+<p>Given a WASM module, how do we run it programmatically in Go? There are several
+high-quality WASM <em>runtimes</em> that work outside the browser environment, and many
+of them have Go bindings; for example <a class="reference external" href="https://github.com/bytecodealliance/wasmtime-go">wasmtime-go</a>. The one I like most,
+however, is <a class="reference external" href="https://github.com/tetratelabs/wazero">wazero</a>; it's a
+zero-dependency, pure Go runtime that doesn't have any prerequisites except
+running a <tt class="docutils literal">go get</tt>. Our FAAS server is using <tt class="docutils literal">wazero</tt> to load and run
+WASM modules.</p>
+<p>Here's <tt class="docutils literal">invokeWasmModule</tt>:</p>
+<div class="highlight"><pre><span></span><span class="c1">// invokeWasmModule invokes the given WASM module (given as a file path),</span><span class="w"></span>
+<span class="c1">// setting its env vars according to env. Returns the module&#39;s stdout.</span><span class="w"></span>
+<span class="kd">func</span><span class="w"> </span><span class="nx">invokeWasmModule</span><span class="p">(</span><span class="nx">modname</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">wasmPath</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">env</span><span class="w"> </span><span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">]</span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="kt">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ctx</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">context</span><span class="p">.</span><span class="nx">Background</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">r</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">wazero</span><span class="p">.</span><span class="nx">NewRuntime</span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">Close</span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">wasi_snapshot_preview1</span><span class="p">.</span><span class="nx">MustInstantiate</span><span class="p">(</span><span class="nx">ctx</span><span class="p">,</span><span class="w"> </span><span class="nx">r</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Instantiate the wasm runtime, setting up exported functions from the host</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// that the wasm module can use for logging purposes.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">NewHostModuleBuilder</span><span class="p">(</span><span class="s">&quot;env&quot;</span><span class="p">).</span><span class="w"></span>
+<span class="w">    </span><span class="nx">NewFunctionBuilder</span><span class="p">().</span><span class="w"></span>
+<span class="w">    </span><span class="nx">WithFunc</span><span class="p">(</span><span class="kd">func</span><span class="p">(</span><span class="nx">v</span><span class="w"> </span><span class="kt">uint32</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;[%v]: %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">modname</span><span class="p">,</span><span class="w"> </span><span class="nx">v</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}).</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Export</span><span class="p">(</span><span class="s">&quot;log_i32&quot;</span><span class="p">).</span><span class="w"></span>
+<span class="w">    </span><span class="nx">NewFunctionBuilder</span><span class="p">().</span><span class="w"></span>
+<span class="w">    </span><span class="nx">WithFunc</span><span class="p">(</span><span class="kd">func</span><span class="p">(</span><span class="nx">ctx</span><span class="w"> </span><span class="nx">context</span><span class="p">.</span><span class="nx">Context</span><span class="p">,</span><span class="w"> </span><span class="nx">mod</span><span class="w"> </span><span class="nx">api</span><span class="p">.</span><span class="nx">Module</span><span class="p">,</span><span class="w"> </span><span class="nx">ptr</span><span class="w"> </span><span class="kt">uint32</span><span class="p">,</span><span class="w"> </span><span class="nx">len</span><span class="w"> </span><span class="kt">uint32</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="c1">// Read the string from the module&#39;s exported memory.</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">bytes</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">mod</span><span class="p">.</span><span class="nx">Memory</span><span class="p">().</span><span class="nx">Read</span><span class="p">(</span><span class="nx">ptr</span><span class="p">,</span><span class="w"> </span><span class="nx">len</span><span class="p">);</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;[%v]: %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">modname</span><span class="p">,</span><span class="w"> </span><span class="nb">string</span><span class="p">(</span><span class="nx">bytes</span><span class="p">))</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;[%v]: log_string: unable to read wasm memory&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">modname</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}).</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Export</span><span class="p">(</span><span class="s">&quot;log_string&quot;</span><span class="p">).</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Instantiate</span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">wasmObj</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">ReadFile</span><span class="p">(</span><span class="nx">wasmPath</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Set up stdout redirection and env vars for the module.</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">stdoutBuf</span><span class="w"> </span><span class="nx">bytes</span><span class="p">.</span><span class="nx">Buffer</span><span class="w"></span>
+<span class="w">  </span><span class="nx">config</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">wazero</span><span class="p">.</span><span class="nx">NewModuleConfig</span><span class="p">().</span><span class="nx">WithStdout</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">stdoutBuf</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">k</span><span class="p">,</span><span class="w"> </span><span class="nx">v</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">env</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">config</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">config</span><span class="p">.</span><span class="nx">WithEnv</span><span class="p">(</span><span class="nx">k</span><span class="p">,</span><span class="w"> </span><span class="nx">v</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Instantiate the module. This invokes the _start function by default.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">InstantiateWithConfig</span><span class="p">(</span><span class="nx">ctx</span><span class="p">,</span><span class="w"> </span><span class="nx">wasmObj</span><span class="p">,</span><span class="w"> </span><span class="nx">config</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">stdoutBuf</span><span class="p">.</span><span class="nx">String</span><span class="p">(),</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Interesting things to note about this code:</p>
+<ul class="simple">
+<li><tt class="docutils literal">wazero</tt> supports WASI, which has to be instantiated explicitly to be usable
+by the loaded modules.</li>
+<li>A lot of the code deals with exporting logging functions from the host (the
+Go code of the FAAS server) to the WASM module.</li>
+<li>We set up the loaded module's stdout to be redirected to a buffer, and set up
+its environment variables to match the <tt class="docutils literal">env</tt> map passed in.</li>
+</ul>
+<p>There are several way for host code to interact with WASM modules using only the
+WASI API and ABI. Here, we opt for using environment variables for input and
+stdout for output, but there are other options (see the <em>Other resources</em>
+section in the bottom for some pointers).</p>
+<p>This is it - the whole FAAS server, about 100 LOC of commented Go code. Now
+let's move on to see some WASM modules this thing can load and run.</p>
+</div>
+<div class="section" id="writing-modules-in-go">
+<h2>Writing modules in Go</h2>
+<p>We can compile Go code to WASM that uses WASI. Here's a basic Go program that
+emits a greeting and a listing of its environment variables to stdout:</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span><span class="w"> </span><span class="nx">main</span><span class="w"></span>
+
+<span class="kn">import</span><span class="w"> </span><span class="p">(</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;fmt&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;os&quot;</span><span class="w"></span>
+<span class="p">)</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;goenv environment:&quot;</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">e</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Environ</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot; &quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">e</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Until recently, the only way to compile Go code to WASM that works outside the
+browser was by using the <a class="reference external" href="https://tinygo.org/">TinyGo</a> compiler. In our
+FAAS project structure, the invocation from the root directory is:</p>
+<div class="highlight"><pre><span></span>$ tinygo build -o target/goenv.wasm -target=wasi examples/goenv/goenv.go
+</pre></div>
+<p>Sharp-eyed readers will recall that the <tt class="docutils literal">target/</tt> directory is precisely where
+the FAAS server looks for <tt class="docutils literal">*.wasm</tt> files to load as modules. Now that we've
+placed a module named <tt class="docutils literal">goenv.wasm</tt> there, we're ready to launch our server
+with <tt class="docutils literal">go run .</tt> in the root directory. We can issue a HTTP request to its
+<tt class="docutils literal">goenv</tt> module in a separate terminal:</p>
+<div class="highlight"><pre><span></span>$ curl &quot;localhost:8080/goenv?foo=bar&amp;id=1234&quot;
+goenv environment:
+  http_method=GET
+  http_host=localhost:8080
+  http_query=foo=bar&amp;id=1234
+  remote_addr=127.0.0.1:59268
+  http_path=/goenv
+</pre></div>
+<p>And looking at the terminal where the FAAS server runs we'll see some logging
+like:</p>
+<div class="highlight"><pre><span></span>2023/04/29 06:35:59 module goenv requested with query map[foo:[bar] id:[1234]]
+2023/04/29 06:35:59 loading module target/goenv.wasm
+</pre></div>
+<p>As I've mentioned before, this was the main way to compile to WASI <em>until
+recently</em>. In the upcoming Go release (version 1.21), new support for the WASI
+target is included in the main Go toolchain (the <tt class="docutils literal">gc</tt> compiler) <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>. It's
+easy to try today either by building Go from source, or using <a class="reference external" href="https://pkg.go.dev/golang.org/dl/gotip">gotip</a>:</p>
+<div class="highlight"><pre><span></span>$ GOOS=wasip1 GOARCH=wasm gotip build -o target/goenv.wasm examples/goenv/goenv.go
+</pre></div>
+<p>(the <tt class="docutils literal">wasip1</tt> target name refers to &quot;WASI Preview 1&quot;)</p>
+</div>
+<div class="section" id="writing-modules-in-rust">
+<h2>Writing modules in Rust</h2>
+<p>Rust is another language that has good support for WASM and WASI in the build
+system. After adding the <tt class="docutils literal"><span class="pre">wasm32-wasi</span></tt> target with <tt class="docutils literal">rustup</tt>, it's as simple
+as passing the target name to <tt class="docutils literal">cargo</tt>:</p>
+<div class="highlight"><pre><span></span>$ cargo build --target wasm32-wasi --release
+</pre></div>
+<p>The code is straightforward, similarly to the Go version:</p>
+<div class="highlight"><pre><span></span><span class="k">use</span><span class="w"> </span><span class="n">std</span>::<span class="n">env</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="fm">println!</span><span class="p">(</span><span class="s">&quot;rustenv environment:&quot;</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">key</span><span class="p">,</span><span class="w"> </span><span class="n">value</span><span class="p">)</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">env</span>::<span class="n">vars</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="fm">println!</span><span class="p">(</span><span class="s">&quot;  {key}: {value}&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+</div>
+<div class="section" id="writing-modules-in-webassembly-text-wat">
+<h2>Writing modules in WebAssembly Text (WAT)</h2>
+<p>As we've seen, compiling Go and Rust code to WASM is fairly easy; looking for a
+challenge, let's write a module in WAT! As <a class="reference external" href="../webassembly-text-code-samples/index.html">I've written before</a>, I enjoy
+writing directly in WAT; it's educational, and produces remarkably compact
+binaries.</p>
+<p>The &quot;educational&quot; aspect quickly becomes apparent when thinking about our task.
+How exactly am I supposed to write to stdout or read environment variables using
+WASM? This is where WASI comes in. WASI defines both an API and ABI, both of
+which will be visible in our sample. The following shows some code snippets with
+explanations; for the full code check out the <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2023/wasm-faas">sample repository</a>.</p>
+<p>First, I want to show how output to stdout is done; we start by importing
+the <tt class="docutils literal">fd_write</tt> WASI system call:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="k">import</span> <span class="s2">&quot;wasi_snapshot_preview1&quot;</span> <span class="s2">&quot;fd_write&quot;</span> <span class="p">(</span><span class="k">func</span> <span class="nv">$fd_write</span> <span class="p">(</span><span class="k">param</span> <span class="kt">i32</span> <span class="kt">i32</span> <span class="kt">i32</span> <span class="kt">i32</span><span class="p">)</span> <span class="p">(</span><span class="k">result</span> <span class="kt">i32</span><span class="p">)))</span>
+</pre></div>
+<p>Apparently, it has four <tt class="docutils literal">i32</tt> parameters and returns an <tt class="docutils literal">i32</tt>; what do all
+of these mean? Unfortunately, WASI documentation could use a lot of work; the
+resources I found useful are <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>:</p>
+<ol class="arabic simple">
+<li><a class="reference external" href="https://github.com/WebAssembly/WASI/blob/main/legacy/preview1/docs.md#fd_write">Legacy preview 1 specs</a></li>
+<li><a class="reference external" href="https://github.com/WebAssembly/wasi-libc/blob/main/libc-bottom-half/headers/public/wasi/api.h#L1754">C header descriptions of these functions</a></li>
+</ol>
+<p>With this in hand, I was able to concoct a useful <tt class="docutils literal">println</tt> equivalent in
+WAT that uses <tt class="docutils literal">fd_write</tt> under the hood:</p>
+<div class="highlight"><pre><span></span><span class="c1">;; println prints a string to stdout using WASI.</span>
+<span class="c1">;; It takes the string&#39;s address and length as parameters.</span>
+<span class="p">(</span><span class="k">func</span> <span class="nv">$println</span> <span class="p">(</span><span class="k">param</span> <span class="nv">$strptr</span> <span class="kt">i32</span><span class="p">)</span> <span class="p">(</span><span class="k">param</span> <span class="nv">$len</span> <span class="kt">i32</span><span class="p">)</span>
+    <span class="c1">;; Print the string pointed to by $strptr first.</span>
+    <span class="c1">;;   fd=1</span>
+    <span class="c1">;;   data vector with the pointer and length</span>
+    <span class="p">(</span><span class="nb">i32.store</span> <span class="p">(</span><span class="nb">global.get</span> <span class="nv">$datavec_addr</span><span class="p">)</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$strptr</span><span class="p">))</span>
+    <span class="p">(</span><span class="nb">i32.store</span> <span class="p">(</span><span class="nb">global.get</span> <span class="nv">$datavec_len</span><span class="p">)</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$len</span><span class="p">))</span>
+    <span class="p">(</span><span class="nb">call</span> <span class="nv">$fd_write</span>
+        <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">1</span><span class="p">)</span>
+        <span class="p">(</span><span class="nb">global.get</span> <span class="nv">$datavec_addr</span><span class="p">)</span>
+        <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">1</span><span class="p">)</span>
+        <span class="p">(</span><span class="nb">global.get</span> <span class="nv">$fdwrite_ret</span><span class="p">)</span>
+    <span class="p">)</span>
+    <span class="nb">drop</span>
+
+    <span class="c1">;; Print out a newline.</span>
+    <span class="p">(</span><span class="nb">i32.store</span> <span class="p">(</span><span class="nb">global.get</span> <span class="nv">$datavec_addr</span><span class="p">)</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mf">850</span><span class="p">))</span>
+    <span class="p">(</span><span class="nb">i32.store</span> <span class="p">(</span><span class="nb">global.get</span> <span class="nv">$datavec_len</span><span class="p">)</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">1</span><span class="p">))</span>
+    <span class="p">(</span><span class="nb">call</span> <span class="nv">$fd_write</span>
+        <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">1</span><span class="p">)</span>
+        <span class="p">(</span><span class="nb">global.get</span> <span class="nv">$datavec_addr</span><span class="p">)</span>
+        <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">1</span><span class="p">)</span>
+        <span class="p">(</span><span class="nb">global.get</span> <span class="nv">$fdwrite_ret</span><span class="p">)</span>
+    <span class="p">)</span>
+    <span class="nb">drop</span>
+<span class="p">)</span>
+</pre></div>
+<p>This uses some globals that you'll have to look up in the <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2023/wasm-faas/examples/watenv.wat">full code sample</a>
+if you're interested. Here's another helper function that prints out a
+zero-terminated string to stdout:</p>
+<div class="highlight"><pre><span></span><span class="c1">;; show_env emits a single env var pair to stdout. envptr points to it,</span>
+<span class="c1">;; and it&#39;s 0-terminated.</span>
+<span class="p">(</span><span class="k">func</span> <span class="nv">$show_env</span> <span class="p">(</span><span class="k">param</span> <span class="nv">$envptr</span> <span class="kt">i32</span><span class="p">)</span>
+    <span class="p">(</span><span class="k">local</span> <span class="nv">$i</span> <span class="kt">i32</span><span class="p">)</span>
+    <span class="p">(</span><span class="nb">local.set</span> <span class="nv">$i</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">0</span><span class="p">))</span>
+
+    <span class="c1">;; for i = 0; envptr[i] != 0; i++</span>
+    <span class="p">(</span><span class="k">loop</span> <span class="nv">$count_loop</span> <span class="p">(</span><span class="k">block</span> <span class="nv">$break_count_loop</span>
+        <span class="p">(</span><span class="nb">i32.eqz</span> <span class="p">(</span><span class="nb">i32.load8_u</span> <span class="p">(</span><span class="nb">i32.add</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$envptr</span><span class="p">)</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$i</span><span class="p">))))</span>
+        <span class="nb">br_if</span> <span class="nv">$break_count_loop</span>
+
+        <span class="p">(</span><span class="nb">local.set</span> <span class="nv">$i</span> <span class="p">(</span><span class="nb">i32.add</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$i</span><span class="p">)</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">1</span><span class="p">)))</span>
+        <span class="nb">br</span> <span class="nv">$count_loop</span>
+    <span class="p">))</span>
+
+    <span class="p">(</span><span class="nb">call</span> <span class="nv">$println</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$envptr</span><span class="p">)</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$i</span><span class="p">))</span>
+<span class="p">)</span>
+</pre></div>
+<p>The fun part about writing assembly is that there are no abstractions.
+Everything is out in the open. You know how strings are typically represented
+using either zero termination (like in C) or a <tt class="docutils literal">(start, len)</tt> pair?
+In manual WAT code that uses WASI we have the pleasure of using both approaches
+in the same program :-)</p>
+<p>Finally, our main function:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="k">func</span> <span class="nv">$main</span> <span class="p">(</span><span class="k">export</span> <span class="s2">&quot;_start&quot;</span><span class="p">)</span>
+    <span class="p">(</span><span class="k">local</span> <span class="nv">$i</span> <span class="kt">i32</span><span class="p">)</span>
+    <span class="p">(</span><span class="k">local</span> <span class="nv">$num_of_envs</span> <span class="kt">i32</span><span class="p">)</span>
+    <span class="p">(</span><span class="k">local</span> <span class="nv">$next_env_ptr</span> <span class="kt">i32</span><span class="p">)</span>
+
+    <span class="p">(</span><span class="nb">call</span> <span class="nv">$log_string</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mf">750</span><span class="p">)</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">19</span><span class="p">))</span>
+
+    <span class="c1">;; Find out the number of env vars.</span>
+    <span class="p">(</span><span class="nb">call</span> <span class="nv">$environ_sizes_get</span> <span class="p">(</span><span class="nb">global.get</span> <span class="nv">$env_count</span><span class="p">)</span> <span class="p">(</span><span class="nb">global.get</span> <span class="nv">$env_len</span><span class="p">))</span>
+    <span class="nb">drop</span>
+
+    <span class="c1">;; Get the env vars themselves into memory.</span>
+    <span class="p">(</span><span class="nb">call</span> <span class="nv">$environ_get</span> <span class="p">(</span><span class="nb">global.get</span> <span class="nv">$env_ptrs</span><span class="p">)</span> <span class="p">(</span><span class="nb">global.get</span> <span class="nv">$env_buf</span><span class="p">))</span>
+    <span class="nb">drop</span>
+
+    <span class="c1">;; Print out the preamble</span>
+    <span class="p">(</span><span class="nb">call</span> <span class="nv">$println</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mf">800</span><span class="p">)</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">19</span><span class="p">))</span>
+
+    <span class="c1">;; for i = 0; i != *env_count; i++</span>
+    <span class="c1">;;   show env var i</span>
+    <span class="p">(</span><span class="nb">local.set</span> <span class="nv">$num_of_envs</span> <span class="p">(</span><span class="nb">i32.load</span> <span class="p">(</span><span class="nb">global.get</span> <span class="nv">$env_count</span><span class="p">)))</span>
+    <span class="p">(</span><span class="nb">local.set</span> <span class="nv">$i</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">0</span><span class="p">))</span>
+    <span class="p">(</span><span class="k">loop</span> <span class="nv">$envvar_loop</span> <span class="p">(</span><span class="k">block</span> <span class="nv">$break_envvar_loop</span>
+        <span class="p">(</span><span class="nb">i32.eq</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$i</span><span class="p">)</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$num_of_envs</span><span class="p">))</span>
+        <span class="p">(</span><span class="nb">br_if</span> <span class="nv">$break_envvar_loop</span><span class="p">)</span>
+
+        <span class="c1">;; next_env_ptr &lt;- env_ptrs[i*4]</span>
+        <span class="p">(</span><span class="nb">local.set</span>
+            <span class="nv">$next_env_ptr</span>
+            <span class="p">(</span><span class="nb">i32.load</span> <span class="p">(</span><span class="nb">i32.add</span>  <span class="p">(</span><span class="nb">global.get</span> <span class="nv">$env_ptrs</span><span class="p">)</span>
+                                <span class="p">(</span><span class="nb">i32.mul</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$i</span><span class="p">)</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">4</span><span class="p">)))))</span>
+
+        <span class="c1">;; print out this env var</span>
+        <span class="p">(</span><span class="nb">call</span> <span class="nv">$show_env</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$next_env_ptr</span><span class="p">))</span>
+
+        <span class="p">(</span><span class="nb">local.set</span> <span class="nv">$i</span> <span class="p">(</span><span class="nb">i32.add</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$i</span><span class="p">)</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">1</span><span class="p">)))</span>
+        <span class="p">(</span><span class="nb">br</span> <span class="nv">$envvar_loop</span><span class="p">)</span>
+    <span class="p">))</span>
+<span class="p">)</span>
+</pre></div>
+<p>We can now compile this WAT code into a FAAS module and re-run the server:</p>
+<div class="highlight"><pre><span></span>$ wat2wasm examples/watenv.wat -o target/watenv.wasm
+$ go run .
+</pre></div>
+<p>Let's try it:</p>
+<div class="highlight"><pre><span></span>$ curl &quot;localhost:8080/watenv?foo=bar&amp;id=1234&quot;
+watenv environment:
+http_host=localhost:8080
+http_query=foo=bar&amp;id=1234
+remote_addr=127.0.0.1:43868
+http_path=/watenv
+http_method=GET
+</pre></div>
+<div class="section" id="wasi-api-and-abi">
+<h3>WASI: API and ABI</h3>
+<p>I've mentioned the <em>WASI API and ABI</em> earlier; now it's a good time to explain
+what that means. An API is a set of functions that programs using WASI have
+access to; one can think of it as a standard library of sorts. Go programmers
+have access to the <tt class="docutils literal">fmt</tt> package and the <tt class="docutils literal">Println</tt> function within it.
+Programs targeting WASI have access to the <tt class="docutils literal">fd_write</tt> system call in the
+<tt class="docutils literal">wasi_snapshow_preview1</tt> module, and so on. The API of <tt class="docutils literal">fd_write</tt> also
+defines how this function takes parameters and what it returns. Our sample uses
+three WASI functions: <tt class="docutils literal">fd_write</tt>, <tt class="docutils literal">environ_sizes_get</tt> and <tt class="docutils literal">environ_get</tt>.</p>
+<p>An ABI is a little bit less familiar to most programmers; it's the run-time
+contract between a program and its environment. The WASI ABI is currently
+unstable and is <a class="reference external" href="https://github.com/WebAssembly/WASI/blob/main/legacy/application-abi.md">described here</a>. In
+our program, the ABI manifests in two ways:</p>
+<ol class="arabic simple">
+<li>The main entry point we export is the <tt class="docutils literal">_start</tt> function. This is
+automatically called by a WASI-supporting host after setup.</li>
+<li>Our WASM code exports its linear memory to the host with
+<tt class="docutils literal">(memory (export &quot;memory&quot;) 1)</tt>. Since WASI APIs require passing pointers
+to memory, both the host and the WASM module need a shared understanding
+of how to access this memory.</li>
+</ol>
+<p>Naturally, both the Go and Rust implementations of FAAS modules comply to the
+WASI API and ABI, but this is hidden by the compiler from programmers. In the
+Go program, for example, all we need to do is write a <tt class="docutils literal">main</tt> function as usual
+and therein emit to stdout using <tt class="docutils literal">Println</tt>. The Go compiler will properly
+export <tt class="docutils literal">_start</tt> and <tt class="docutils literal">memory</tt>:</p>
+<div class="highlight"><pre><span></span>$ wasm-objdump -x target/goenv.wasm
+
+... snip
+
+Export[2]:
+ - func[1028] &lt;_rt0_wasm_wasip1&gt; -&gt; &quot;_start&quot;
+ - memory[0] -&gt; &quot;memory&quot;
+
+... snip
+</pre></div>
+<p>And will properly hook things up to call our code from <tt class="docutils literal">_start</tt>, etc.</p>
+</div>
+</div>
+<div class="section" id="wasi-and-plugins">
+<h2>WASI and plugins</h2>
+<p>The FAAS server presented in this post is clearly an example of developing
+<em>plugins</em> using WASM and WASI. This is an emerging and exciting area in
+programming and lots of progress is being made on multiple fronts. Right now,
+WASI modules are limited to interacting with the environment via means like
+environment variables and stdin/stdout; while this is fine for interacting
+with the outside world, for host-to-module communication it's not amazing, in
+my experience. Therefore the WASM standards committee is working of further
+improvements to WASI that may include sockets and other means of passing data
+between hosts and modules.</p>
+<p>In the meantime, projects are making do with what they have. For example, the
+<a class="reference external" href="https://sqlc.dev/">sqlc Go package</a> supports WASM plugins. The communication
+with plugins happens as follows: the host encodes a command into a protobuf
+and emits it to the plugin's stdin; it then reads the plugin's stdout for a
+protobuf-encoded response.</p>
+<p>Other projects are taking more maverick approaches; for example, <a class="reference external" href="https://www.envoyproxy.io/">the Envoy
+proxy</a>
+<a class="reference external" href="../plugins-case-study-envoy-wasm-extensions/index.html">supports WASM plugins</a>
+by defining a custom API and ABI between the host and WASM modules. I'll
+probably write more about this in a later post.</p>
+</div>
+<div class="section" id="other-resources">
+<h2>Other resources</h2>
+<p>Here are some additional resources on the same topic as this post:</p>
+<ul class="simple">
+<li><a class="reference external" href="https://blog.scottlogic.com/2022/04/16/wasm-faas.html">Building a WebAssembly-powered serverless platform</a> - the
+post that inspired this one. Other WASM-related articles from that blog are
+also recommended.</li>
+<li><a class="reference external" href="https://github.com/deislabs/wagi">wagi</a> - a more featured approch with
+the same idea, implemented in Rust.</li>
+<li><a class="reference external" href="https://wasmer.io/posts/announcing-wcgi">WCGI</a> - an even more
+CGI-conformant approach.</li>
+</ul>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>The main Go compiler supported WASM for a while, but only as a target
+for browsers &amp; JS (I wrote <a class="reference external" href="../../2022/sudoku-go-and-webassembly/index.html">a bit about it recently</a>).
+The news in 1.21 is the <tt class="docutils literal">GOOS=wasip1</tt> support, which hooks up Go's
+internal syscalls to WASI APIs, sets up the ABI etc.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>These resources tend to disappear and move around without notice; if you
+notice a dead link, please drop me a note and I'll look for a more
+up-to-date source.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

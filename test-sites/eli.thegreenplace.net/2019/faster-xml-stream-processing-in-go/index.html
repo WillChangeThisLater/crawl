@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Faster XML stream processing in Go - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Faster XML stream processing in Go">
+                        Faster XML stream processing in Go
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> July 22, 2019 at 05:37</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../tag/python.html">Python</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>XML processing was all the rage 15 years ago; while it's less
+prominent these days, it's still an important task in some application domains.
+In this post I'm going to compare the speed of stream-processing huge XML files
+in Go, Python and C and finish up with a new, minimal module that uses C to
+accelerate this task for Go. All the code shown throughout this post is
+available <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2019/xml-stream">in this GitHub repository</a> the new
+Go module <a class="reference external" href="https://github.com/eliben/gosax">is here</a>.</p>
+<div class="section" id="what-does-xml-stream-processing-mean">
+<h2>What does XML stream processing mean?</h2>
+<p>First, let's define the problem at hand in more detail. Roughly speaking, there
+are two ways we can process data from a file:</p>
+<ol class="arabic simple">
+<li>Read the whole file into memory at once, and then proces the data in
+memory.</li>
+<li>Read the file in chunks, process each chuck, without having the whole data
+in memory at any given time.</li>
+</ol>
+<p>In many ways, (1) is more convenient because we can easily go back to any part
+of the file. However, in some situations (2) is essential; specifically, when
+the file is very large. This is where <em>stream</em> processing comes in. If our input
+file is 500 GiB, we're unlikely to be able to read it into memory and have to
+process it in parts. Even for smaller files that would theoretically fit into
+RAM, it's not always a good idea to read them wholly; this dramatically
+increases the active heap size and can cause performance issues in
+garbage-collected languages.</p>
+</div>
+<div class="section" id="the-task">
+<h2>The task</h2>
+<p>For this benchmark, I'm using <a class="reference external" href="https://github.com/eliben/xmlgen">xmlgen</a> to
+create a 230 MiB XML file <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>. A tiny fragment of the file may look like this:</p>
+<div class="highlight"><pre><span></span>&lt;?xml version=&quot;1.0&quot; standalone=&quot;yes&quot;?&gt;
+&lt;site&gt;
+  &lt;regions&gt;
+    &lt;asia&gt;
+      &lt;item id=&quot;item0&quot;&gt;
+        &lt;location&gt;United States&lt;/location&gt;
+        &lt;quantity&gt;1&lt;/quantity&gt;
+        &lt;name&gt;duteous nine eighteen &lt;/name&gt;
+        &lt;payment&gt;Creditcard&lt;/payment&gt;
+        ...
+      &lt;/item&gt;
+    &lt;/asia&gt;
+  &lt;/regions&gt;
+&lt;/site&gt;
+</pre></div>
+<p>The task is to find how many times &quot;Africa&quot; appears in the data of the
+<tt class="docutils literal">&lt;location&gt;</tt> tag throughout the document.</p>
+</div>
+<div class="section" id="baseline-using-the-go-standard-library">
+<h2>Baseline - using the Go standard library</h2>
+<p>Let's start with a baseline implementation - using the standard library's
+<tt class="docutils literal">encoding/xml</tt> package. While the package's <tt class="docutils literal">Unmarshal</tt> mode will parse the
+whole file in one go, it can also be used to process XML token by token and
+selectively parse interesting elements. Here is the code:</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span><span class="w"> </span><span class="nx">main</span><span class="w"></span>
+
+<span class="kn">import</span><span class="w"> </span><span class="p">(</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;encoding/xml&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;fmt&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;io&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;log&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;os&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;strings&quot;</span><span class="w"></span>
+<span class="p">)</span><span class="w"></span>
+
+<span class="kd">type</span><span class="w"> </span><span class="nx">location</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Data</span><span class="w"> </span><span class="kt">string</span><span class="w"> </span><span class="s">`xml:&quot;,chardata&quot;`</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">f</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Open</span><span class="p">(</span><span class="nx">os</span><span class="p">.</span><span class="nx">Args</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">f</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">d</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">xml</span><span class="p">.</span><span class="nx">NewDecoder</span><span class="p">(</span><span class="nx">f</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">count</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">0</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">tok</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">d</span><span class="p">.</span><span class="nx">Token</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">tok</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nx">io</span><span class="p">.</span><span class="nx">EOF</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="c1">// EOF means we&#39;re done.</span><span class="w"></span>
+<span class="w">      </span><span class="k">break</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatalf</span><span class="p">(</span><span class="s">&quot;Error decoding token: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">switch</span><span class="w"> </span><span class="nx">ty</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">tok</span><span class="p">.(</span><span class="kd">type</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="nx">xml</span><span class="p">.</span><span class="nx">StartElement</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">ty</span><span class="p">.</span><span class="nx">Name</span><span class="p">.</span><span class="nx">Local</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s">&quot;location&quot;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// If this is a start element named &quot;location&quot;, parse this element</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// fully.</span><span class="w"></span>
+<span class="w">        </span><span class="kd">var</span><span class="w"> </span><span class="nx">loc</span><span class="w"> </span><span class="nx">location</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">d</span><span class="p">.</span><span class="nx">DecodeElement</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">loc</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">ty</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatalf</span><span class="p">(</span><span class="s">&quot;Error decoding item: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="nx">strings</span><span class="p">.</span><span class="nx">Contains</span><span class="p">(</span><span class="nx">loc</span><span class="p">.</span><span class="nx">Data</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Africa&quot;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="nx">count</span><span class="o">++</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="k">default</span><span class="p">:</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;count =&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">count</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>I made sure to double check that the memory usage of this program stays bounded
+and low while processing a large file - the maximum RSS was under 7 MiB while
+processing our 230 MiB input file. I'm verifying this for all the programs
+presented in this post using <tt class="docutils literal">/usr/bin/time <span class="pre">-v</span></tt> on Linux.</p>
+<p>This program takes 6.24 seconds to process the whole file and print out the
+result.</p>
+</div>
+<div class="section" id="python-implementation">
+<h2>Python implementation</h2>
+<p>The first Python implementation uses the <tt class="docutils literal">xml.etree.ElementTree</tt> module from
+the standard library:</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">sys</span>
+<span class="kn">import</span> <span class="nn">xml.etree.ElementTree</span> <span class="k">as</span> <span class="nn">ET</span>
+
+<span class="n">count</span> <span class="o">=</span> <span class="mi">0</span>
+<span class="k">for</span> <span class="n">event</span><span class="p">,</span> <span class="n">elem</span> <span class="ow">in</span> <span class="n">ET</span><span class="o">.</span><span class="n">iterparse</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">events</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;end&quot;</span><span class="p">,)):</span>
+    <span class="k">if</span> <span class="n">event</span> <span class="o">==</span> <span class="s2">&quot;end&quot;</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">elem</span><span class="o">.</span><span class="n">tag</span> <span class="o">==</span> <span class="s1">&#39;location&#39;</span> <span class="ow">and</span> <span class="n">elem</span><span class="o">.</span><span class="n">text</span> <span class="ow">and</span> <span class="s1">&#39;Africa&#39;</span> <span class="ow">in</span> <span class="n">elem</span><span class="o">.</span><span class="n">text</span><span class="p">:</span>
+            <span class="n">count</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="n">elem</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="s1">&#39;count =&#39;</span><span class="p">,</span> <span class="n">count</span><span class="p">)</span>
+</pre></div>
+<p>The key here is the <tt class="docutils literal">elem.clear()</tt> call. It ensures that each element gets
+discarded afer parsing it fully, so the memory usage won't grow linearly with
+the size of the file (unless the file is pathological). This program takes 3.7
+seconds to process the whole file - much faster than our Go program. Why is
+that?</p>
+<p>While the Go program uses 100% Go code for the task (<tt class="docutils literal">encoding/xml</tt> is
+implemented entirely in Go), the Python program is using a C extension (most of
+<tt class="docutils literal">ElementTree</tt> is written in C) wrapping a fast XML parser in C - <a class="reference external" href="https://github.com/libexpat/libexpat">libexpat</a>. The bulk of the work here is done in
+C, which is faster than Go.
+The performance of <tt class="docutils literal">encoding/xml</tt> is further discussed in
+<a class="reference external" href="https://github.com/golang/go/issues/21823">this issue</a>, though it's an
+old one and the performance has been somewhat optimized since then.</p>
+<p>An alternative XML parsing library for Python is <a class="reference external" href="https://github.com/lxml/lxml">lxml</a>,
+which uses <a class="reference external" href="https://www.xmlsoft.org/">libxml</a> underneath. Here's a Python
+version using lxml:</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">sys</span>
+<span class="kn">from</span> <span class="nn">lxml</span> <span class="kn">import</span> <span class="n">etree</span>
+
+<span class="n">count</span> <span class="o">=</span> <span class="mi">0</span>
+<span class="k">for</span> <span class="n">event</span><span class="p">,</span> <span class="n">elem</span> <span class="ow">in</span> <span class="n">etree</span><span class="o">.</span><span class="n">iterparse</span><span class="p">(</span><span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">events</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;end&quot;</span><span class="p">,)):</span>
+    <span class="k">if</span> <span class="n">event</span> <span class="o">==</span> <span class="s2">&quot;end&quot;</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">elem</span><span class="o">.</span><span class="n">tag</span> <span class="o">==</span> <span class="s1">&#39;location&#39;</span> <span class="ow">and</span> <span class="n">elem</span><span class="o">.</span><span class="n">text</span> <span class="ow">and</span> <span class="s1">&#39;Africa&#39;</span> <span class="ow">in</span> <span class="n">elem</span><span class="o">.</span><span class="n">text</span><span class="p">:</span>
+            <span class="n">count</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="n">elem</span><span class="o">.</span><span class="n">clear</span><span class="p">()</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="s1">&#39;count =&#39;</span><span class="p">,</span> <span class="n">count</span><span class="p">)</span>
+</pre></div>
+<p>This looks very similar to the previous version, and that's on purpose. lxml
+has an <tt class="docutils literal">etree</tt>-compatible API to make transition from the standard library
+smoother. This version also takes around 3.7 seconds for our 230 MiB file.</p>
+<p>The reason I'm including lxml here is that it will run faster than
+<tt class="docutils literal">xml.etree.ElementTree</tt> when slurping the whole file, for our particular file
+size. I want to highlight that this is outside of the scope for my experiment,
+because I only care about streaming processing. The only way (that I'm aware
+of!) to successfully process a 500 GiB file with lxml would be by using
+<tt class="docutils literal">iterparse</tt>.</p>
+</div>
+<div class="section" id="how-fast-can-it-run">
+<h2>How fast can it run?</h2>
+<p>Based on the measurements presented here, Go is about 68% slower than Python for
+parsing a large XML file in a streaming fashion. While Go usually compiles to
+a much faster code than pure Python, the Python implementations have the backing
+of efficient C libraries with which it's difficult to compete. I was curious
+to know how fast it could be, in theory <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.</p>
+<p>To answer this question, I implemented the same program using pure C with
+libxml, which has a <a class="reference external" href="https://en.wikipedia.org/wiki/Simple_API_for_XML">SAX API</a>. I won't paste it wholly
+here because it's longer, but you can find the <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2019/xml-stream/c-libxmlsax-count">full source code on GitHub</a>.
+It takes just 0.56 seconds to process our 230 MiB input file, which is very
+impressive given the other results, but also not very surprising. This is C,
+after all.</p>
+<p>You may wonder - if lxml uses libxml underneath, why is it so much slower than
+the pure C version? The answer is Python call overhead. The lxml version calls
+back into Python <em>for every parsed element</em>, which incurs a significant
+cost <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>. Another reason is that my C implementation doesn't actually parse an
+element - it's just a simple event-based state machine, so there's less extra
+work being done.</p>
+</div>
+<div class="section" id="using-libxml-from-go">
+<h2>Using libxml from Go</h2>
+<p>To recap where we are so far:</p>
+<ol class="arabic simple">
+<li>Python libraries based on underlying C implementations are faster than
+pure Go.</li>
+<li>Pure C is much faster still.</li>
+</ol>
+<p>We have two options: we can either try to optimize Go's <tt class="docutils literal">encoding/xml</tt>
+package, or we can try to wrap a fast C library with Go. While the former is a
+worthy goal, it involves a large effort and should be a topic for a separate
+post. Here, I'll go for the latter.</p>
+<p>Seaching around the web, I found a few wrappers around libxml. Two that seemed
+moderately popular and maintained are <a class="reference external" href="https://github.com/lestrrat-go/libxml2">https://github.com/lestrrat-go/libxml2</a>
+and <a class="reference external" href="https://github.com/moovweb/gokogiri">https://github.com/moovweb/gokogiri</a>. Unfortunately, neither of these (or
+the other bindings I found) are exposing the SAX API of libxml; instead, they
+focus on the DOM API, where the whole document is parsed by the underlying
+library and a tree is returned. As mentioned above, we need the SAX interface
+to process huge files.</p>
+</div>
+<div class="section" id="gosax">
+<h2>gosax</h2>
+<p>It's time to roll our own :-) I wrote the <a class="reference external" href="https://github.com/eliben/gosax">gosax</a> module, which uses Cgo to call into libxml
+and exposes a SAX interface <a class="footnote-reference" href="index.html#footnote-4" id="footnote-reference-4">[4]</a>. Implementing it was an interesting exercise
+in Cgo, because it requires some non-trivial concepts like
+<a class="reference external" href="../passing-callbacks-and-pointers-to-cgo/index.html">registering Go callbacks with C</a>.</p>
+<p>Here's a version of our program using gosax:</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span><span class="w"> </span><span class="nx">main</span><span class="w"></span>
+
+<span class="kn">import</span><span class="w"> </span><span class="p">(</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;fmt&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;os&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;strings&quot;</span><span class="w"></span>
+
+<span class="w">  </span><span class="s">&quot;github.com/eliben/gosax&quot;</span><span class="w"></span>
+<span class="p">)</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">counter</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">0</span><span class="w"></span>
+<span class="w">  </span><span class="nx">inLocation</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="kc">false</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">scb</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">gosax</span><span class="p">.</span><span class="nx">SaxCallbacks</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">StartElement</span><span class="p">:</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">name</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">attrs</span><span class="w"> </span><span class="p">[]</span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">name</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s">&quot;location&quot;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">inLocation</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">inLocation</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kc">false</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">},</span><span class="w"></span>
+
+<span class="w">    </span><span class="nx">EndElement</span><span class="p">:</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">name</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">inLocation</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kc">false</span><span class="w"></span>
+<span class="w">    </span><span class="p">},</span><span class="w"></span>
+
+<span class="w">    </span><span class="nx">Characters</span><span class="p">:</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">contents</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">inLocation</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">strings</span><span class="p">.</span><span class="nx">Contains</span><span class="p">(</span><span class="nx">contents</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Africa&quot;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">counter</span><span class="o">++</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">},</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">gosax</span><span class="p">.</span><span class="nx">ParseFile</span><span class="p">(</span><span class="nx">os</span><span class="p">.</span><span class="nx">Args</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span><span class="w"> </span><span class="nx">scb</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nb">panic</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;counter =&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">counter</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>As you can see, it implements a state machine that remembers being inside
+a <tt class="docutils literal">location</tt> element, where the character data is checked. This program
+takes 4.03 seconds to process our input file. Not bad! But we can do a bit
+better, and <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2019/xml-stream/gosax-count/gosax-count.go">with a couple of optimizations</a>
+I managed to bring it down to 3.68 seconds - about the same speed as the Python
+implementations!</p>
+<p>IMHO the roughly similar run times here are a coincidence, because the Python
+programs are different from my approach in that they expose a higher-level API
+than pure SAX. Recall that <tt class="docutils literal">iterparse</tt> returns a parsed element, and we
+can access its <tt class="docutils literal">text</tt> attribute, etc. In gosax, we have to do this much more
+manually. Since the the <a class="reference external" href="https://about.sourcegraph.com/go/gophercon-2018-adventures-in-cgo-performance">cost of calls between Cgo and Go is rather high</a>,
+there is an optimization opportunity here for gosax. We could do more work in
+C - parsing a full element, and returning it wholly to Go. This would move work
+from the Go side to the C side, as well as reduce the number of cross-language
+calls. But this is a task for another day.</p>
+</div>
+<div class="section" id="conclusion">
+<h2>Conclusion</h2>
+<p>Well, this was fun :-) There are 5 different implementations of the same simple
+task described here, in 3 different programming languages. Here is a summary
+of the speed measurements we got:</p>
+<img alt="Performance comparison chart" class="align-center" src="../../images/2019/xml-sax-comparison.png" />
+<p>Python's performance story has always been - &quot;it's probably fast enough, and in
+the rare cases where it isn't, use a C extension&quot;. In Go the narrative is
+somewhat different: in most cases, the Go compiler produces fairly fast code.
+Pure Go code is significantly faster than Python and often faster than Java.
+Even so, every once in a while it may be useful to dip into C or C++ for
+performance, and in these cases Cgo is a good approach.</p>
+<p>It's obvious that <tt class="docutils literal">encoding/xml</tt> <a class="reference external" href="https://github.com/golang/go/issues/21823">needs some work w.r.t. performance</a>, but until that happens - there
+are good alternatives! Leveraging the speed of libxml has been possible for the
+DOM API, and now is possible for the SAX API as well. In the long run, I believe
+that serious performance work on <tt class="docutils literal">encoding/xml</tt> can make it go faster than
+the libxml wrappers because it would elimitate the high cost of C-to-Go calls.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>This size will easily fit in RAM, but it's good enough to provide a
+meaningful benchmarking duration.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>When working on optimizations, it's often useful to know &quot;the speed
+of light&quot; of some computation. Say we want to optimize some function in
+our program. It's worth asking - how much faster will the program be if
+this function takes 0 time? If the overall change is tiny, the function
+is not worth optimizing, most likely. This is just a practical
+application of Amdahl's law.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>We can test this hypothesis by timing how long it takes the non-streaming
+API in lxml to parse the same file. Since it parses the whole XML file
+in C before returning the parsed structure to Python, we expect the
+Python call overhead to be much smaller. Indeed, for files that fit into
+memory this is faster. But once again, in this post we return our
+attention to streaming APIs - assuming this is our only choice for
+gigantic files.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-4">[4]</a></td><td>gosax is very minimal, only providing the most common SAX callbacks.
+The decision to create a new module was just for convenience and speed;
+the more correct thing would have likely been to contribute to one of
+the existing libxml wrappers. I don't see gosax as production-quality
+at this stage - I just hacked it together to be able to experiment for
+this post.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

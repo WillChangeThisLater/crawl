@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Safely using destructors in Python - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="safely-using-destructors-in-python.html"
+                       rel="bookmark"
+                       title="Permalink to Safely using destructors in Python">
+                        Safely using destructors in Python
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> June 12, 2009 at 08:40</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/python.html">Python</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p><em>This post applies to Python 2.5 and 2.6 - if you see any difference for Python 3, please let me know.</em></p>
+<p>Destructors are a very important concept in C++, where they're an essential ingredient of <a class="reference external" href="http://en.wikipedia.org/wiki/RAII">RAII</a> - virtually the only real safe way to write code that involves allocation and deallocation of resources in an exception-throwing program.</p>
+<p>In Python, destructors are needed much less, because Python has a garbage collector that handles memory management. However, while memory is the most common resource allocated, it is not the only one. There are also sockets and database connections to be closed, files, buffers and caches flushed and a few more resources that need to be released when an object is done with them.</p>
+<p>So Python has the destructor concept - the <tt class="docutils literal"><span class="pre">__del__</span></tt> method. For some reason, many in the Python community believe that <tt class="docutils literal"><span class="pre">__del__</span></tt> is evil and shouldn't be used. However, a simple <tt class="docutils literal"><span class="pre">grep</span></tt> of the standard library shows dozens of uses of <tt class="docutils literal"><span class="pre">__del__</span></tt> in classes we all use and love, so where's the catch? In this article I'll try to make it clear (first and foremost for myself), when <tt class="docutils literal"><span class="pre">__del__</span></tt> should be used, and how.</p>
+<div class="section" id="simple-code-samples">
+<h3>Simple code samples</h3>
+<p>First a basic example:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">FooType</span>(<span style="color: #00007f">object</span>):
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">__init__</span>(<span style="color: #00007f">self</span>, <span style="color: #00007f">id</span>):
+        <span style="color: #00007f">self</span>.id = <span style="color: #00007f">id</span>
+        <span style="color: #00007f; font-weight: bold">print</span> <span style="color: #00007f">self</span>.id, <span style="color: #7f007f">&#39;born&#39;</span>
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">__del__</span>(<span style="color: #00007f">self</span>):
+        <span style="color: #00007f; font-weight: bold">print</span> <span style="color: #00007f">self</span>.id, <span style="color: #7f007f">&#39;died&#39;</span>
+
+
+ft = FooType(<span style="color: #007f7f">1</span>)
+</pre></div>
+<p>This prints:</p>
+<div class="highlight"><pre>1 born
+1 died
+</pre></div>
+<p>Now, recall that due to the usage of a reference-counting garbage collector, Python won't clean up an object when it goes out of scope. It will clean it up when the last reference to it has gone out of scope. Here's a demonstration:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">FooType</span>(<span style="color: #00007f">object</span>):
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">__init__</span>(<span style="color: #00007f">self</span>, <span style="color: #00007f">id</span>):
+        <span style="color: #00007f">self</span>.id = <span style="color: #00007f">id</span>
+        <span style="color: #00007f; font-weight: bold">print</span> <span style="color: #00007f">self</span>.id, <span style="color: #7f007f">&#39;born&#39;</span>
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">__del__</span>(<span style="color: #00007f">self</span>):
+        <span style="color: #00007f; font-weight: bold">print</span> <span style="color: #00007f">self</span>.id, <span style="color: #7f007f">&#39;died&#39;</span>
+
+<span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">make_foo</span>():
+    <span style="color: #00007f; font-weight: bold">print</span> <span style="color: #7f007f">&#39;Making...&#39;</span>
+    ft = FooType(<span style="color: #007f7f">1</span>)
+    <span style="color: #00007f; font-weight: bold">print</span> <span style="color: #7f007f">&#39;Returning...&#39;</span>
+    <span style="color: #00007f; font-weight: bold">return</span> ft
+
+<span style="color: #00007f; font-weight: bold">print</span> <span style="color: #7f007f">&#39;Calling...&#39;</span>
+ft = make_foo()
+<span style="color: #00007f; font-weight: bold">print</span> <span style="color: #7f007f">&#39;End...&#39;</span>
+</pre></div>
+<p>This prints:</p>
+<div class="highlight"><pre>Calling...
+Making...
+1 born
+Returning...
+End...
+1 died
+</pre></div>
+<p>The destructor was called after the program ended, not when <tt class="docutils literal"><span class="pre">ft</span></tt> went out of scope inside <tt class="docutils literal"><span class="pre">make_foo</span></tt>.</p>
+</div>
+<div class="section" id="alternatives-to-the-destructor">
+<h3>Alternatives to the destructor</h3>
+<p>Before I proceed, a proper disclosure: Python provides a better method for managing resources than destructors - contexts. I won't turn this into a tutorial of contexts, but you should really get yourself familiar with the <tt class="docutils literal"><span class="pre">with</span></tt> statement and objects that can be used inside. For example, the best way to handle writing to a file is:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">with</span> <span style="color: #00007f">open</span>(<span style="color: #7f007f">&#39;out.txt&#39;</span>, <span style="color: #7f007f">&#39;w&#39;</span>) <span style="color: #00007f; font-weight: bold">as</span> of:
+    of.write(<span style="color: #7f007f">&#39;222&#39;</span>)
+</pre></div>
+<p>This makes sure the file is properly closed when the block inside <tt class="docutils literal"><span class="pre">with</span></tt> exits, even if exceptions are thrown. Note that this demonstrates a standard context manager. Another is <tt class="docutils literal"><span class="pre">threading.lock</span></tt>, which returns a context manager very suitable to be used in a <tt class="docutils literal"><span class="pre">with</span></tt> statement. You should read <a class="reference external" href="http://www.python.org/dev/peps/pep-0343/">PEP 343</a> for more details.</p>
+<p>While recommended, <tt class="docutils literal"><span class="pre">with</span></tt> isn't always applicable. For example, assume you have an object that encapsulates some sort of a database that has to be committed and closed when the object ends its existence. Now suppose the object should be a member variable of some large and complex class (say, a GUI dialog, or a MVC model class). The parent interacts with the DB object from time to time in different methods, so using <tt class="docutils literal"><span class="pre">with</span></tt> isn't practical. What's needed is a functioning destructor.</p>
+</div>
+<div class="section" id="where-destructors-go-astray">
+<h3>Where destructors go astray</h3>
+<p>To solve the use case I presented in the last paragraph, you can employ the <tt class="docutils literal"><span class="pre">__del__</span></tt> destructor. However, it's important to know that this doesn't always work well. The nemesis of a reference-counting garbage collector is circular references. Here's an example:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">FooType</span>(<span style="color: #00007f">object</span>):
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">__init__</span>(<span style="color: #00007f">self</span>, <span style="color: #00007f">id</span>, parent):
+        <span style="color: #00007f">self</span>.id = <span style="color: #00007f">id</span>
+        <span style="color: #00007f">self</span>.parent = parent
+        <span style="color: #00007f; font-weight: bold">print</span> <span style="color: #7f007f">&#39;Foo&#39;</span>, <span style="color: #00007f">self</span>.id, <span style="color: #7f007f">&#39;born&#39;</span>
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">__del__</span>(<span style="color: #00007f">self</span>):
+        <span style="color: #00007f; font-weight: bold">print</span> <span style="color: #7f007f">&#39;Foo&#39;</span>, <span style="color: #00007f">self</span>.id, <span style="color: #7f007f">&#39;died&#39;</span>
+
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">BarType</span>(<span style="color: #00007f">object</span>):
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">__init__</span>(<span style="color: #00007f">self</span>, <span style="color: #00007f">id</span>):
+        <span style="color: #00007f">self</span>.id = <span style="color: #00007f">id</span>
+        <span style="color: #00007f">self</span>.foo = FooType(<span style="color: #00007f">id</span>, <span style="color: #00007f">self</span>)
+        <span style="color: #00007f; font-weight: bold">print</span> <span style="color: #7f007f">&#39;Bar&#39;</span>, <span style="color: #00007f">self</span>.id, <span style="color: #7f007f">&#39;born&#39;</span>
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">__del__</span>(<span style="color: #00007f">self</span>):
+        <span style="color: #00007f; font-weight: bold">print</span> <span style="color: #7f007f">&#39;Bar&#39;</span>, <span style="color: #00007f">self</span>.id, <span style="color: #7f007f">&#39;died&#39;</span>
+
+
+b = BarType(<span style="color: #007f7f">12</span>)
+</pre></div>
+<p>Output:</p>
+<div class="highlight"><pre>Foo 12 born
+Bar 12 born
+</pre></div>
+<p>Ouch... what has happened? Where are the destructors? Here's what the Python documentation has to say on the matter:</p>
+<blockquote>
+Circular references which are garbage are detected when the option cycle detector is enabled (it’s on by default), but can only be cleaned up if there are no Python-level __del__() methods involved.</blockquote>
+<p>Python doesn't know the order in which it's safe to destroy objects that hold circular references to each other, so as a design decision, it just doesn't call the destructors for such methods!</p>
+</div>
+<div class="section" id="so-now-what">
+<h3>So, now what?</h3>
+<p>Shouldn't we use destructors because of this deficiency? I'm very surprised to see that many Pythonistas think so, and recommend to use explicit <tt class="docutils literal"><span class="pre">close</span></tt> methods. But I disagree - explicit <tt class="docutils literal"><span class="pre">close</span></tt> methods are less safe, since they are easy to forget to call. Moreover, when exceptions can happen (and in Python they happen all the time), managing explicit closing becomes very difficult and burdensome.</p>
+<p>I actually think that destructors can and should be used safely in Python. With a couple of precautions, it's definitely possible.</p>
+<p>First and foremost, note that justified cyclic references are a rare occurrence. I say <em>justified</em> on purpose - a lot of uses in which cyclic references arise are an example of bad design and leaky abstractions.</p>
+<p>As a general rule of thumb, resources should be held by the lowest-level objects possible. Don't hold a DB resource directly in your GUI dialog. Use an object to encapsulate the DB connection and close it safely in the destructor. The DB object has no reason whatsoever to hold references to other objects in your code. If it does - it violates several good-design practices.</p>
+<p>Sometimes <a class="reference external" href="http://en.wikipedia.org/wiki/Dependency_injection">Dependency Injection</a> can help prevent cyclic references in complex code, but even in those rare few cases when you find yourself needing a true cyclic reference, there's a solution. Python provides the <a class="reference external" href="http://docs.python.org/lib/module-weakref.html">weakref</a> module for this purpose. The documentation quickly reveals that this is exactly what we need here:</p>
+<blockquote>
+A weak reference to an object is not enough to keep the object alive: when the only remaining references to a referent are weak references, garbage collection is free to destroy the referent and reuse its memory for something else. A primary use for weak references is to implement caches or mappings holding large objects, where it’s desired that a large object not be kept alive solely because it appears in a cache or mapping.</blockquote>
+<p>Here's the previous example rewritten with <tt class="docutils literal"><span class="pre">weakref</span></tt>:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">import</span> <span style="color: #00007f">weakref</span>
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">FooType</span>(<span style="color: #00007f">object</span>):
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">__init__</span>(<span style="color: #00007f">self</span>, <span style="color: #00007f">id</span>, parent):
+        <span style="color: #00007f">self</span>.id = <span style="color: #00007f">id</span>
+        <span style="color: #00007f">self</span>.parent = weakref.ref(parent)
+        <span style="color: #00007f; font-weight: bold">print</span> <span style="color: #7f007f">&#39;Foo&#39;</span>, <span style="color: #00007f">self</span>.id, <span style="color: #7f007f">&#39;born&#39;</span>
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">__del__</span>(<span style="color: #00007f">self</span>):
+        <span style="color: #00007f; font-weight: bold">print</span> <span style="color: #7f007f">&#39;Foo&#39;</span>, <span style="color: #00007f">self</span>.id, <span style="color: #7f007f">&#39;died&#39;</span>
+
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">BarType</span>(<span style="color: #00007f">object</span>):
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">__init__</span>(<span style="color: #00007f">self</span>, <span style="color: #00007f">id</span>):
+        <span style="color: #00007f">self</span>.id = <span style="color: #00007f">id</span>
+        <span style="color: #00007f">self</span>.foo = FooType(<span style="color: #00007f">id</span>, <span style="color: #00007f">self</span>)
+        <span style="color: #00007f; font-weight: bold">print</span> <span style="color: #7f007f">&#39;Bar&#39;</span>, <span style="color: #00007f">self</span>.id, <span style="color: #7f007f">&#39;born&#39;</span>
+
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">__del__</span>(<span style="color: #00007f">self</span>):
+        <span style="color: #00007f; font-weight: bold">print</span> <span style="color: #7f007f">&#39;Bar&#39;</span>, <span style="color: #00007f">self</span>.id, <span style="color: #7f007f">&#39;died&#39;</span>
+
+b = BarType(<span style="color: #007f7f">12</span>)
+</pre></div>
+<p>Now we get the result we want:</p>
+<div class="highlight"><pre>Foo 12 born
+Bar 12 born
+Bar 12 died
+Foo 12 died
+</pre></div>
+<p>The tiny change in this example is that I use <tt class="docutils literal"><span class="pre">weakref.ref</span></tt> to assign the <tt class="docutils literal"><span class="pre">parent</span></tt> reference in the constructor <tt class="docutils literal"><span class="pre">FooType</span></tt>. This is a weak reference, so it doesn't really create a cycle. Since the GC sees no cycle, it destroys both objects.</p>
+</div>
+<div class="section" id="conclusion">
+<h3>Conclusion</h3>
+<p>Python has perfectly usable object destruction via the <tt class="docutils literal"><span class="pre">__del__</span></tt> method. It works fine for the vast majority of use-cases, but chokes on cyclic references. Cyclic references, however, are often a sign of bad design, and few of them are justified. For the teeny tiny amount of uses cases where justified cyclic references have to be used, the cycles can be easily broken with weak references, which Python provides in the <tt class="docutils literal"><span class="pre">weakref</span></tt> module.</p>
+</div>
+<div class="section" id="references">
+<h3>References</h3>
+<p>Some links that were useful in the preparation of this article:</p>
+<ul class="simple">
+<li><a class="reference external" href="http://www.electricmonk.nl/log/2008/07/07/python-destructor-and-garbage-collection-notes/">Python destructor and garbage collection notes</a></li>
+<li><a class="reference external" href="http://en.wikipedia.org/wiki/RAII">RAII</a></li>
+<li>The Python documentation</li>
+<li><a class="reference external" href="http://stackoverflow.com/questions/865115/how-do-i-correctly-clean-up-a-python-object">This</a> and <a class="reference external" href="http://stackoverflow.com/questions/974813/cleaning-up-an-internal-pysqlite-connection-on-object-destruction">also this</a> Stack Overflow discussions.</li>
+</ul>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="safely-using-destructors-in-python.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

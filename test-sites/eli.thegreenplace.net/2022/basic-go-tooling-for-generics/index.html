@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Basic Go tooling for generics - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Basic Go tooling for generics">
+                        Basic Go tooling for generics
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> September 17, 2022 at 07:53</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/go-tooling.html">Go tooling</a>
+        ,
+    <a href="../../tag/compilation.html">Compilation</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>Continuing the recent theme of blog posts about <a class="reference external" href="../../tag/go-tooling.html">Go tooling</a>, this post will briefly
+discuss how analysis tools interact with one of Go's newest features - generics.
+As usual, this post provides a motivating example and discusses a couple of
+approaches to writing a tool. The full code is <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2022/go-tool-generic-calls">on GitHub</a>.</p>
+<p>As a motivating example, let's find all calls to generic functions in
+a module, and the instantiated type arguments for that call. We'll use this
+code sample:</p>
+<div class="highlight"><pre><span></span>package main
+
+import &quot;golang.org/x/exp/slices&quot;
+
+func foo() {
+  var fs []float64
+
+  newfs := slices.Clone(fs)
+  handle(newfs, len(newfs))
+}
+
+func bar() {
+  var fs []string
+  handle[string, int](fs, 10)
+}
+
+func main() {
+  foo()
+  bar()
+}
+
+func handle[T any, N ~int](k []T, n N) {
+}
+</pre></div>
+<p>Note that there are several different calls to generic functions here:</p>
+<ol class="arabic simple">
+<li>A call to <a class="reference external" href="https://pkg.go.dev/golang.org/x/exp/slices#Clone">slices.Clone</a>
+in <tt class="docutils literal">foo</tt> that uses type inference.</li>
+<li>A call to <tt class="docutils literal">handle</tt> in <tt class="docutils literal">foo</tt> that uses type inference.</li>
+<li>A call to <tt class="docutils literal">handle</tt> in <tt class="docutils literal">bar</tt> that uses explicit type instantiation.</li>
+</ol>
+<div class="section" id="first-attempt-use-types-info-instances-directly">
+<h2>First attempt: use types.Info.Instances directly</h2>
+<p>When rummaging through the documentation of the <tt class="docutils literal">go/types</tt> package, one
+encounters some new fields added to the <tt class="docutils literal">Info</tt> structure; in particular, the
+<tt class="docutils literal">Instances</tt> field:</p>
+<div class="highlight"><pre><span></span><span class="c1">// Instances maps identifiers denoting generic types or functions to their</span><span class="w"></span>
+<span class="c1">// type arguments and instantiated type.</span><span class="w"></span>
+<span class="c1">//</span><span class="w"></span>
+<span class="c1">// For example, Instances will map the identifier for &#39;T&#39; in the type</span><span class="w"></span>
+<span class="c1">// instantiation T[int, string] to the type arguments [int, string] and</span><span class="w"></span>
+<span class="c1">// resulting instantiated *Named type. Given a generic function</span><span class="w"></span>
+<span class="c1">// func F[A any](A), Instances will map the identifier for &#39;F&#39; in the call</span><span class="w"></span>
+<span class="c1">// expression F(int(1)) to the inferred type arguments [int], and resulting</span><span class="w"></span>
+<span class="c1">// instantiated *Signature.</span><span class="w"></span>
+<span class="c1">//</span><span class="w"></span>
+<span class="c1">// Invariant: Instantiating Uses[id].Type() with Instances[id].TypeArgs</span><span class="w"></span>
+<span class="c1">// results in an equivalent of Instances[id].Type.</span><span class="w"></span>
+<span class="nx">Instances</span><span class="w"> </span><span class="kd">map</span><span class="p">[</span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">Ident</span><span class="p">]</span><span class="nx">Instance</span><span class="w"></span>
+</pre></div>
+<p>This seems super useful for our task! However, on a closer look, some
+challenges become apparent. Note that the key of this map is an <tt class="docutils literal">*ast.Ident</tt>,
+which points to the identifier representing the call in the AST. For the call
+to <tt class="docutils literal">handle</tt> in <tt class="docutils literal">foo</tt>, the AST looks as follows:</p>
+<img alt="AST fragment for generic call" class="align-center" src="../../images/2022/callexpr-generic-ast.png" />
+<p>Note that the <tt class="docutils literal">Ident</tt> node is a child of the <tt class="docutils literal">CallExpr</tt> node. Given the
+identifier, how do we find the actual call (since we want the arguments)?</p>
+<p>This turns out to be non-trivial! Take a look at my previous post on the subject
+of <a class="reference external" href="../parent-links-in-go-asts/index.html">Parent links in Go ASTs</a> for details;
+none of the techniques described there is perfect for our needs here:</p>
+<ul class="simple">
+<li>Keeping manual track of parents or using <tt class="docutils literal">Inspector.WithStack</tt> won't help
+because we're not actually traversing the AST. We have immediate access to
+the <tt class="docutils literal">*ast.Ident</tt> for generic calls.</li>
+<li><tt class="docutils literal">astutil.PathEnclosingInterval</tt> is quite promising but awkward to use in
+this case, mostly because it requires a root <tt class="docutils literal">*ast.File</tt> which we don't
+necessarily have. It also takes positions as inputs and does the AST traversal
+itself so using it feels somewhat backwards here.</li>
+</ul>
+<p>Running into all this trouble, a reasonable conclusion is that this field
+was not designed to be used in this particular way.</p>
+</div>
+<div class="section" id="second-attempt-traverse-the-ast-and-use-instances-for-lookups">
+<h2>Second attempt: traverse the AST and use Instances for lookups</h2>
+<p>Let's put shortcuts aside and try to approach it in the usual tool-writing way:
+we'll traverse the AST and examine the type information where necessary. I won't
+paste the usual tool scaffolding (read about it <a class="reference external" href="../exploring-function-parameter-types-with-go-tooling/index.html">here</a>);
+we start with the place where we have a <tt class="docutils literal">*packages.Package</tt> in hand:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">processPackage</span><span class="p">(</span><span class="nx">pkg</span><span class="w"> </span><span class="o">*</span><span class="nx">packages</span><span class="p">.</span><span class="nx">Package</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">pkg</span><span class="p">.</span><span class="nx">Errors</span><span class="p">)</span><span class="w"> </span><span class="p">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">e</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">pkg</span><span class="p">.</span><span class="nx">Errors</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;Error: %s\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">e</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">os</span><span class="p">.</span><span class="nx">Exit</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">walkAstAndJoinInstances</span><span class="p">(</span><span class="nx">pkg</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The overall approach is: recursively walk the AST with <tt class="docutils literal">Inspect</tt>, and when
+we encounter a call expression examine the call target, checking it
+against the <tt class="docutils literal">Instances</tt> field. There are some complications here to be aware
+of, though. The <tt class="docutils literal">Fun</tt> field of <a class="reference external" href="https://pkg.go.dev/go/ast#CallExpr">ast.CallExpr</a>
+is not necessarily an identifier. It can be a <tt class="docutils literal">SelectorExpr</tt> for
+qualified calls like <tt class="docutils literal">slices.Clone</tt>; it can also be an <tt class="docutils literal">IndexListExpr</tt> for
+calls that have explicit type parameters like the second call to <tt class="docutils literal">handle</tt>
+in our sample.</p>
+<p>So our AST analysis has to aware of these options, and we end up with something
+like:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">walkAstAndJoinInstances</span><span class="p">(</span><span class="nx">pkg</span><span class="w"> </span><span class="o">*</span><span class="nx">packages</span><span class="p">.</span><span class="nx">Package</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">fileAst</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">pkg</span><span class="p">.</span><span class="nx">Syntax</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Inspect</span><span class="p">(</span><span class="nx">fileAst</span><span class="p">,</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">n</span><span class="w"> </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Node</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">cexpr</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">n</span><span class="p">.(</span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">CallExpr</span><span class="p">);</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">var</span><span class="w"> </span><span class="nx">id</span><span class="w"> </span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">Ident</span><span class="w"></span>
+<span class="w">        </span><span class="k">switch</span><span class="w"> </span><span class="nx">fn</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">cexpr</span><span class="p">.</span><span class="nx">Fun</span><span class="p">.(</span><span class="kd">type</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">case</span><span class="w"> </span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">Ident</span><span class="p">:</span><span class="w"></span>
+<span class="w">          </span><span class="nx">id</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">fn</span><span class="w"></span>
+<span class="w">        </span><span class="k">case</span><span class="w"> </span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">SelectorExpr</span><span class="p">:</span><span class="w"></span>
+<span class="w">          </span><span class="nx">id</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">fn</span><span class="p">.</span><span class="nx">Sel</span><span class="w"></span>
+<span class="w">        </span><span class="k">case</span><span class="w"> </span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">IndexListExpr</span><span class="p">:</span><span class="w"></span>
+<span class="w">          </span><span class="k">if</span><span class="w"> </span><span class="nx">sel</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">fn</span><span class="p">.</span><span class="nx">X</span><span class="p">.(</span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">SelectorExpr</span><span class="p">);</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="nx">id</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">sel</span><span class="p">.</span><span class="nx">Sel</span><span class="w"></span>
+<span class="w">          </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="nx">id</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">fn</span><span class="p">.</span><span class="nx">X</span><span class="p">.(</span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">Ident</span><span class="p">)</span><span class="w"></span>
+<span class="w">          </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="nx">id</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="k">if</span><span class="w"> </span><span class="nx">v</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">pkg</span><span class="p">.</span><span class="nx">TypesInfo</span><span class="p">.</span><span class="nx">Instances</span><span class="p">[</span><span class="nx">id</span><span class="p">];</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;call&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">id</span><span class="p">)</span><span class="w"></span>
+<span class="w">            </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;  instantiation type=%v args=%v\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">v</span><span class="p">.</span><span class="nx">Type</span><span class="p">,</span><span class="w"> </span><span class="nx">getListOfTypes</span><span class="p">(</span><span class="nx">v</span><span class="p">.</span><span class="nx">TypeArgs</span><span class="p">))</span><span class="w"></span>
+<span class="w">          </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+<span class="w">    </span><span class="p">})</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The <tt class="docutils literal">getListOfTypes</tt> function is a utility to extract a slice of types from
+<tt class="docutils literal">types.TypeList</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">getListOfTypes</span><span class="p">(</span><span class="nx">tl</span><span class="w"> </span><span class="o">*</span><span class="nx">types</span><span class="p">.</span><span class="nx">TypeList</span><span class="p">)</span><span class="w"> </span><span class="p">[]</span><span class="nx">types</span><span class="p">.</span><span class="nx">Type</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">sl</span><span class="w"> </span><span class="p">[]</span><span class="nx">types</span><span class="p">.</span><span class="nx">Type</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="nx">tl</span><span class="p">.</span><span class="nx">Len</span><span class="p">();</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">sl</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nb">append</span><span class="p">(</span><span class="nx">sl</span><span class="p">,</span><span class="w"> </span><span class="nx">tl</span><span class="p">.</span><span class="nx">At</span><span class="p">(</span><span class="nx">i</span><span class="p">))</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">sl</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>If we run our tool on the code sample, we get:</p>
+<div class="highlight"><pre><span></span>$ go run find-generic-calls.go -- samplemodules/use-generics/
+call Clone
+  instantiation type=func(s []float64) []float64 args=[[]float64 float64]
+call handle
+  instantiation type=func(k []float64, n int) args=[float64 int]
+call handle
+  instantiation type=func(k []string, n int) args=[string int]
+</pre></div>
+<p>Mission accomplished! We've been able to identify calls to generic functions,
+both with and without type inference, and to access their arguments.</p>
+</div>
+<div class="section" id="a-taste-for-more">
+<h2>A taste for more</h2>
+<p>While the tool developed in this post is very basic, hopefully it provides a
+gentle introduction to writing tools with generic code in mind. For a much more
+detailed discussion, I strongly recommend going over the guide at
+<a class="reference external" href="https://github.com/golang/exp/tree/master/typeparams/example">https://github.com/golang/exp/tree/master/typeparams/example</a>; if you plan to
+write more sophisticated analyzers that work on generic code, it will prove
+invaluable.</p>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

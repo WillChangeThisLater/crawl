@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>AST matchers and Clang refactoring tools - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="ast-matchers-and-clang-refactoring-tools.html"
+                       rel="bookmark"
+                       title="Permalink to AST matchers and Clang refactoring tools">
+                        AST matchers and Clang refactoring tools
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> July 29, 2014 at 20:22</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/compilation.html">Compilation</a>
+        ,
+    <a href="../../../tag/llvm-clang.html">LLVM & Clang</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>Clang tooling sees lots of interest and development focus in the past few years. At last, we have a convenient, accurate, open-source and well supported framework for programmatically analyzing and refactoring C++ code; I find this very exciting.</p>
+<p>A great outcome of this rapid pace of development is that new APIs and tools spring up all the time. For example, some time ago the Clang tooling developers figured out folks doing AST traversals have to write a lot of repetitive code to find interesting AST nodes, so they came up with a great new API called <a class="reference external" href="http://clang.llvm.org/docs/LibASTMatchers.html">AST matchers</a>, which I want to discuss here.</p>
+<div class="section" id="visitors-vs-matchers">
+<h3>Visitors vs. matchers</h3>
+<p>Here's a motivating example. Suppose we're looking for pointer-typed variables being used in <tt class="docutils literal">if</tt> comparisons. To make this more specific, let's say we're looking for cases where the pointer-typed variable is on the left-hand-side of an equality comparison (<tt class="docutils literal">==</tt>). To find such nodes in a recursive visitor, we'd have to write something like this:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">bool</span> VisitIfStmt(IfStmt *s) {
+  <span style="color: #00007f; font-weight: bold">if</span> (<span style="color: #00007f; font-weight: bold">const</span> BinaryOperator *BinOP =
+          llvm::dyn_cast&lt;BinaryOperator&gt;(s-&gt;getCond())) {
+    <span style="color: #00007f; font-weight: bold">if</span> (BinOP-&gt;getOpcode() == BO_EQ) {
+      <span style="color: #00007f; font-weight: bold">const</span> Expr *LHS = BinOP-&gt;getLHS();
+      <span style="color: #00007f; font-weight: bold">if</span> (<span style="color: #00007f; font-weight: bold">const</span> ImplicitCastExpr *Cast =
+              llvm::dyn_cast&lt;ImplicitCastExpr&gt;(LHS)) {
+        LHS = Cast-&gt;getSubExpr();
+      }
+
+      <span style="color: #00007f; font-weight: bold">if</span> (<span style="color: #00007f; font-weight: bold">const</span> DeclRefExpr *DeclRef = llvm::dyn_cast&lt;DeclRefExpr&gt;(LHS)) {
+        <span style="color: #00007f; font-weight: bold">if</span> (<span style="color: #00007f; font-weight: bold">const</span> VarDecl *Var =
+                llvm::dyn_cast&lt;VarDecl&gt;(DeclRef-&gt;getDecl())) {
+          <span style="color: #00007f; font-weight: bold">if</span> (Var-&gt;getType()-&gt;isPointerType()) {
+            Var-&gt;dump();  <span style="color: #007f00">// YAY found it!!</span>
+          }
+        }
+      }
+    }
+  }
+  <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f; font-weight: bold">true</span>;
+}
+</pre></div>
+<p>This is quite a bit of code, but nothing out of the ordinary if you've been working with Clang ASTs for a while. Perhaps it can be golfed down into a somewhat shorter form, but the main problem is that to write this one has to go through quite a bit of documentation and header files to figure out which methods to call and what kinds of objects they return.</p>
+<p>Here's the equivalent AST matcher:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">Finder.addMatcher(
+    ifStmt(hasCondition(binaryOperator(
+        hasOperatorName(<span style="color: #7f007f">&quot;==&quot;</span>),
+        hasLHS(ignoringParenImpCasts(declRefExpr(
+            to(varDecl(hasType(pointsTo(AnyType))).bind(<span style="color: #7f007f">&quot;lhs&quot;</span>)))))))),
+    &amp;HandlerForIf);
+</pre></div>
+<p>Some difference, right? The declarative nature of matcher definitions makes this very natural to read and to map to the actual problem. <tt class="docutils literal">HandlerForIf</tt> is a <tt class="docutils literal">MatchCallback</tt> object that has direct access to the bound nodes of the matcher:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">struct</span> IfStmtHandler : <span style="color: #00007f; font-weight: bold">public</span> MatchFinder::MatchCallback {
+  <span style="color: #00007f; font-weight: bold">virtual</span> <span style="color: #00007f; font-weight: bold">void</span> run(<span style="color: #00007f; font-weight: bold">const</span> MatchFinder::MatchResult &amp;Result) {
+    <span style="color: #00007f; font-weight: bold">const</span> VarDecl *lhs = Result.Nodes.getNodeAs&lt;VarDecl&gt;(<span style="color: #7f007f">&quot;lhs&quot;</span>);
+    lhs-&gt;dump();   <span style="color: #007f00">// YAY found it!!</span>
+  }
+};
+</pre></div>
+<p>There's actually quite a bit of documentation available about AST matchers on the official Clang website. For a complete example that can be built outside of the LLVM tree, I redid the <a class="reference external" href="../../05/01/modern-source-to-source-transformation-with-clang-and-libtooling/index.html">tooling sample from the previous article</a>, now <a class="reference external" href="https://github.com/eliben/llvm-clang-samples/blob/master/src_clang/matchers_rewriter.cpp">with AST matchers</a> (all available in the <a class="reference external" href="https://github.com/eliben/llvm-clang-samples/">llvm-clang-samples repository</a>).</p>
+</div>
+<div class="section" id="using-clang-query-to-test-matchers-and-explore-the-ast">
+<h3>Using clang-query to test matchers and explore the AST</h3>
+<p>An interesting new tool in Clang-land is <tt class="docutils literal"><span class="pre">clang-query</span></tt>. It's an interactive evaluator for AST matchers that can be used both to test your matchers and do some programmatic exploration of the AST. Let's say we want to develop an AST matcher for pointer comparisons, similar to the one shown above. Here's a sample input file we're going to work on:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">foo</span>(<span style="color: #00007f; font-weight: bold">int</span>* p, <span style="color: #00007f; font-weight: bold">int</span> v) {
+  <span style="color: #00007f; font-weight: bold">if</span> (p == <span style="color: #007f7f">0</span>) {
+    <span style="color: #00007f; font-weight: bold">return</span> v + <span style="color: #007f7f">1</span>;
+  } <span style="color: #00007f; font-weight: bold">else</span> {
+    <span style="color: #00007f; font-weight: bold">return</span> v - <span style="color: #007f7f">1</span>;
+  }
+}
+</pre></div>
+<p>Let's fire up <tt class="docutils literal"><span class="pre">clang-query</span></tt> and see what it can do:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ clang-query /tmp/iflhsptr.c --
+clang-query&gt; set output diag
+clang-query&gt; match functionDecl()
+
+Match #1:
+
+/tmp/iflhsptr.c:1:1: note: &quot;root&quot; binds here
+int foo(int* p, int v) {
+^~~~~~~~~~~~~~~~~~~~~~~~
+1 match.
+</pre></div>
+<p>This is a basic smoke test to see how it matches the function declaration. The output mode set in the first command could also ask the tool to dump or print the AST, but for our purpose the diagnostic output is convenient.</p>
+<p>Here's how we can match deeper nodes and bind them:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">clang-query&gt; match ifStmt(hasCondition(binaryOperator(hasOperatorName(&quot;==&quot;)).bind(&quot;op&quot;)))
+
+Match #1:
+
+/tmp/iflhsptr.c:2:7: note: &quot;op&quot; binds here
+  if (p == 0) {
+      ^~~~~~
+/tmp/iflhsptr.c:2:3: note: &quot;root&quot; binds here
+  if (p == 0) {
+  ^~~~~~~~~~~~~
+1 match.
+</pre></div>
+<p>If we intend to provide our own bindings, the root binding can be turned off:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">clang-query&gt; set bind-root false
+</pre></div>
+<p>Let's see multiple matches:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">clang-query&gt; match varDecl().bind(&quot;var&quot;)
+
+Match #1:
+
+/tmp/iflhsptr.c:1:9: note: &quot;var&quot; binds here
+int foo(int* p, int v) {
+        ^~~~~~
+
+Match #2:
+
+/tmp/iflhsptr.c:1:17: note: &quot;var&quot; binds here
+int foo(int* p, int v) {
+                ^~~~~
+2 matches.
+</pre></div>
+<p>At this point I'll stop because long matchers don't format conveniently in a blog post, but I'm sure you got the idea. It's very obvious how helpful this tool can be with developing matchers. It's still new and has some rough edges, but is already quite useful.</p>
+</div>
+<div class="section" id="refactoring-tools-and-replacements">
+<h3>Refactoring tools and replacements</h3>
+<p>With the growing usage of libTooling, it's hardly surprising that its developers keep coming up with higher levels of abstraction that help writing new tools with less and less effort. The AST matchers framework presented above is one example. Another is <tt class="docutils literal">RefactoringTool</tt>, a subclass of <tt class="docutils literal">ClangTool</tt> that makes it possible to craft new tools with very little code. I'll show an example soon, but first a word about replacements.</p>
+<p>The tools I was demonstrating so far used a <tt class="docutils literal">Rewriter</tt> to change the underlying source code in response to finding interesting things in the AST. This is a good approach, but it has a problem scaling for large projects. Imagine running a tool over a large project with many source files and many header files. Some of rewritings may need to happen in the header files, but how to manage that, given that the same headers get included into multiple translation units? Some edits may end up being duplicated or even conflicting, and that's a problem.</p>
+<p><tt class="docutils literal">Replacement</tt>s are the solution. The source transformation task is divided into two distinct steps:</p>
+<ol class="arabic simple">
+<li>Custom tools go through the source base, finding the refactoring patterns to apply, and generating serialized replacements into files. Think of replacements as something like patch files (precise directions of how to modify a source file), but in a somewhat friendlier format.</li>
+<li><tt class="docutils literal"><span class="pre">clang-apply-replacements</span></tt> can then run with access to all replacements, perform the required de-duplication and conflict resolution and actually apply the changes to the source.</li>
+</ol>
+<p>This approach also allows nice parallelization of the refactoring over huge code-bases, though there aren't many projects and companies in the world with source code large enough to make this a real problem.</p>
+<p>Back to an example then. I took the simple sample tool from the previous article (just finding interesting <tt class="docutils literal">if</tt> nodes and adding some comments into them) and rewrote it once again, using <tt class="docutils literal">RefactoringTool</tt> and replacements. <a class="reference external" href="https://github.com/eliben/llvm-clang-samples/blob/master/src_clang/matchers_replacements.cpp">The full code is available in the samples project</a>, but it's so short that I can show most of it here.</p>
+<p>Here's the complete <tt class="docutils literal">main</tt> function. For ease of hacking it just dumps the replacements to stdout instead of serializing or applying them:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">int</span> main(<span style="color: #00007f; font-weight: bold">int</span> argc, <span style="color: #00007f; font-weight: bold">const</span> <span style="color: #00007f; font-weight: bold">char</span> **argv) {
+  CommonOptionsParser op(argc, argv, ToolingSampleCategory);
+  RefactoringTool Tool(op.getCompilations(), op.getSourcePathList());
+
+  <span style="color: #007f00">// Set up AST matcher callbacks.</span>
+  IfStmtHandler HandlerForIf(&amp;Tool.getReplacements());
+
+  MatchFinder Finder;
+  Finder.addMatcher(ifStmt().bind(<span style="color: #7f007f">&quot;ifStmt&quot;</span>), &amp;HandlerForIf);
+
+  <span style="color: #007f00">// Run the tool and collect a list of replacements. We could call</span>
+  <span style="color: #007f00">// runAndSave, which would destructively overwrite the files with</span>
+  <span style="color: #007f00">// their new contents. However, for demonstration purposes it&#39;s</span>
+  <span style="color: #007f00">// interesting to show the replacements.</span>
+  <span style="color: #00007f; font-weight: bold">if</span> (<span style="color: #00007f; font-weight: bold">int</span> Result = Tool.run(newFrontendActionFactory(&amp;Finder).get())) {
+    <span style="color: #00007f; font-weight: bold">return</span> Result;
+  }
+
+  llvm::outs() &lt;&lt; <span style="color: #7f007f">&quot;Replacements collected by the tool:\n&quot;</span>;
+  <span style="color: #00007f; font-weight: bold">for</span> (<span style="color: #00007f; font-weight: bold">auto</span> &amp;r : Tool.getReplacements()) {
+    llvm::outs() &lt;&lt; r.toString() &lt;&lt; <span style="color: #7f007f">&quot;\n&quot;</span>;
+  }
+
+  <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">0</span>;
+}
+</pre></div>
+<p><tt class="docutils literal">IfStmtHandler</tt> is just a <tt class="docutils literal">MatchCallback</tt> that is triggered on <tt class="docutils literal">if</tt> statements:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">IfStmtHandler</span> : <span style="color: #00007f; font-weight: bold">public</span> MatchFinder::MatchCallback {
+<span style="color: #00007f; font-weight: bold">public</span>:
+  IfStmtHandler(Replacements *Replace) : Replace(Replace) {}
+
+  <span style="color: #00007f; font-weight: bold">virtual</span> <span style="color: #00007f; font-weight: bold">void</span> run(<span style="color: #00007f; font-weight: bold">const</span> MatchFinder::MatchResult &amp;Result) {
+    <span style="color: #007f00">// The matched &#39;if&#39; statement was bound to &#39;ifStmt&#39;.</span>
+    <span style="color: #00007f; font-weight: bold">if</span> (<span style="color: #00007f; font-weight: bold">const</span> IfStmt *IfS =
+          Result.Nodes.getNodeAs&lt;clang::IfStmt&gt;(<span style="color: #7f007f">&quot;ifStmt&quot;</span>)) {
+      <span style="color: #00007f; font-weight: bold">const</span> Stmt *Then = IfS-&gt;getThen();
+      Replacement Rep(*(Result.SourceManager), Then-&gt;getLocStart(), <span style="color: #007f7f">0</span>,
+                      <span style="color: #7f007f">&quot;// the &#39;if&#39; part\n&quot;</span>);
+      Replace-&gt;insert(Rep);
+
+      <span style="color: #00007f; font-weight: bold">if</span> (<span style="color: #00007f; font-weight: bold">const</span> Stmt *Else = IfS-&gt;getElse()) {
+        Replacement Rep(*(Result.SourceManager), Else-&gt;getLocStart(), <span style="color: #007f7f">0</span>,
+                        <span style="color: #7f007f">&quot;// the &#39;else&#39; part\n&quot;</span>);
+        Replace-&gt;insert(Rep);
+      }
+    }
+  }
+
+<span style="color: #00007f; font-weight: bold">private</span>:
+  Replacements *Replace;
+};
+</pre></div>
+<p>Note how little boilerplate this code contains. The tool is set up in just a handful of lines of code, and most of my code deals with the actual refactoring at hand. This definitely makes writing tools quicker and easier than ever before.</p>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="ast-matchers-and-clang-refactoring-tools.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

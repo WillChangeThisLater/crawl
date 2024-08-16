@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Go internals: invariance and memory layout of slices - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Go internals: invariance and memory layout of slices">
+                        Go internals: invariance and memory layout of slices
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> January 27, 2021 at 18:31</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>One of the most common issues novice Go programmers run into is the inability to
+pass a slice of a concrete type (e.g. <tt class="docutils literal">[]int64</tt>) into a function that expects
+a slice of interfaces (e.g. <tt class="docutils literal">[]interface{}</tt> or something like
+<tt class="docutils literal">[]fmt.Stringer</tt>). Why is that?</p>
+<p>In this post, I'm going to list several answers to this question, diving into
+some interesting implementation details of how Go works under the hood.</p>
+<div class="section" id="the-official-answer">
+<h2>The official answer</h2>
+<p>Let's begin by checking out <a class="reference external" href="https://golang.org/doc/faq#convert_slice_of_interface">the Go FAQ</a>, which says:</p>
+<blockquote>
+<p>Can I convert a <tt class="docutils literal">[]T</tt> to an <tt class="docutils literal">[]interface{}</tt>?</p>
+<p>Not directly. It is disallowed by the language specification because the
+two types do not have the same representation in memory. It is necessary to
+copy the elements individually to the destination slice.</p>
+</blockquote>
+<p>So it's &quot;because the two types do not have the same representation in memory&quot;.
+We'll examine this reason in great depth later on in this post.</p>
+<p>The <a class="reference external" href="https://github.com/golang/go/wiki/InterfaceSlice">Go Wiki</a> provides
+somewhat more information:</p>
+<blockquote>
+<p>There are two main reasons for this.</p>
+<p>The first is that a variable with type <tt class="docutils literal">[]interface{}</tt> is not an
+interface! It is a slice whose element type happens to be <tt class="docutils literal">interface{}</tt>.
+But even given this, one might say that the meaning is clear.</p>
+<p>Well, is it? A variable with type <tt class="docutils literal">[]interface{}</tt> has a specific memory
+layout, known at compile time.</p>
+<p>Each <tt class="docutils literal">interface{}</tt> takes up two words (one word for the type of what is
+contained, the other word for either the contained data or a pointer to it).
+As a consequence, a slice with length <tt class="docutils literal">N</tt> and with type <tt class="docutils literal">[]interface{}</tt>
+is backed by a chunk of data that is <tt class="docutils literal">N*2</tt> words long.</p>
+<p>This is different than the chunk of data backing a slice with type
+<tt class="docutils literal">[]MyType</tt> and the same length. Its chunk of data will be
+<tt class="docutils literal">N*sizeof(MyType)</tt> words long.</p>
+<p>The result is that you cannot quickly assign something of type <tt class="docutils literal">[]MyType</tt>
+to something of type <tt class="docutils literal">[]interface{}</tt>; the data behind them just look
+different.</p>
+</blockquote>
+<p>This answer provides significantly more details on the implementation; once
+again, we'll come back to it with diagrams and memory dumps later on.</p>
+<p>Note the <em>first</em> reason listed in the Wiki answer though; <tt class="docutils literal">[]interface{}</tt> is
+not in itself an interface, so we can't just assume it behaves as such. This is
+an interesting point to ponder, and it serves as a good segue to a more academic
+answer.</p>
+</div>
+<div class="section" id="the-academic-answer">
+<h2>The academic answer</h2>
+<p>Let's start by examining our premises. Why do we expect to be able to pass
+<tt class="docutils literal">[]int64</tt> where <tt class="docutils literal">[]interface{}</tt> is expected? Well, because we can certainly
+pass an <tt class="docutils literal">int64</tt> where an <tt class="docutils literal">interface{}</tt> is expected! So why can't the Go
+compiler just do what we mean?</p>
+<p>The reason is that <em>Go slices are not covariant</em>. If the term &quot;covariant&quot; makes
+no sense to you in a programming language context <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>, please take a few
+minutes to read my earlier post on <a class="reference external" href="../../2018/covariance-and-contravariance-in-subtyping/index.html">Covariance and contravariance in subtyping</a>.
+The rest of this section will be tricky to understand if you don't, but you are
+free to skip to the next section.</p>
+<p>Go doesn't have subtyping in the classical sense, so we have to be careful with
+our terms here. Types implementing interfaces do behave in a sufficiently close
+manner though, so we can say that <tt class="docutils literal">T &lt;: I</tt> when <tt class="docutils literal">T</tt> is a type that
+implements interface <tt class="docutils literal">I</tt>. When we expect to pass <tt class="docutils literal">[]T</tt> into <tt class="docutils literal">[]I</tt>
+successfully, we want <tt class="docutils literal">T &lt;: I</tt> to imply <tt class="docutils literal">[]T &lt;: []I</tt>; in other words, we
+expect slices to be <em>covariant</em>. But Go slices are not covariant; in fact, they
+are <em>invariant</em>.</p>
+<p>To understand why, take a look at the &quot;Covariant arrays in Java&quot; section in the
+<a class="reference external" href="../../2018/covariance-and-contravariance-in-subtyping/index.html">linked post</a>.
+The unsoundness demonstrated there is the problem Go tries to avoid. Concretely,
+imagine we have this code:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">foo</span><span class="p">(</span><span class="nx">ii</span><span class="w"> </span><span class="p">[]</span><span class="kd">interface</span><span class="p">{})</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ii</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s">&quot;joe&quot;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This is valid Go code because you can assign any type to an <tt class="docutils literal">interface{}</tt>. Had
+slices been covariant, we could have invoked it as follows:</p>
+<div class="highlight"><pre><span></span><span class="nx">ints</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="p">[]</span><span class="kt">int64</span><span class="p">{</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">}</span><span class="w"></span>
+<span class="nx">foo</span><span class="p">(</span><span class="nx">ints</span><span class="p">)</span><span class="w"> </span><span class="c1">// oops!</span><span class="w"></span>
+</pre></div>
+<p>If the second line was legal in Go, <tt class="docutils literal">foo</tt> would happily assign <tt class="docutils literal">&quot;joe&quot;</tt>
+into <tt class="docutils literal">ints[1]</tt>, but what does this even mean? In reality, it means obscure
+runtime errors, which statically typed languages (like Go) try hard to avoid
+<a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.</p>
+<p>Sharp-eyed readers will notice that this problem occurs due to the mutability
+of the <tt class="docutils literal">ii</tt> parameter to <tt class="docutils literal">foo</tt>; if the parameter was read-only, there would
+not be a problem, right? That's a good observation; however, Go doesn't really
+have the concept of <tt class="docutils literal">const</tt> from languages like C++. In addition, there's
+still the implementation issue mentioned in the official answers. Let's examine
+this one in detail.</p>
+</div>
+<div class="section" id="the-practical-answer-memory-layout">
+<h2>The practical answer - memory layout</h2>
+<p>The Go Wiki answer provides a fairly good description of what's going on, but we
+can certainly expand it to make things clearer.</p>
+<p>First, let's see how Go slices are laid out in memory. The Go Blog has a good
+article on the topic - <a class="reference external" href="https://blog.golang.org/slices-intro">Go Slices: usage and internals</a>. We'll use the following list of
+numbers in our explorations <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>:</p>
+<div class="highlight"><pre><span></span><span class="nx">is</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="p">[]</span><span class="kt">int64</span><span class="p">{</span><span class="mh">0x55</span><span class="p">,</span><span class="w"> </span><span class="mh">0x22</span><span class="p">,</span><span class="w"> </span><span class="mh">0xab</span><span class="p">,</span><span class="w"> </span><span class="mh">0x9</span><span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This is how <tt class="docutils literal">is</tt> looks in memory when the Go program is running:</p>
+<img alt="Slice memory layout holding int64" class="align-center" src="../../images/2021/slice-layout-concrete-int64.png" />
+<p>Each square is a quadword - 8 bytes (assuming this runs on a 64-bit machine).
+The slice itself is 3 contiguous quadwords: the first is a pointer holding the
+address of the actual data of the slice, the second is the slice's length and
+the third is its capacity. These three quadwords are the <em>slice header</em>.</p>
+<p>The slice data holds its elements contiguously in memory; in our case, each
+element fits into a quadword - so the slice data is 4 quadwords. If we had
+a slice of a different type, say a struct with three <tt class="docutils literal">int64</tt>s, then each
+slice element would occupy 3 quadwords and the whole slice data would occupy
+12 quadwords (or 96 bytes).</p>
+<p>This suggests that the data layout of a slice depends on the type the slice
+holds. Going back to our original question, how does a <tt class="docutils literal">[]interface{}</tt> look
+in memory?</p>
+<p>To answer this question, we first have to recall how an <tt class="docutils literal">interface{}</tt> itself
+looks in memory. Russ Cox has a <a class="reference external" href="https://research.swtch.com/interfaces">great post on the subject</a>, which I encourage you to read. The
+gist of it is that any interface value in Go occupies two quadwords (on a 64-bit
+machine), because it holds two pointers: the first points to the dispatch table
+for the methods of the value (<em>itable</em>), and the second points to the runtime
+value itself <a class="footnote-reference" href="index.html#footnote-4" id="footnote-reference-4">[4]</a>.</p>
+<p>Therefore, if we copy our slice of four <tt class="docutils literal">int64</tt>s into a slice of
+<tt class="docutils literal">interface{}</tt>:</p>
+<div class="highlight"><pre><span></span><span class="nx">iis</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">make</span><span class="p">([]</span><span class="kd">interface</span><span class="p">{},</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">is</span><span class="p">))</span><span class="w"></span>
+<span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">is</span><span class="p">);</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">iis</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">is</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This is how <tt class="docutils literal">iis</tt> is laid out in memory:</p>
+<img alt="Slice memory layout holding interface{}" class="align-center" src="../../images/2021/slice-layout-interface.png" />
+<p>As described before, the elements of the slice are laid out linearly, one after
+the other. Since each <tt class="docutils literal">interface{}</tt> takes up two quadwords, the slice data
+has 8 quadwords in total. In each element, the first quadword points at the
+itable for <tt class="docutils literal">interface{}</tt>, and the second quadword points at a memory location
+that holds the actual data - in this case the <tt class="docutils literal">int64</tt>.</p>
+<p>At this point it should already be obvious that we can't simply pass a
+<tt class="docutils literal">[]int64</tt> where <tt class="docutils literal">[]interface{}</tt> is expected, because the slice data in both
+cases looks quite different in memory. Code that was written to iterate over
+each element of <tt class="docutils literal">[]interface{}</tt> will make a mess if passed a <tt class="docutils literal">[]int64</tt>.</p>
+</div>
+<div class="section" id="observing-the-memory-layout-in-a-running-program">
+<h2>Observing the memory layout in a running program</h2>
+<p>To make this material more tangible, let's look at some memory dumps. We'll be
+using this simple Go program throughout the rest of the post:</p>
+<div class="highlight"><pre><span></span><span class="kd">var</span><span class="w"> </span><span class="nx">sum</span><span class="w"> </span><span class="kt">int64</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">addUpDirect</span><span class="p">(</span><span class="nx">s</span><span class="w"> </span><span class="p">[]</span><span class="kt">int64</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">s</span><span class="p">);</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">sum</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="nx">s</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">addUpViaInterface</span><span class="p">(</span><span class="nx">s</span><span class="w"> </span><span class="p">[]</span><span class="kd">interface</span><span class="p">{})</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">s</span><span class="p">);</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">sum</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="nx">s</span><span class="p">[</span><span class="nx">i</span><span class="p">].(</span><span class="kt">int64</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">is</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="p">[]</span><span class="kt">int64</span><span class="p">{</span><span class="mh">0x55</span><span class="p">,</span><span class="w"> </span><span class="mh">0x22</span><span class="p">,</span><span class="w"> </span><span class="mh">0xab</span><span class="p">,</span><span class="w"> </span><span class="mh">0x9</span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">addUpDirect</span><span class="p">(</span><span class="nx">is</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">iis</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">make</span><span class="p">([]</span><span class="kd">interface</span><span class="p">{},</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">is</span><span class="p">))</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">is</span><span class="p">);</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">iis</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">is</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">addUpViaInterface</span><span class="p">(</span><span class="nx">iis</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Ignore the <tt class="docutils literal">addUp*</tt> functions for now; let's look at the <tt class="docutils literal">main</tt> function
+and use the Delve debugger to examine the memory layout of this program at
+runtime. Here's a <tt class="docutils literal">dlv</tt> session:</p>
+<div class="highlight"><pre><span></span>$ dlv debug slice-layout.go
+Type &#39;help&#39; for list of commands.
+(dlv) break slice-layout.go:35
+Breakpoint 1 set at 0x467cb5 for main.main() ./slice-layout.go:35
+(dlv) c
+&gt; main.main() ./slice-layout.go:35 (hits goroutine(1):1 total:1) (PC: 0x467cb5)
+    30:               iis := make([]interface{}, len(is))
+    31:               for i := 0; i &lt; len(is); i++ {
+    32:                       iis[i] = is[i]
+    33:               }
+    34:
+=&gt;  35:               addUpViaInterface(iis)
+    36:       }
+(dlv) p &amp;is
+(*[]int64)(0xc00003c748)
+</pre></div>
+<p>We've asked Delve to tell us the address of the slice header <tt class="docutils literal">&amp;is</tt>. Now we
+can look at what it contains:</p>
+<div class="highlight"><pre><span></span>(dlv) x -fmt hex -len 32 0xc00003c748
+0xc00003c748:   0x18   0xc7   0x03   0x00   0xc0   0x00   0x00   0x00
+0xc00003c750:   0x04   0x00   0x00   0x00   0x00   0x00   0x00   0x00
+0xc00003c758:   0x04   0x00   0x00   0x00   0x00   0x00   0x00   0x00
+0xc00003c760:   0x00   0xe0   0x10   0x00   0xc0   0x00   0x00   0x00
+</pre></div>
+<p>Each line of 8 bytes is a quadword. The first contains the address of the slice
+data; the second contains 4 (the length); the third also contains 4 (the
+capacity). Let's go ahead and examine the slice data by dumping the contents of
+the address contained in the first quadword:</p>
+<div class="highlight"><pre><span></span>(dlv) x -fmt hex -len 32 0xc00003c718
+0xc00003c718:   0x55   0x00   0x00   0x00   0x00   0x00   0x00   0x00
+0xc00003c720:   0x22   0x00   0x00   0x00   0x00   0x00   0x00   0x00
+0xc00003c728:   0xab   0x00   0x00   0x00   0x00   0x00   0x00   0x00
+0xc00003c730:   0x09   0x00   0x00   0x00   0x00   0x00   0x00   0x00
+</pre></div>
+<p>As expected, we see our <tt class="docutils literal">int64</tt> values, each occupying a quadword.</p>
+<p>Now let's do the same for <tt class="docutils literal">iis</tt>, which contains the same data but represented
+as a <tt class="docutils literal">[]interface{}</tt>.</p>
+<div class="highlight"><pre><span></span>(dlv) p &amp;iis
+(*[]interface {})(0xc00003c760)
+(dlv) x -fmt hex -len 32 0xc00003c760
+0xc00003c760:   0x00   0xe0   0x10   0x00   0xc0   0x00   0x00   0x00
+0xc00003c768:   0x04   0x00   0x00   0x00   0x00   0x00   0x00   0x00
+0xc00003c770:   0x04   0x00   0x00   0x00   0x00   0x00   0x00   0x00
+0xc00003c778:   0xd0   0xc7   0x03   0x00   0xc0   0x00   0x00   0x00
+</pre></div>
+<p>Slice length and capacity are still 4, no surprises there. Let's look at the
+slice data:</p>
+<div class="highlight"><pre><span></span>(dlv) x -fmt hex -len 64 0xc00010e000
+0xc00010e000:   0xe0   0xf1   0x46   0x00   0x00   0x00   0x00   0x00
+0xc00010e008:   0xa8   0x44   0x4c   0x00   0x00   0x00   0x00   0x00
+0xc00010e010:   0xe0   0xf1   0x46   0x00   0x00   0x00   0x00   0x00
+0xc00010e018:   0x10   0x43   0x4c   0x00   0x00   0x00   0x00   0x00
+0xc00010e020:   0xe0   0xf1   0x46   0x00   0x00   0x00   0x00   0x00
+0xc00010e028:   0x58   0x47   0x4c   0x00   0x00   0x00   0x00   0x00
+0xc00010e030:   0xe0   0xf1   0x46   0x00   0x00   0x00   0x00   0x00
+0xc00010e038:   0x48   0x42   0x4c   0x00   0x00   0x00   0x00   0x00
+</pre></div>
+<p>Referring back to the second layout diagram above, we see that the even-numbered
+quadwords <a class="footnote-reference" href="index.html#footnote-5" id="footnote-reference-5">[5]</a> all contain the same address. This is the address of the itable of
+<tt class="docutils literal">interface{}</tt>. The odd-numbered quadwords point to data; let's take a look:</p>
+<div class="highlight"><pre><span></span>(dlv) x -fmt hex -len 8 0x4c44a8
+0x4c44a8:   0x55   0x00   0x00   0x00   0x00   0x00   0x00   0x00
+(dlv) x -fmt hex -len 8 0x4c4310
+0x4c4310:   0x22   0x00   0x00   0x00   0x00   0x00   0x00   0x00
+(dlv) x -fmt hex -len 8 0x4c4758
+0x4c4758:   0xab   0x00   0x00   0x00   0x00   0x00   0x00   0x00
+(dlv) x -fmt hex -len 8 0x4c4248
+0x4c4248:   0x09   0x00   0x00   0x00   0x00   0x00   0x00   0x00
+</pre></div>
+<p>Indeed, this memory layout exactly matches theory.</p>
+</div>
+<div class="section" id="observing-low-level-access-in-disassembly">
+<h2>Observing low level access in disassembly</h2>
+<p>Not to leave any stone unturned, let's dig into a disassembly listing of our
+program to see what code the compiler generates to access the two different
+slice types.</p>
+<p>To see how <tt class="docutils literal">[]int64</tt> is accessed, we'll disassemble the <tt class="docutils literal">addUpDirect</tt>
+function (cleaning up some details for clarity):</p>
+<div class="highlight"><pre><span></span>&quot;&quot;.addUpDirect STEXT nosplit size=41 args=0x18 locals=0x0
+  0x0000 00000 (slice-layout.go:11)       TEXT    &quot;&quot;.addUpDirect(SB)
+  0x0000 00000 (slice-layout.go:12)       MOVQ    &quot;&quot;.s+16(SP), AX
+  0x0005 00005 (slice-layout.go:12)       MOVQ    &quot;&quot;.s+8(SP), CX
+  0x000a 00010 (slice-layout.go:12)       XORL    DX, DX
+  0x000c 00012 (slice-layout.go:12)       JMP     35
+  0x000e 00014 (slice-layout.go:13)       MOVQ    &quot;&quot;.sum(SB), BX
+<span class="hll">  0x0015 00021 (slice-layout.go:13)       ADDQ    (CX)(DX*8), BX
+</span>  0x0019 00025 (slice-layout.go:13)       MOVQ    BX, &quot;&quot;.sum(SB)
+  0x0020 00032 (slice-layout.go:12)       INCQ    DX
+  0x0023 00035 (slice-layout.go:12)       CMPQ    DX, AX
+  0x0026 00038 (slice-layout.go:12)       JLT     14
+  0x0028 00040 (slice-layout.go:12)       RET
+</pre></div>
+<p>The interesting part is the loop between the <tt class="docutils literal">JMP</tt> and <tt class="docutils literal">JLT</tt> instructions.
+I've highlighted the line that shows the actual slice element access. <tt class="docutils literal">CX</tt>
+contains the address of slice data (the slice header itself is laid out on stack),
+or the first data quadword. Since <tt class="docutils literal">DX</tt> is the loop variable, <tt class="docutils literal">(DX*8)</tt>
+dereferences the <tt class="docutils literal">i</tt>th slice element. Therefore we see that the compiler
+expects to find the data quadwords laid out linearly.</p>
+<p>Now let's see how the same data is accessed through <tt class="docutils literal">[]interface{}</tt>, by
+disassembling <tt class="docutils literal">addUpViaInterface</tt>:</p>
+<div class="highlight"><pre><span></span>&quot;&quot;.addUpViaInterface STEXT size=150 args=0x18 locals=0x20
+  0x0000 00000 (slice-layout.go:19)       TEXT    &quot;&quot;.addUpViaInterface(SB)
+  0x0000 00000 (slice-layout.go:19)       MOVQ    (TLS), CX
+  0x0009 00009 (slice-layout.go:19)       CMPQ    SP, 16(CX)
+  0x000d 00013 (slice-layout.go:19)       JLS     140
+  0x000f 00015 (slice-layout.go:19)       SUBQ    $32, SP
+  0x0013 00019 (slice-layout.go:19)       MOVQ    BP, 24(SP)
+  0x0018 00024 (slice-layout.go:19)       LEAQ    24(SP), BP
+  0x001d 00029 (slice-layout.go:20)       MOVQ    &quot;&quot;.s+48(SP), AX
+  0x0022 00034 (slice-layout.go:20)       MOVQ    &quot;&quot;.s+40(SP), CX
+  0x0027 00039 (slice-layout.go:20)       XORL    DX, DX
+  0x0029 00041 (slice-layout.go:20)       JMP     64
+  0x002b 00043 (slice-layout.go:21)       MOVQ    &quot;&quot;.sum(SB), SI
+<span class="hll">  0x0032 00050 (slice-layout.go:21)       ADDQ    (DX), SI
+</span><span class="hll">  0x0035 00053 (slice-layout.go:21)       MOVQ    SI, &quot;&quot;.sum(SB)
+</span><span class="hll">  0x003c 00060 (slice-layout.go:20)       LEAQ    1(BX), DX
+</span><span class="hll">  0x0040 00064 (slice-layout.go:20)       CMPQ    DX, AX
+</span><span class="hll">  0x0043 00067 (slice-layout.go:20)       JGE     103
+</span><span class="hll">  0x0045 00069 (slice-layout.go:21)       MOVQ    DX, BX
+</span><span class="hll">  0x0048 00072 (slice-layout.go:21)       SHLQ    $4, DX
+</span><span class="hll">  0x004c 00076 (slice-layout.go:21)       MOVQ    (CX)(DX*1), SI
+</span><span class="hll">  0x0050 00080 (slice-layout.go:21)       MOVQ    8(CX)(DX*1), DX
+</span>  0x0055 00085 (slice-layout.go:21)       LEAQ    type.int64(SB), DI
+  0x005c 00092 (slice-layout.go:21)       NOP
+  0x0060 00096 (slice-layout.go:21)       CMPQ    DI, SI
+  0x0063 00099 (slice-layout.go:21)       JEQ     43
+  0x0065 00101 (slice-layout.go:21)       JMP     113
+  0x0067 00103 (slice-layout.go:20)       MOVQ    24(SP), BP
+  0x006c 00108 (slice-layout.go:20)       ADDQ    $32, SP
+  0x0070 00112 (slice-layout.go:20)       RET
+  0x0071 00113 (slice-layout.go:21)       MOVQ    SI, (SP)
+  0x0075 00117 (slice-layout.go:21)       MOVQ    DI, 8(SP)
+  0x007a 00122 (slice-layout.go:21)       LEAQ    type.interface {}(SB), AX
+  0x0081 00129 (slice-layout.go:21)       MOVQ    AX, 16(SP)
+  0x0086 00134 (slice-layout.go:21)       CALL    runtime.panicdottypeE(SB)
+  0x008b 00139 (slice-layout.go:21)       XCHGL   AX, AX
+  0x008c 00140 (slice-layout.go:21)       NOP
+  0x008c 00140 (slice-layout.go:19)       CALL    runtime.morestack_noctxt(SB)
+</pre></div>
+<p>I've highlighted the important lines; this loop is slightly more tricky to grok
+because it has to handle the type assertion, and also because the Go compiler is
+being fancy with instruction selection here (using <tt class="docutils literal">LEAQ</tt> to increment a
+register and store it in another, in a single instruction). But after spending
+some time on it, it all makes perfect sense.</p>
+<p><tt class="docutils literal">DX</tt> represents <tt class="docutils literal">i</tt> in the Go code. After getting to the slice data through
+the header, this code iterates over the slice data. Note that <tt class="docutils literal">SHLQ $4, DX</tt>.
+This is akin to <tt class="docutils literal">i *= 16</tt> to obtain the actual address of the slice element.
+16 because each slice element is an <tt class="docutils literal">interface{}</tt> value and hence occupies two
+quadwords. <tt class="docutils literal">CX</tt> points to the beginning of the slice data, so the line
+<tt class="docutils literal">MOVX <span class="pre">8(CX)(DX*1),</span> DX</tt> obtains the address of the actual <tt class="docutils literal">int64</tt>. This line
+is equivalent to <tt class="docutils literal">DX = *(8 + CX + DX)</tt>, which should make sense because the
+data pointer is the <em>second</em> quadword (hence the extra 8). After the jump back
+up, <tt class="docutils literal">ADDQ (DX), SI</tt> adds up the value of the <tt class="docutils literal">int64</tt> to <tt class="docutils literal">sum</tt>.</p>
+<p>Whether you care about understanding this assembly code in detail, the key
+outcome from this exploration is that the Go compiler generates markedly
+different code for iterating <tt class="docutils literal">[]int64</tt> and <tt class="docutils literal">[]interface{}</tt>, because it has
+to account for the difference in memory layout. This is yet another
+demonstration that the issue is not just theoretical, but it affects generated
+code in practice. If you have a compiled function designed to work in
+<tt class="docutils literal">[]interface{}</tt> and you pass <tt class="docutils literal">[]int64</tt> to it, you'll end up with invalid
+memory accesses and crashes.</p>
+</div>
+<div class="section" id="what-s-the-solution">
+<h2>What's the solution?</h2>
+<p>So far this post described why we <em>can't</em> pass concretely-typed slices to
+<tt class="docutils literal">[]interface{}</tt> in laborious detail. But this could be very useful for a
+single function to operate on slices of different types! So what can we do about
+it?</p>
+<p>This is where generics come in, and a <a class="reference external" href="../generic-functions-on-slices-with-go-type-parameters/index.html">followup post</a>
+covers the possible solution that may become available in a future version of
+Go.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>No reason to worry if it doesn't. It's a fairly
+obscure term in programming language theory that the majority of
+developers rarely, if ever, encounter. I learned about it after
+more than 10 years into my programming career, when I started reading
+about programming language theory.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>In Java, historically arrays were made covariant to provide
+some flexibility before generics. Since Java is boxing its types, this
+sort of worked out, though it lost type soundness. Go made a different
+design decision. As the rest of this post shows, Go doesn't box values
+of built-in types, so the uniformity of all types when referred to by
+an interface is harder to achieve.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>These numbers are represented in hex format to make it easier to spot
+them in memory dumps.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-4">[4]</a></td><td>Go does have an optimization where some types (e.g. <em>references</em>) can
+be &quot;inlined&quot; into the second interface quadword (instead of having a
+pointer to them), but we can ignore it for the sake of this post.
+The type used here - <tt class="docutils literal">int64</tt> is <em>not</em> inlined; moreover, even if the
+type is inlined it doesn't change the basic fact that the memory layout
+differs from that of a concretely-typed slice.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-5">[5]</a></td><td>&quot;Even-numbered&quot; here refers to the lines, and the count <strong>starts at 0</strong>.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

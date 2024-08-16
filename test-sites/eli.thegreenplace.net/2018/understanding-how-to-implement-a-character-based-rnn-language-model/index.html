@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Understanding how to implement a character-based RNN language model - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Understanding how to implement a character-based RNN language model">
+                        Understanding how to implement a character-based RNN language model
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> May 25, 2018 at 05:20</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/math.html">Math</a>
+        ,
+    <a href="../../tag/machine-learning.html">Machine Learning</a>
+        ,
+    <a href="../../tag/python.html">Python</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>In <a class="reference external" href="https://gist.github.com/karpathy/d4dee566867f8291f086">a single gist</a>,
+<a class="reference external" href="https://cs.stanford.edu/people/karpathy/">Andrej Karpathy</a> did something
+truly impressive. In a little over 100 lines of Python - without relying on any
+heavy-weight machine learning frameworks - he presents a fairly complete
+implementation of training a character-based recurrent neural network (RNN)
+language model; this includes the full backpropagation learning with Adagrad
+optimization.</p>
+<p>I love such minimal examples because they allow me to understand some topic in
+full depth, connecting the math to the code and having a complete picture of how
+everything works. In this post I want to present a companion explanation to
+Karpathy's gist, showing the diagrams and math that hide in its Python code.</p>
+<p>My own fork of the code <a class="reference external" href="https://github.com/eliben/deep-learning-samples/blob/master/min-char-rnn/min-char-rnn.py">is here</a>;
+it's semantically equivalent to Karpathy's gist, but includes many more comments
+and some debugging options. I won't reproduce the whole program here; instead,
+the idea is that you'd go through the code while reading this article. The
+diagrams, formulae and explanations here are complementary to the code comments.</p>
+<div class="section" id="what-rnns-do">
+<h2>What RNNs do</h2>
+<p>I expect readers to have a basic idea of what RNN do and why they work well for
+some problems. RNN are well-suited for problem domains where the input (and/or
+output) is some sort of a sequence - time-series financial data, words or
+sentences in natural language, speech, etc.</p>
+<p>There is <em>a lot</em> of material about this online, and the basics
+are easy to understand for anyone with even a bit of machine learning
+background. However, there is not enough coherent material online about how RNNs
+are implemented and trained - this is the goal of this post.</p>
+</div>
+<div class="section" id="character-based-rnn-language-model">
+<h2>Character-based RNN language model</h2>
+<p>The basic structure of <tt class="docutils literal"><span class="pre">min-char-rnn</span></tt> is represented by this recurrent
+diagram, where <em>x</em> is the input vector (at time step <em>t</em>), <em>y</em> is the output
+vector and <em>h</em> is the <em>state vector</em> kept inside the model.</p>
+<img alt="Basic RNN diagram" class="align-center" src="../../images/2018/rnnbasic.png" />
+<p>The line leaving and returning to the cell represents that the state is retained
+between invocations of the network. When a new time step arrives, some things
+are still the same (the weights inherent to the network, as we shall soon see)
+but some things are different - <em>h</em> may have changed. Therefore, unlike
+stateless NNs, <em>y</em> is not simply a function of <em>x</em>; in RNNs, identical <em>x</em>s can
+produce different <em>y</em>s, because <em>y</em> is a function of <em>x</em> and <em>h</em>, and <em>h</em> can
+change between steps.</p>
+<p>The <em>character-based</em> part of the model's name means that every input vector
+represents a single character (as opposed to, say, a word or part of an image).
+<tt class="docutils literal"><span class="pre">min-char-rnn</span></tt> uses one-hot vectors to represent different characters.</p>
+<p>A <em>language model</em> is a particular kind of machine learning algorithm that
+learns the statistical structure of language by &quot;reading&quot; a large corpus of
+text. This model can then reproduce authentic language segments - by predicting
+the next character (or word, for word-based models) based on past characters.</p>
+</div>
+<div class="section" id="internal-structure-of-the-rnn-cell">
+<h2>Internal-structure of the RNN cell</h2>
+<p>Let's proceed by looking into the internal structure of the RNN cell in
+<tt class="docutils literal"><span class="pre">min-char-rnn</span></tt>:</p>
+<img alt="RNN cell for min-char-rnn" class="align-center" src="../../images/2018/min-char-rnn-cell.png" />
+<ul class="simple">
+<li>Bold-faced symbols in reddish color are the model's parameters, weights for
+matrix multiplication and biases.</li>
+<li>The state vector <em>h</em> is shown twice - once for its past value, and once for
+its currently computed value. Whenever the RNN cell is invoked in sequence,
+the last computed state <em>h</em> is passed in from the left.</li>
+<li>In this diagram <em>y</em> is not the final answer of the cell - we compute a softmax
+function on it to obtain <em>p</em> - the probabilities for output characters <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>.
+I'm using these symbols for consistency with the code of <tt class="docutils literal"><span class="pre">min-char-rnn</span></tt>,
+though it would probably be more readable to flip the uses of <em>p</em> and <em>y</em>
+(making <em>y</em> the actual output of the cell).</li>
+</ul>
+<p>Mathematically, this cell computes:</p>
+<object class="align-center" data="../../images/math/886e94d526c2e538f1ba4414696ae9bf6618f0ff.svg" style="height: 82px;" type="image/svg+xml">\[\begin{align*}
+h^{[t]}&amp;=tanh(W_{hh}\cdot h^{[t-1]}+W_{xh}\cdot x^{[t]}+b_h)\\
+y^{[t]}&amp;=W_{hy}\cdot h^{[t]}+b_y\\
+p^{[t]}&amp;=softmax(y^{[t]})
+\end{align*}\]</object>
+</div>
+<div class="section" id="learning-model-parameters-with-backpropagation">
+<h2>Learning model parameters with backpropagation</h2>
+<p>This section will examine how we can <em>learn</em> the parameters <em>W</em> and <em>b</em> for this
+model. Mostly it's standard neural-network fare; we'll compute the derivatives
+of all the steps involved and will then employ backpropagation to find a
+parameter update based on some computed loss.</p>
+<p>There's one serious issue we'll have to address first. Backpropagation is
+usually defined on <em>acyclic</em> graphs, so it's not entirely clear how to apply it
+to our RNN. Is <em>h</em> an input? An output? Both? In the original high-level diagram
+of the RNN cell, <em>h</em> is both an input and an output - how can we compute the
+gradient for it when we don't know its value yet? <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a></p>
+<p>The way out of this conundrum is to <em>unroll</em> the RNN for a few steps. Note that
+we're already doing this in the detailed diagram by distinguishing between
+<object class="valign-0" data="../../images/math/057276c060e575533321773afb483e778e6a03f1.svg" style="height: 16px;" type="image/svg+xml">h^{[t]}</object> and <object class="valign-0" data="../../images/math/e4bc0503e20a8e6b82d9c86e10eb2c8e1dfe3471.svg" style="height: 16px;" type="image/svg+xml">h^{[t-1]}</object>. This makes every RNN cell <em>locally
+acyclic</em>, which makes it possible to use backpropagation on it. This approach
+has a cool-sounding name - <em>Backpropagation Through Time</em> (BPTT) - although it's
+really the same as regular backpropagation.</p>
+<p>Note that the architecture used here is called &quot;synced many-to-many&quot; in
+Karpathy's <a class="reference external" href="http://karpathy.github.io/2015/05/21/rnn-effectiveness/">Unreasonable Effectiveness of RNNs post</a>, and it's useful for
+training a simple char-based language model - we immediately observe the output
+sequence produced by the model while reading the input. Similar unrolling can be
+applied to other architectures, like encoder-decoder.</p>
+<p>Here's our RNN again, unrolled for 3 steps:</p>
+<img alt="Unrolled RNN diagram" class="align-center" src="../../images/2018/rnnunroll.png" />
+<p>Now the same diagram, with the gradient flows depicted with orange-ish arrows:</p>
+<img alt="Unrolled RNN diagram with gradient flow arrows shown" class="align-center" src="../../images/2018/rnnunrollgrad.png" />
+<p>With this unrolling, we have everything we need to compute the actual weight
+updates during learning, because when we want to compute the gradients through
+step 2, we already have the incoming gradient <object class="valign-m5" data="../../images/math/41bad72882e3d266373df060e8ab3ce36a819679.svg" style="height: 18px;" type="image/svg+xml">\Delta h[2]</object>, and so on.</p>
+<p>Do you now wonder what is <object class="valign-m5" data="../../images/math/0bdf36986644d54bc1bccf1410d2b9f0f86cf697.svg" style="height: 18px;" type="image/svg+xml">\Delta h[t]</object> for the final step at time <em>t</em>?</p>
+<p>In some models, sequence lengths are fairly limited. For example, when we
+translate a single sentence, the sequence length is rarely over a couple dozen
+words; for such models we can fully unroll the RNN. The <em>h</em> state output of the
+final step doesn't really &quot;go anywhere&quot;, and we assume its gradient is zero.
+Similarly, the incoming state <em>h</em> for the first step is zero.</p>
+<p>Other models work on potentially infinite sequence lengths, or sequences much
+too long for unrolling. The language model in <tt class="docutils literal"><span class="pre">min-char-rnn</span></tt> is a good
+example, because it can theoretically ingest and emit text of any length. For
+these models we'll perform <em>truncated</em> BPTT, by just assuming that the influence
+of the current state extends only <em>N</em> steps into the future. We'll then unroll
+the model <em>N</em> times and assume that <object class="valign-m5" data="../../images/math/9851a3637afe3f6d70466ac3a1d1c104935647fd.svg" style="height: 18px;" type="image/svg+xml">\Delta h[N]</object> is zero. Although it
+really isn't, for a large enough <em>N</em> this is a fairly safe assumption. RNNs are
+hard to train on very long sequences for other reasons, anyway (we'll touch upon
+this point again towards the end of the post).</p>
+<p>Finally, it's important to remember that although we unroll the RNN cells, all
+parameters (weights, biases) are <em>shared</em>. This plays an important part in
+ensuring <em>translation invariance</em> for the models - patterns learned in one place
+apply to another place <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>. It leaves the question of how to update the
+weights, since we compute gradients for them separately in each step. The answer
+is very simple - just add them up. This is similar to other cases where the
+output of a cell branches off in two directions - when gradients are computed,
+their values are added up along the branches - this is just the basic chain rule
+in action.</p>
+<p>We now have all the necessary background to understand how an RNN learns. What
+remains before looking at the code is figuring out how the gradients propagate
+<em>inside</em> the cell; in other words, the derivatives of each operation comprising
+the cell.</p>
+</div>
+<div class="section" id="flowing-the-gradient-inside-an-rnn-cell">
+<h2>Flowing the gradient inside an RNN cell</h2>
+<p>As we saw above, the formulae for computing the cell's output from its inputs
+are:</p>
+<object class="align-center" data="../../images/math/886e94d526c2e538f1ba4414696ae9bf6618f0ff.svg" style="height: 82px;" type="image/svg+xml">\[\begin{align*}
+h^{[t]}&amp;=tanh(W_{hh}\cdot h^{[t-1]}+W_{xh}\cdot x^{[t]}+b_h)\\
+y^{[t]}&amp;=W_{hy}\cdot h^{[t]}+b_y\\
+p^{[t]}&amp;=softmax(y^{[t]})
+\end{align*}\]</object>
+<p>To be able to learn weights, we have to find the derivatives of the cell's
+output w.r.t. the weights. The full backpropagation process was
+explained <a class="reference external" href="../../2016/the-chain-rule-of-calculus/index.html">in this post</a>, so here is
+only a brief refresher.</p>
+<p>Recall that <object class="valign-m4" data="../../images/math/f75a9c33c546d725557a4d452769bfd8fbb6cc22.svg" style="height: 20px;" type="image/svg+xml">p^{[t]}</object> is the predicted output; we compare it with the
+&quot;real&quot; output (<object class="valign-0" data="../../images/math/e44181afdf5e5f0f8ad4379f7d5f3ff924379c82.svg" style="height: 16px;" type="image/svg+xml">r^{[t]}</object>) during learning, to find the loss (error):</p>
+<object class="align-center" data="../../images/math/788a210d4bab7831a28e0ae7713ff9c1cd5aef12.svg" style="height: 22px;" type="image/svg+xml">\[L=L(p^{[t]}, r^{[t]})\]</object>
+<p>To perform a gradient descent update, we'll need to find
+<object class="valign-m7" data="../../images/math/c9e2c4ffca9564929c45a5244c7fb064465ab005.svg" style="height: 24px;" type="image/svg+xml">\frac{\partial L}{\partial w}</object>, for every weight value <em>w</em>. To do this,
+we'll have to:</p>
+<ol class="arabic simple">
+<li>Find the &quot;local&quot; gradients for every mathematical operation leading from
+<em>w</em> to <em>L</em>.</li>
+<li>Use the chain rule to propagate the error backwards through these local
+gradients until we find <object class="valign-m7" data="../../images/math/c9e2c4ffca9564929c45a5244c7fb064465ab005.svg" style="height: 24px;" type="image/svg+xml">\frac{\partial L}{\partial w}</object>.</li>
+</ol>
+<p>We start by formulating the chain rule to compute
+<object class="valign-m7" data="../../images/math/c9e2c4ffca9564929c45a5244c7fb064465ab005.svg" style="height: 24px;" type="image/svg+xml">\frac{\partial L}{\partial w}</object>:</p>
+<object class="align-center" data="../../images/math/45ad1052f6c6b78265143f4d41f2f12f1714ebfb.svg" style="height: 45px;" type="image/svg+xml">\[\frac{\partial L}{\partial w}=\frac{\partial L}{\partial p^{[t]}}\frac{\partial p^{[t]}}{\partial w}\]</object>
+<p>Next comes:</p>
+<object class="align-center" data="../../images/math/f7a68f105f4e7483f2781a7bebeaad0ce659bf06.svg" style="height: 45px;" type="image/svg+xml">\[\frac{\partial p^{[t]}}{\partial w}=\frac{\partial softmax}{\partial y^{[t]}}\frac{\partial y^{[t]}}{\partial w}\]</object>
+<p>Let's say the weight <em>w</em> we're interested in is part of <object class="valign-m3" data="../../images/math/5b9174fc1cf8afbecdab52326985d41be6fbc2c8.svg" style="height: 15px;" type="image/svg+xml">W_{hh}</object>, so we
+have to propagate some more:</p>
+<object class="align-center" data="../../images/math/53bcf70971d45064242463ddfad70e3ba6fb0ec9.svg" style="height: 42px;" type="image/svg+xml">\[\frac{\partial y^{[t]}}{\partial w}=\frac{\partial y^{[t]}}{\partial h^{[t]}}\frac{\partial h^{[t]}}{\partial w}\]</object>
+<p>We'll then proceed to propagate through the <em>tanh</em> function, bias addition and
+finally the multiplication by <object class="valign-m3" data="../../images/math/5b9174fc1cf8afbecdab52326985d41be6fbc2c8.svg" style="height: 15px;" type="image/svg+xml">W_{hh}</object>, for which the derivative by <em>w</em> is
+computed directly without further chaining.</p>
+<p>Let's now see how to compute all the relevant local gradients.</p>
+</div>
+<div class="section" id="cross-entropy-loss-gradient">
+<h2>Cross-entropy loss gradient</h2>
+<p>We'll start with the derivative of the loss function, which is cross-entropy in
+the <tt class="docutils literal"><span class="pre">min-char-rnn</span></tt> model. I went through a detailed derivation of the gradient
+of softmax followed by cross-entropy in <a class="reference external" href="../../2016/the-softmax-function-and-its-derivative.html">this post</a>;
+here is only a brief recap:</p>
+<object class="align-center" data="../../images/math/b26f68a12667ba254facf9815252f52ebf2238d9.svg" style="height: 38px;" type="image/svg+xml">\[xent(p,q)=-\sum_{k}p(k)log(q(k))\]</object>
+<p>Re-formulating this for our specific case, the loss is a function of
+<object class="valign-m4" data="../../images/math/f75a9c33c546d725557a4d452769bfd8fbb6cc22.svg" style="height: 20px;" type="image/svg+xml">p^{[t]}</object>, assuming the &quot;real&quot; class <em>r</em> is constant for every training
+example:</p>
+<object class="align-center" data="../../images/math/9ff2ef0e3dbe188129b93dddeb12759fdf909bcb.svg" style="height: 39px;" type="image/svg+xml">\[L(p^{[t]})=-\sum_{k}r(k)log(p^{[t]}(k))\]</object>
+<p>Since inputs and outputs to the cell are 1-hot encoded, let's just use <em>r</em> to
+denote the index where <object class="valign-m4" data="../../images/math/20aea9dc9718c5f2b3e11b3ebec11518202f0af1.svg" style="height: 18px;" type="image/svg+xml">r(k)</object> is non-zero. Then the Jacobian of <em>L</em> is
+only non-zero at index <em>r</em> and its value there is <object class="valign-m11" data="../../images/math/c4efb22a708d798abd641a16679976b8829f500d.svg" style="height: 27px;" type="image/svg+xml">-\frac{1}{p^{[t]}}(r)</object>.</p>
+</div>
+<div class="section" id="softmax-gradient">
+<h2>Softmax gradient</h2>
+<p>A detailed computation of the gradient for the softmax function was also
+presented in <a class="reference external" href="../../2016/the-softmax-function-and-its-derivative.html">this post</a>.
+For <object class="valign-m4" data="../../images/math/a197fbc6c2f0e9e1d6b4c51c6fca2756927a3055.svg" style="height: 18px;" type="image/svg+xml">S(y)</object> being the softmax of <em>y</em>, the Jacobian is:</p>
+<object class="align-center" data="../../images/math/87fbe94e6b409d31b512cb7a4581c24907d4dd4a.svg" style="height: 42px;" type="image/svg+xml">\[D_{j}S_{i}=\frac{\partial S_i}{\partial y_j}=S_{i}(\delta_{ij}-S_j)\]</object>
+</div>
+<div class="section" id="fully-connected-layer-gradient">
+<h2>Fully-connected layer gradient</h2>
+<p>Next on our path backwards is:</p>
+<object class="align-center" data="../../images/math/ead3bdf11cf41b04164a83008db4a7dd0db5a074.svg" style="height: 24px;" type="image/svg+xml">\[y^{[t]}&amp;=W_{hy}\cdot h^{[t]}+b_y\]</object>
+<p>From my earlier <a class="reference external" href="../backpropagation-through-a-fully-connected-layer/index.html">post on backpropagating through a fully-connected layer</a>,
+we know that <object class="valign-m9" data="../../images/math/413d530fbd3e019cc3f49aec6e8f7cb7a8f0c622.svg" style="height: 29px;" type="image/svg+xml">\frac{\partial y^{[t]}}{\partial h^{[t]}}=W_{hy}</object>. But
+that's not all; note that on the forward pass <object class="valign-0" data="../../images/math/057276c060e575533321773afb483e778e6a03f1.svg" style="height: 16px;" type="image/svg+xml">h^{[t]}</object> splits in two -
+one edge goes into the fully-connected layer, another goes to the next RNN cell
+as the state. When we backpropagate the loss gradient to <object class="valign-0" data="../../images/math/057276c060e575533321773afb483e778e6a03f1.svg" style="height: 16px;" type="image/svg+xml">h^{[t]}</object>, we
+have to take both edges into account; more specifically, we have to <em>add</em> the
+gradients along the two edges. This leads to the following backpropagation
+equation:</p>
+<object class="align-center" data="../../images/math/e7d5afe050e8e2f3f4b867ae4d9eb510fbe2e583.svg" style="height: 45px;" type="image/svg+xml">\[\frac{\partial L}{\partial h^{[t]}} =
+  \frac{\partial y^{[t]}}{\partial h^{[t]}}\frac{\partial L}{\partial y^{[t]}}+\frac{\partial L}{\partial h^{[t+1]}}\frac{\partial h^{[t+1]}}{\partial h^{[t]}}
+  =W_{hy}\cdot \frac{\partial L}{\partial y^{[t]}}+\frac{\partial L}{\partial h^{[t+1]}}\frac{\partial h^{[t+1]}}{\partial h^{[t]}}\]</object>
+<p>In addition, note that this layer already has model parameters that need to be
+learned - <object class="valign-m6" data="../../images/math/20c1b19b6e71072b92080b2eb00b5b99123cf057.svg" style="height: 18px;" type="image/svg+xml">W_{hy}</object> and <object class="valign-m6" data="../../images/math/9bd872acdafb9ea752b3ba10b2670499cb65469f.svg" style="height: 19px;" type="image/svg+xml">b_y</object> - a &quot;final&quot; destination for
+backpropagation. Please refer to my fully-connected layer backpropagation post
+to see how the gradients for these are computed.</p>
+</div>
+<div class="section" id="gradient-of-tanh">
+<h2>Gradient of tanh</h2>
+<p>The vector <object class="valign-0" data="../../images/math/057276c060e575533321773afb483e778e6a03f1.svg" style="height: 16px;" type="image/svg+xml">h^{[t]}</object> is produced by applying a hyperbolic tangent
+nonlinearity to another fully connected layer.</p>
+<object class="align-center" data="../../images/math/4ce55619f9cd4d96083ec3dadf303cc83a426543.svg" style="height: 22px;" type="image/svg+xml">\[h^{[t]}&amp;=tanh(W_{hh}\cdot h^{[t-1]}+W_{xh}\cdot x^{[t]}+b_h)\]</object>
+<p>To get to the model parameters <object class="valign-m3" data="../../images/math/5b9174fc1cf8afbecdab52326985d41be6fbc2c8.svg" style="height: 15px;" type="image/svg+xml">W_{hh}</object>, <object class="valign-m3" data="../../images/math/4ee22236c608ad6f49adc4807465b6e6896092ec.svg" style="height: 15px;" type="image/svg+xml">W_{xh}</object> and <object class="valign-m3" data="../../images/math/14e5d8599f43750d0cf9dda2d90b085c69079049.svg" style="height: 16px;" type="image/svg+xml">b_h</object>,
+we have to first backpropagate the loss gradient through <em>tanh</em>. <em>tanh</em> is a
+scalar function; when it's applied to a vector we apply it in <em>element-wise</em>
+fashion to every element in the vector independently, and collect the results in
+a similarly-shaped result vector.</p>
+<p>Its mathematical definition is:</p>
+<object class="align-center" data="../../images/math/326a49518bfe326c6be2de37838971407fa5175d.svg" style="height: 39px;" type="image/svg+xml">\[tanh(x)=\frac{e^x-e^{-x}}{e^x+e^{-x}}\]</object>
+<p>To find the derivative of this function, we'll use the formula for deriving
+a ratio:</p>
+<object class="align-center" data="../../images/math/9e006cf5e9f1f8ccac82ba1f2bcdabd710731756.svg" style="height: 42px;" type="image/svg+xml">\[(\frac{f}{g})&#x27;=\frac{f&#x27;g-g&#x27;f}{g^2}\]</object>
+<p>So:</p>
+<object class="align-center" data="../../images/math/dc73b540394a92b823ec3eaabe4d02a7735f146f.svg" style="height: 43px;" type="image/svg+xml">\[tanh&#x27;(x)=\frac{(e^x+e^{-x})(e^x+e^{-x})-(e^x-e^{-x})(e^x-e^{-x})}{(e^x+e^{-x})^2}=1-(tanh(x))^2\]</object>
+<p>Just like for softmax, it turns out that there's a convenient way to express the
+derivative of <em>tanh</em> in terms of <em>tanh</em> itself. When we apply the chain rule to
+derivatives of <em>tanh</em>, for example: <object class="valign-m4" data="../../images/math/7f748d5017b1817f6d3912d339e85871b81d93b4.svg" style="height: 18px;" type="image/svg+xml">h=tanh(k)</object> where <em>k</em> is a function of
+<em>w</em>. We get:</p>
+<object class="align-center" data="../../images/math/9137818273fdbac7d5dc0e05df4fcf3f8cb7ea9d.svg" style="height: 39px;" type="image/svg+xml">\[\frac{\partial h}{\partial w}=\frac{\partial tanh(k)}{\partial k}\frac{\partial k}{\partial w}=(1-h^2)\frac{\partial k}{\partial w}\]</object>
+<p>In our case <em>k(w)</em> is a fully-connected layer; to find its derivatives w.r.t.
+the weight matrices and bias, please refer to the <a class="reference external" href="../backpropagation-through-a-fully-connected-layer/index.html">backpropagation through a
+fully-connected layer post</a>.</p>
+</div>
+<div class="section" id="learning-model-parameters-with-adagrad">
+<h2>Learning model parameters with Adagrad</h2>
+<p>We've just went through all the major parts of the RNN cell and computed local
+gradients. Armed with these formulae and the chain rule, it should be possible
+to understand how the <tt class="docutils literal"><span class="pre">min-char-rnn</span></tt> code flows the loss gradient backwards.
+But that's not the end of the story; once we have the loss derivatives w.r.t. to
+some model parameter, how do we update this parameter?</p>
+<p>The most straightforward way to do this would be using the gradient descent
+algorithm, with some constant learning rate. <a class="reference external" href="../../2016/understanding-gradient-descent/index.html">I've written about gradient
+descent</a> in
+the past - please take a look for a refresher.</p>
+<p>Most real-world learning is done with more advanced algorithms these days,
+however. One such algorithm is called Adagrad, <a class="reference external" href="http://jmlr.org/papers/v12/duchi11a.html">proposed in 2011</a> by some experts in mathematical
+optimization. <tt class="docutils literal"><span class="pre">min-char-rnn</span></tt> happens to use Adagrad, so here is a simplified
+explanation of how it works.</p>
+<p>The main idea is to adjust the learning rate separately per parameter, because
+in practice some parameters change much more often than others. This could be
+due to rare examples in the training data set that affect a parameter that's
+not often affected; we'd like to amplify these changes because they are rare,
+and dampen changes to parameters that change often.</p>
+<p>Therefore the Adagrad algorithm works as follows:</p>
+<div class="highlight"><pre><span></span><span class="c1"># Same shape as the parameter array x</span>
+<span class="n">memory</span> <span class="o">=</span> <span class="mi">0</span>
+<span class="k">while</span> <span class="kc">True</span><span class="p">:</span>
+  <span class="n">dx</span> <span class="o">=</span> <span class="n">compute_grad</span><span class="p">(</span><span class="n">x</span><span class="p">)</span>
+
+  <span class="c1"># Elementwise: each memory element gets the corresponding dx^2 added to it.</span>
+  <span class="n">memory</span> <span class="o">+=</span> <span class="n">dx</span> <span class="o">*</span> <span class="n">dx</span>
+
+  <span class="c1"># The actual parameter update for this step. Note how the learning rate is</span>
+  <span class="c1"># modified by the memory. epsilon is some very small number to avoid dividing</span>
+  <span class="c1"># by 0.</span>
+  <span class="n">x</span> <span class="o">-=</span> <span class="n">learning_rate</span> <span class="o">*</span> <span class="n">dx</span> <span class="o">/</span> <span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">memory</span><span class="p">)</span> <span class="o">+</span> <span class="n">epsilon</span><span class="p">)</span>
+</pre></div>
+<p>If a given element in <tt class="docutils literal">dx</tt> was updated significantly in the past, its
+corresponding <tt class="docutils literal">memory</tt> element will grow and thus the learning rate is
+effectively decreased.</p>
+</div>
+<div class="section" id="gradient-clipping">
+<h2>Gradient clipping</h2>
+<p>If we unroll the RNN cell 10 times, the gradient will be multiplied by
+<object class="valign-m3" data="../../images/math/5b9174fc1cf8afbecdab52326985d41be6fbc2c8.svg" style="height: 15px;" type="image/svg+xml">W_{hh}</object> ten times on its way from the last cell to the first. For some
+structures of <object class="valign-m3" data="../../images/math/5b9174fc1cf8afbecdab52326985d41be6fbc2c8.svg" style="height: 15px;" type="image/svg+xml">W_{hh}</object>, this may lead to an &quot;exploding gradient&quot; effect
+where the value keeps growing <a class="footnote-reference" href="index.html#footnote-4" id="footnote-reference-4">[4]</a>.</p>
+<p>To mitigate this, <tt class="docutils literal"><span class="pre">min-char-rnn</span></tt> uses the <em>gradient clipping</em> trick. Whenever
+the gradients are updated, they are &quot;clipped&quot; to some reasonable range (like -5
+to 5) so they will never get out of this range. This method is crude, but it
+works reasonably well for training RNNs.</p>
+<p>The flip side problem of <em>vanishing gradient</em> (wherein the gradients keep
+getting smaller with each step) is much harder to solve, and usually requires
+more advanced recurrent NN architectures.</p>
+</div>
+<div class="section" id="min-char-rnn-model-quality">
+<h2>min-char-rnn model quality</h2>
+<p>While <tt class="docutils literal"><span class="pre">min-char-rnn</span></tt> is a complete RNN implementation that manages to learn,
+it's not really good enough for learning a reasonable model for the English
+language. The model is too simple for this, and suffers seriously from the
+vanishing gradient problem.</p>
+<p>For example, when training a 16-step unrolled model on a corpus of Sherlock
+Holmes books, it produces the following text after 60,000 iterations (learning
+on about a MiB of text):</p>
+<blockquote>
+one, my dred, roriny. qued bamp gond hilves non froange saws, to mold
+his a work, you shirs larcs anverver strepule thunboler
+muste, thum and cormed sightourd
+so was rewa her besee pilman</blockquote>
+<p>It's not complete gibberish, but not really English either. Just for fun, I
+wrote a simple <a class="reference external" href="https://github.com/eliben/deep-learning-samples/blob/master/min-char-rnn/markov-model.py">Markov chain generator</a>
+and trained it on the same text with a 4-character state. Here's a sample of its
+output:</p>
+<blockquote>
+though throughted with to taken as when it diabolice, and intered the
+stairhead, the stood initions of indeed, as burst, his mr. holmes' room,
+and now i fellows. the stable. he retails arm</blockquote>
+<p>Which, you'll admit, is quite a bit better than our &quot;fancy&quot; deep learning
+approach! And it was much faster to train too...</p>
+<p>To have a better chance of learning a good model, we'll need a more advanced
+architecture like LSTM. LSTMs employ a bunch of tricks to preserve long-term
+dependencies through the cells and can learn much better language models. For
+example, Andrej Karpathy's char-rnn model from the <a class="reference external" href="http://karpathy.github.io/2015/05/21/rnn-effectiveness/">Unreasonable Effectiveness
+of RNNs post</a> is a
+multi-layer LSTM, and it can learn fairly nice models for a varied set of
+domains, ranging from Shakespeare sonnets to C code snippets in the Linux
+kernel.</p>
+</div>
+<div class="section" id="conclusion">
+<h2>Conclusion</h2>
+<p>The goal of this post wasn't to develop a very good RNN model; rather, it was to
+explain in detail the math behind training a simple RNN. More advanced RNN
+architerctures like LSTM are somewhat more complicated, but all the core ideas
+are very similar and this post should be helpful in nailing the basics.</p>
+<p><em>Update:</em> <a class="reference external" href="../minimal-character-based-lstm-implementation/index.html">An extension of this post to LSTMs</a>.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td><p class="first">Computing a softmax makes sense because <em>x</em> is encoded with one-hot over
+a vocabulary-sized vector, meaning there's a 1 in the position of the
+letter it represents with 0s in all other positions. For example, is we
+only care about the 26 lower-case alphabet letters, <em>x</em> could be a
+26-element vector. To represent 'a' it would have 1 in position 0 and
+zeros elsewhere; to represent 'd' it would have 1 in position 3 and zeros
+elsewhere.</p>
+<p class="last">The output <em>p</em> here models what the RNN cell thinks the next generated
+character should be. Using softmax, it would have probabilities for each
+character in the corresponding position, all of them properly summing up
+to 1.</p>
+</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td><p class="first">A slightly more technical explanation: to compute the gradient for the
+error w.r.t. weights in the typical backpropagation flow, we'll need
+input gradients for <object class="valign-m5" data="../../images/math/0ede500c5edc819b5f962923f98724936ef9d593.svg" style="height: 18px;" type="image/svg+xml">p[t]</object> and <object class="valign-m5" data="../../images/math/897ad2ab624c79d6dcb687ad28f7a3767a76712c.svg" style="height: 18px;" type="image/svg+xml">h[t]</object>. Then, when learning
+happens we use the measured error and propagate it backwards. But what is
+the measured error for <object class="valign-m5" data="../../images/math/897ad2ab624c79d6dcb687ad28f7a3767a76712c.svg" style="height: 18px;" type="image/svg+xml">h[t]</object>? We don't know it before we compute
+the error of the next iteration, and so on - a bit of a chicken-egg
+problem.</p>
+<p class="last">Unrolling/BPTT helps approximate a solution for this issue. An
+alternative solution is to use <em>forward-mode</em> gradient propagation
+instead, with an algorithm called RTRL (Real Time Recurrent Learning).
+This algorithm works well but has a high computational cost compared to
+BPTT. I'd love to explore this topic in more depth, as it ties into the
+difference between forward-mode and reverse-mode auto differentiation.
+But that would be a topic for another post.</p>
+</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>This is similar to convolutional networks, where the convolution filter
+weights are reused many times when processing a much larger input. In
+such models the invariance is <em>spatial</em>; in sequence models the
+invariance is <em>temporal</em>. In fact, space vs. time in models is just a
+matter of convention, and it turns out that 1D convolutional models
+perform very well on some sequence tasks!</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-4">[4]</a></td><td><p class="first">An easy way to think about it is to imagine some initial value <em>v</em>,
+multiplied by another value <em>c</em> many times. We get <object class="valign-0" data="../../images/math/f24f59611d0e1f3043785fe772138687cfd6da97.svg" style="height: 15px;" type="image/svg+xml">vc^N</object> for <em>N</em>
+multiplications. If <em>c</em> is larger than 1, it means the result will keep
+growing with each multiplication. How quickly will depend on the actual
+value of <em>c</em>, but this is basically an exponential runoff. We actually
+care about the absolute value of <em>c</em>, of course, since runoff is equally
+bad in the positive or negative direction.</p>
+<p class="last">Similarly with the absolute value of <em>c</em> smaller than 1, we'll get a
+&quot;vanishing&quot; effect since the result will keep getting smaller with each
+iteration.</p>
+</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

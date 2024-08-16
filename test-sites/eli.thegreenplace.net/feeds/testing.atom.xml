@@ -1,0 +1,823 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"><title>Eli Bendersky's website - Testing</title><link href="https://eli.thegreenplace.net/" rel="alternate"></link><link href="https://eli.thegreenplace.net/feeds/testing.atom.xml" rel="self"></link><id>https://eli.thegreenplace.net/</id><updated>2024-05-04T19:46:23-07:00</updated><entry><title>File-driven testing in Go</title><link href="https://eli.thegreenplace.net/2022/file-driven-testing-in-go/" rel="alternate"></link><published>2022-02-12T20:20:00-08:00</published><updated>2024-05-04T19:46:23-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2022-02-12:/2022/file-driven-testing-in-go/</id><summary type="html">&lt;p&gt;This is a quick post about a testing pattern I've found useful in multiple
+programming languages; Go's &lt;tt class="docutils literal"&gt;testing&lt;/tt&gt; package makes it particularly easy
+to use and implement.&lt;/p&gt;
+&lt;p&gt;&lt;em&gt;Table-driven tests&lt;/em&gt; are a well-known and recommended technique for structuring
+unit tests in Go. I assume the reader is familiar with table-driven tests …&lt;/p&gt;</summary><content type="html">&lt;p&gt;This is a quick post about a testing pattern I've found useful in multiple
+programming languages; Go's &lt;tt class="docutils literal"&gt;testing&lt;/tt&gt; package makes it particularly easy
+to use and implement.&lt;/p&gt;
+&lt;p&gt;&lt;em&gt;Table-driven tests&lt;/em&gt; are a well-known and recommended technique for structuring
+unit tests in Go. I assume the reader is familiar with table-driven tests; if
+not, check out &lt;a class="reference external" href="https://gobyexample.com/testing-and-benchmarking"&gt;this basic example&lt;/a&gt; or google for the many
+tutorials available online.&lt;/p&gt;
+&lt;p&gt;In some cases, the input to a test can be more data than we're willing
+to paste into a &lt;tt class="docutils literal"&gt;_test.go&lt;/tt&gt; file, or the input can be non-text. For these
+cases, file-driven tests are a useful extension to the table-driven technique.&lt;/p&gt;
+&lt;p&gt;Suppose - for the sake of demonstration - that we want to test Go's
+&lt;tt class="docutils literal"&gt;go/format&lt;/tt&gt; package. This package provides programmatic access to &lt;tt class="docutils literal"&gt;gofmt&lt;/tt&gt;'s
+capabilities with the &lt;a class="reference external" href="https://pkg.go.dev/go/format#Source"&gt;Source function&lt;/a&gt;
+that takes unformatted Go text as input and produces formatted text. We could
+use table-driven tests for this, but some inputs may be large - whole Go files,
+or significant chunks thereof. It can be more convenient to have these inputs in
+external files the test can read and invoke &lt;tt class="docutils literal"&gt;format.Source&lt;/tt&gt; on.&lt;/p&gt;
+&lt;p&gt;&lt;a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2022/filetest"&gt;This toy GitHub repository&lt;/a&gt; shows how
+it's done. Here is the directory structure:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ tree
+.
+├── go.mod
+└── somepackage
+    ├── somepackage_test.go
+    └── testdata
+        ├── funcs.golden
+        ├── funcs.input
+        ├── simple-expr.golden
+        └── simple-expr.input
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Our test code is in &lt;tt class="docutils literal"&gt;somepackage_test.go&lt;/tt&gt; - we'll get to it shortly. Alongside
+it is the &lt;tt class="docutils literal"&gt;testdata&lt;/tt&gt; directory with pairs of files named &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;&amp;lt;name&amp;gt;.input&lt;/span&gt;&lt;/tt&gt;
+and &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;&amp;lt;name&amp;gt;.golden&lt;/span&gt;&lt;/tt&gt;. Each pair serves as a test: the input file is fed into
+the formatter, and the formatter's output is compared to the golden file.&lt;/p&gt;
+&lt;p&gt;This is the entirety of our test code:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="kd"&gt;func&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;TestFormatFiles&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="nx"&gt;testing&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;T&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="c1"&gt;// Find the paths of all input files in the data directory.&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;paths&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;filepath&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Glob&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;filepath&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Join&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;testdata&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;quot;*.input&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;!=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;nil&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Fatal&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="k"&gt;for&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;_&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;path&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;range&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;paths&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;_&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;filename&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;filepath&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Split&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;path&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;testname&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;filename&lt;/span&gt;&lt;span class="p"&gt;[:&lt;/span&gt;&lt;span class="nb"&gt;len&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;filename&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="nb"&gt;len&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;filepath&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Ext&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;path&lt;/span&gt;&lt;span class="p"&gt;))]&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="c1"&gt;// Each path turns into a test: the test name is the filename without the&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="c1"&gt;// extension.&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Run&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;testname&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kd"&gt;func&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="nx"&gt;testing&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;T&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="nx"&gt;source&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;os&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;ReadFile&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;path&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;!=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;nil&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Fatal&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;error reading source file:&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="c1"&gt;// &amp;gt;&amp;gt;&amp;gt; This is the actual code under test.&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="nx"&gt;output&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;format&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Source&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;source&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;!=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;nil&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Fatal&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;error formatting:&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="c1"&gt;// &amp;lt;&amp;lt;&amp;lt;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="c1"&gt;// Each input file is expected to have a &amp;quot;golden output&amp;quot; file, with the&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="c1"&gt;// same path except the .input extension is replaced by .golden&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="nx"&gt;goldenfile&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;filepath&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Join&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;testdata&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;testname&lt;/span&gt;&lt;span class="o"&gt;+&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;.golden&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="nx"&gt;want&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;os&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;ReadFile&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;goldenfile&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;!=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;nil&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Fatal&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;error reading golden file:&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;bytes&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Equal&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;output&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;want&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Errorf&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;\n==== got:\n%s\n==== want:\n%s\n&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;output&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;want&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;})&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The code is well commented, but here are a few highlights:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;The test file pairs are &lt;em&gt;auto-discovered&lt;/em&gt; using &lt;tt class="docutils literal"&gt;filepath.Glob&lt;/tt&gt;. Placing
+additional file pairs in the &lt;tt class="docutils literal"&gt;testdata&lt;/tt&gt; directory will automatically ensure
+they are used by subsequent test executions. When we run &lt;tt class="docutils literal"&gt;go test&lt;/tt&gt;, the
+current working directory will be set to the package that's being tested, so
+finding the &lt;tt class="docutils literal"&gt;testdata&lt;/tt&gt; directory is easy.&lt;/li&gt;
+&lt;li&gt;The &lt;tt class="docutils literal"&gt;testdata&lt;/tt&gt; name is special for the Go toolchain, which will
+ignore files in it (so you can place files named &lt;tt class="docutils literal"&gt;*.go&lt;/tt&gt; there,
+for example, and they won't be built or analyzed).&lt;/li&gt;
+&lt;li&gt;For each file pair we create a &lt;em&gt;subtest&lt;/em&gt;
+with &lt;a class="reference external" href="https://pkg.go.dev/testing#T.Run"&gt;T.Run&lt;/a&gt;. This means it's a separate
+test as far as the test runner is concerned - reported on its own in verbose
+output, can be run in parallel with other tests, etc.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;If we run the tests, we get:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ go test -v ./...
+=== RUN   TestFormatFiles
+=== RUN   TestFormatFiles/funcs
+=== RUN   TestFormatFiles/simple-expr
+--- PASS: TestFormatFiles (0.00s)
+    --- PASS: TestFormatFiles/funcs (0.00s)
+    --- PASS: TestFormatFiles/simple-expr (0.00s)
+PASS
+ok    example.com/somepackage 0.002s
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Note how each input file in &lt;tt class="docutils literal"&gt;testdata&lt;/tt&gt; generated its own test with a distinct
+name.&lt;/p&gt;
+&lt;p&gt;The &amp;quot;golden file&amp;quot; approach shown here is just one of the possible patterns for
+using file-driven tests. Often there is no separate file for the expected
+output, and instead the input file itself contains some special markers that
+drive the test's expectations. It's really dependent on the specific testing
+scenario; the Go project and subprojects (such as &lt;tt class="docutils literal"&gt;x/tools&lt;/tt&gt;) use several
+variations of this testing pattern.&lt;/p&gt;
+</content><category term="misc"></category><category term="Go"></category><category term="Testing"></category></entry><entry><title>Testing multiple implementations of a trait in Rust</title><link href="https://eli.thegreenplace.net/2021/testing-multiple-implementations-of-a-trait-in-rust/" rel="alternate"></link><published>2021-11-06T05:32:00-07:00</published><updated>2024-05-04T19:46:23-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2021-11-06:/2021/testing-multiple-implementations-of-a-trait-in-rust/</id><summary type="html">&lt;p&gt;I've been hacking on a small practice project in Rust where I implement the same
+data structure in several different ways. When testing this project, I want to
+run exactly the same set of tests on several types that implement the same
+trait.&lt;/p&gt;
+&lt;p&gt;As a demonstrative example, let's take the …&lt;/p&gt;</summary><content type="html">&lt;p&gt;I've been hacking on a small practice project in Rust where I implement the same
+data structure in several different ways. When testing this project, I want to
+run exactly the same set of tests on several types that implement the same
+trait.&lt;/p&gt;
+&lt;p&gt;As a demonstrative example, let's take the following trait:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="k"&gt;pub&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;trait&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Calculator&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;new&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;-&amp;gt; &lt;span class="nc"&gt;Self&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;a&lt;/span&gt;: &lt;span class="kt"&gt;u32&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;b&lt;/span&gt;: &lt;span class="kt"&gt;u32&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;-&amp;gt; &lt;span class="kt"&gt;u32&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;A straightforward implementation could be &lt;tt class="docutils literal"&gt;Foo&lt;/tt&gt;:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="k"&gt;pub&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;struct&lt;/span&gt; &lt;span class="nc"&gt;Foo&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="k"&gt;impl&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Calculator&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;for&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Foo&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;new&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;-&amp;gt; &lt;span class="nc"&gt;Self&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="bp"&gt;Self&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;a&lt;/span&gt;: &lt;span class="kt"&gt;u32&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;b&lt;/span&gt;: &lt;span class="kt"&gt;u32&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;-&amp;gt; &lt;span class="kt"&gt;u32&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="n"&gt;a&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;+&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;b&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Or, if you enjoy the &lt;a class="reference external" href="https://en.wikipedia.org/wiki/Peano_axioms"&gt;Peano axioms&lt;/a&gt;, a somewhat more involved
+implementation could be &lt;tt class="docutils literal"&gt;Bar&lt;/tt&gt;:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="k"&gt;pub&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;struct&lt;/span&gt; &lt;span class="nc"&gt;Bar&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="k"&gt;impl&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Calculator&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;for&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Bar&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;new&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;-&amp;gt; &lt;span class="nc"&gt;Self&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="bp"&gt;Self&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;a&lt;/span&gt;: &lt;span class="kt"&gt;u32&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;b&lt;/span&gt;: &lt;span class="kt"&gt;u32&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;-&amp;gt; &lt;span class="kt"&gt;u32&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;b&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;==&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="n"&gt;a&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;else&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;a&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;b&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;+&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Our task is to write the same set of tests once, and invoke it on both
+&lt;tt class="docutils literal"&gt;Foo&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;Bar&lt;/tt&gt; with as little boilerplate as possible. Let's examine
+several approaches for doing this &lt;a class="footnote-reference" href="#footnote-1" id="footnote-reference-1"&gt;[1]&lt;/a&gt;.&lt;/p&gt;
+&lt;div class="section" id="straightforward-trait-based-testing"&gt;
+&lt;h2&gt;Straightforward trait-based testing&lt;/h2&gt;
+&lt;p&gt;The most basic approach to testing our types would be something like:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="cp"&gt;#[cfg(test)]&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="k"&gt;mod&lt;/span&gt; &lt;span class="nn"&gt;tests&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;use&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;crate&lt;/span&gt;::&lt;span class="n"&gt;calculator&lt;/span&gt;::&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="n"&gt;Bar&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Calculator&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Foo&lt;/span&gt;&lt;span class="p"&gt;};&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;trait_tester&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;C&lt;/span&gt;: &lt;span class="nc"&gt;Calculator&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="kd"&gt;let&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;c&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;C&lt;/span&gt;::&lt;span class="n"&gt;new&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="fm"&gt;assert_eq!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;c&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="fm"&gt;assert_eq!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;c&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;10&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;43&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;53&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="cp"&gt;#[test]&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;test_foo&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="n"&gt;trait_tester&lt;/span&gt;::&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;Foo&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="cp"&gt;#[test]&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;test_bar&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="n"&gt;trait_tester&lt;/span&gt;::&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;Bar&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The &lt;tt class="docutils literal"&gt;trait_tester&lt;/tt&gt; function can be invoked on any type that implements the
+&lt;tt class="docutils literal"&gt;Calculator&lt;/tt&gt; trait and can host a collection of tests. &amp;quot;Concrete&amp;quot; test
+functions like &lt;tt class="docutils literal"&gt;test_foo&lt;/tt&gt; then call &lt;tt class="docutils literal"&gt;trait_tester&lt;/tt&gt;; the concrete test
+functions are what the Rust testing framework sees because they're marked with
+the &lt;tt class="docutils literal"&gt;#[test]&lt;/tt&gt; attribute.&lt;/p&gt;
+&lt;p&gt;On the surface, this approach seems workable; looking deeper, however, there
+is a serious issue.&lt;/p&gt;
+&lt;p&gt;Suppose we want to write multiple test functions that test different
+features and usages of our &lt;tt class="docutils literal"&gt;Calculator&lt;/tt&gt;. We could add
+&lt;tt class="docutils literal"&gt;trait_tester_feature1&lt;/tt&gt;, &lt;tt class="docutils literal"&gt;trait_tester_feature2&lt;/tt&gt;, etc. Then, the concrete
+test functions would look something like:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="cp"&gt;#[test]&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;test_foo&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;trait_tester&lt;/span&gt;::&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;Foo&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;trait_tester_feature1&lt;/span&gt;::&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;Foo&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;trait_tester_feature2&lt;/span&gt;::&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;Foo&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="cp"&gt;#[test]&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;test_bar&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;trait_tester&lt;/span&gt;::&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;Bar&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;trait_tester_feature1&lt;/span&gt;::&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;Bar&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;trait_tester_feature2&lt;/span&gt;::&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;Bar&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Taken to the limit, there's quite a bit of repetition here. In a realistic
+project the number of tests can easily run into the dozens.&lt;/p&gt;
+&lt;p&gt;The problem doesn't end here, though; in Rust, the &lt;em&gt;unit of testing&lt;/em&gt; is
+&lt;tt class="docutils literal"&gt;test_foo&lt;/tt&gt;, not the &lt;tt class="docutils literal"&gt;trait_tester*&lt;/tt&gt; functions. This means that only
+&lt;tt class="docutils literal"&gt;test_foo&lt;/tt&gt; will show up in the testing report, there's no easy way to select
+to run only &lt;tt class="docutils literal"&gt;trait_tester_feature1&lt;/tt&gt;, etc. Moreover, test parallelization can
+only happen between &lt;tt class="docutils literal"&gt;#[test]&lt;/tt&gt; functions.&lt;/p&gt;
+&lt;p&gt;The fundamental issue here is: what we &lt;em&gt;really&lt;/em&gt; want is to mark each of
+the &lt;tt class="docutils literal"&gt;trait_tester*&lt;/tt&gt; functions with &lt;tt class="docutils literal"&gt;#[test]&lt;/tt&gt;, but this isn't trivial because
+&lt;tt class="docutils literal"&gt;#[test]&lt;/tt&gt; is a compile-time feature, and the compiler is supposed to know what
+concrete types partake in each &lt;tt class="docutils literal"&gt;#[test]&lt;/tt&gt; function definition.&lt;/p&gt;
+&lt;p&gt;Thankfully, Rust has just the tool for generating code at compile time.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="first-attempt-with-macros"&gt;
+&lt;h2&gt;First attempt with macros&lt;/h2&gt;
+&lt;p&gt;Macros can help us generate functions tagged with &lt;tt class="docutils literal"&gt;#[test]&lt;/tt&gt; at compile time.
+Let's try this:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="fm"&gt;macro_rules!&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;calculator_tests&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="cp"&gt;$($name&lt;/span&gt;:&lt;span class="nc"&gt;ident&lt;/span&gt;: &lt;span class="cp"&gt;$type&lt;/span&gt;:&lt;span class="nc"&gt;ty&lt;/span&gt;&lt;span class="p"&gt;,)&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="cp"&gt;$(&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="cp"&gt;#[test]&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="cp"&gt;$name&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="kd"&gt;let&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;c&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="cp"&gt;$type&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;::&lt;span class="n"&gt;new&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="fm"&gt;assert_eq!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;c&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="fm"&gt;assert_eq!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;c&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;10&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;43&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;53&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="cp"&gt;#[cfg(test)]&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="k"&gt;mod&lt;/span&gt; &lt;span class="nn"&gt;tests&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;use&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;crate&lt;/span&gt;::&lt;span class="n"&gt;calculator&lt;/span&gt;::&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="n"&gt;Bar&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Calculator&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Foo&lt;/span&gt;&lt;span class="p"&gt;};&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;calculator_tests&lt;/span&gt;&lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="n"&gt;foo&lt;/span&gt;: &lt;span class="nc"&gt;Foo&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="n"&gt;bar&lt;/span&gt;: &lt;span class="nc"&gt;Bar&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The &lt;tt class="docutils literal"&gt;calculator_tests&lt;/tt&gt; macro generates multiple &lt;tt class="docutils literal"&gt;#[test]&lt;/tt&gt;-tagged functions,
+one per type. If we run &lt;tt class="docutils literal"&gt;cargo test&lt;/tt&gt;, we'll see that the Rust testing
+framework recognizes and runs them:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;[...]
+test typetest::tests::bar ... ok
+test typetest::tests::foo ... ok
+[...]
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;However, there's an issue; how to we add more testing functions per type, as
+discussed previously? If only we could do something like &lt;tt class="docutils literal"&gt;fn ${name}_feature1&lt;/tt&gt;
+to name a function. Due to &lt;a class="reference external" href="https://en.wikipedia.org/wiki/Hygienic_macro"&gt;macro hygiene rules&lt;/a&gt; this is tricky, though
+procedural macros like the &lt;tt class="docutils literal"&gt;paste&lt;/tt&gt; crate can help; see
+&lt;a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2021/rust-test-macros/src/typetestpaste.rs"&gt;this code&lt;/a&gt;
+for an example.&lt;/p&gt;
+&lt;p&gt;In any case, I believe there's a better solution.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="second-attempt-with-macros"&gt;
+&lt;h2&gt;Second attempt with macros&lt;/h2&gt;
+&lt;p&gt;Instead of encoding the type variant in the function name, we can use a Rust
+sub-module:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="fm"&gt;macro_rules!&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;calculator_tests&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="cp"&gt;$($name&lt;/span&gt;:&lt;span class="nc"&gt;ident&lt;/span&gt;: &lt;span class="cp"&gt;$type&lt;/span&gt;:&lt;span class="nc"&gt;ty&lt;/span&gt;&lt;span class="p"&gt;,)&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="cp"&gt;$(&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="k"&gt;mod&lt;/span&gt; &lt;span class="cp"&gt;$name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="k"&gt;use&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;super&lt;/span&gt;::&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="cp"&gt;#[test]&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;test&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;                &lt;/span&gt;&lt;span class="kd"&gt;let&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;c&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="cp"&gt;$type&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;::&lt;span class="n"&gt;new&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;                &lt;/span&gt;&lt;span class="fm"&gt;assert_eq!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;c&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;                &lt;/span&gt;&lt;span class="fm"&gt;assert_eq!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;c&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;10&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;43&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;53&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="cp"&gt;#[cfg(test)]&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="k"&gt;mod&lt;/span&gt; &lt;span class="nn"&gt;tests&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;use&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;crate&lt;/span&gt;::&lt;span class="n"&gt;calculator&lt;/span&gt;::&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="n"&gt;Bar&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Calculator&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Foo&lt;/span&gt;&lt;span class="p"&gt;};&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;calculator_tests&lt;/span&gt;&lt;span class="o"&gt;!&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="n"&gt;foo&lt;/span&gt;: &lt;span class="nc"&gt;Foo&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="n"&gt;bar&lt;/span&gt;: &lt;span class="nc"&gt;Bar&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Now all functions are named &lt;tt class="docutils literal"&gt;test&lt;/tt&gt;, but they're namespaced inside a module
+with a configurable name. And yes, now we can easily add more testing functions:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="fm"&gt;macro_rules!&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;calculator_tests&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="cp"&gt;$($name&lt;/span&gt;:&lt;span class="nc"&gt;ident&lt;/span&gt;: &lt;span class="cp"&gt;$type&lt;/span&gt;:&lt;span class="nc"&gt;ty&lt;/span&gt;&lt;span class="p"&gt;,)&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="cp"&gt;$(&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="k"&gt;mod&lt;/span&gt; &lt;span class="cp"&gt;$name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="k"&gt;use&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;super&lt;/span&gt;::&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="cp"&gt;#[test]&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;test&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;                &lt;/span&gt;&lt;span class="kd"&gt;let&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;c&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="cp"&gt;$type&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;::&lt;span class="n"&gt;new&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;                &lt;/span&gt;&lt;span class="fm"&gt;assert_eq!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;c&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;                &lt;/span&gt;&lt;span class="fm"&gt;assert_eq!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;c&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;10&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;43&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;53&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="cp"&gt;#[test]&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;test_feature1&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;                &lt;/span&gt;&lt;span class="kd"&gt;let&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;c&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="cp"&gt;$type&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;::&lt;span class="n"&gt;new&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;                &lt;/span&gt;&lt;span class="fm"&gt;assert_eq!&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;c&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;add&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;6&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;9&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;15&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;If we run &lt;tt class="docutils literal"&gt;cargo test&lt;/tt&gt;, it works as expected:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;test typetestmod::tests::bar::test ... ok
+test typetestmod::tests::bar::test_feature1 ... ok
+test typetestmod::tests::foo::test_feature1 ... ok
+test typetestmod::tests::foo::test ... ok
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Each test has its own full path, and is invoked separately. We can select which
+tests to run from the command line - running only the tests for &lt;tt class="docutils literal"&gt;Bar&lt;/tt&gt;, say, or
+run all the &lt;tt class="docutils literal"&gt;feature1&lt;/tt&gt; tests for all types. Also notice that the test names
+are reported &amp;quot;out of order&amp;quot;; this is because they are all run concurrently!&lt;/p&gt;
+&lt;p&gt;To conclude, with some macro hackery the goal is achieved. We can now write any
+number of tests in a generic way, and invoke all these tests on multiple types
+with minimal duplication - just one extra line per type &lt;a class="footnote-reference" href="#footnote-2" id="footnote-reference-2"&gt;[2]&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;It's not all perfect, though. Macros add a layer of indirection and it leaks
+in the error messages. If one of the &lt;tt class="docutils literal"&gt;assert_eq!&lt;/tt&gt; invocations fails, the
+reported line is at the point of macro &lt;em&gt;instantiation&lt;/em&gt;, which is the same line
+for all tests for any given type. Re-running the test with &lt;tt class="docutils literal"&gt;RUST_BACKTRACE=1&lt;/tt&gt;
+helps find which of the asserts failed, since it appears in the trace.&lt;/p&gt;
+&lt;hr class="docutils" /&gt;
+&lt;table class="docutils footnote" frame="void" id="footnote-1" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#footnote-reference-1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;The full source code for this post can be found
+&lt;a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2021/rust-test-macros"&gt;on GitHub&lt;/a&gt;.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="footnote-2" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#footnote-reference-2"&gt;[2]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;Sharp-eyed readers will note that using this approach the common trait
+isn't actually needed at all! Macros work by textual substitution (AST
+substitution, to be precise), so the generated code creates a concrete
+type and invokes its methods. The macro-based tests would work even if
+&lt;tt class="docutils literal"&gt;Foo&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;Bar&lt;/tt&gt; didn't declare themselves as implementing the
+&lt;tt class="docutils literal"&gt;Calculator&lt;/tt&gt; trait.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;/div&gt;
+</content><category term="misc"></category><category term="Rust"></category><category term="Testing"></category></entry><entry><title>Testing flag parsing in Go programs</title><link href="https://eli.thegreenplace.net/2020/testing-flag-parsing-in-go-programs/" rel="alternate"></link><published>2020-04-04T07:24:00-07:00</published><updated>2024-05-04T19:46:23-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2020-04-04:/2020/testing-flag-parsing-in-go-programs/</id><summary type="html">&lt;p&gt;This is a short post about writing tests for Go programs that have
+command-line flags, and in particular programs where flags are a significant
+chunk of their functionality (think command-line tools like &lt;tt class="docutils literal"&gt;grep&lt;/tt&gt;). I'll
+cover a technique that works well for code that uses the standard &lt;tt class="docutils literal"&gt;flag&lt;/tt&gt;
+package for parsing …&lt;/p&gt;</summary><content type="html">&lt;p&gt;This is a short post about writing tests for Go programs that have
+command-line flags, and in particular programs where flags are a significant
+chunk of their functionality (think command-line tools like &lt;tt class="docutils literal"&gt;grep&lt;/tt&gt;). I'll
+cover a technique that works well for code that uses the standard &lt;tt class="docutils literal"&gt;flag&lt;/tt&gt;
+package for parsing flags. If you're using a framework like Cobra, refer to
+its documentation for best practices.&lt;/p&gt;
+&lt;p&gt;Here's a typical flow of a program that parses flags and other command-line
+arguments &lt;a class="footnote-reference" href="#footnote-1" id="footnote-reference-1"&gt;[1]&lt;/a&gt;:&lt;/p&gt;
+&lt;img alt="Diagram of program parsing command-line flags" class="align-center" src="https://eli.thegreenplace.net/images/2020/go-flag-testing-baseline.png" /&gt;
+&lt;p&gt;For some programs the &amp;quot;parse flags&amp;quot; part is trivial enough that you wouldn't
+typically even consider writing unit tests for it (whether this is a good choice
+or not is outside the scope of this post). However, in many other programs flag
+parsing is a critical part of the functionality. In some common command-line
+tools, like &lt;tt class="docutils literal"&gt;grep&lt;/tt&gt; or &lt;tt class="docutils literal"&gt;find&lt;/tt&gt;, it would be fair to say that flags are a
+&lt;em&gt;major&lt;/em&gt; part of the user-visible functionality.&lt;/p&gt;
+&lt;p&gt;Therefore, when we talk about testing such programs there are two aspects we'll
+need help with:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;Writing &lt;em&gt;unit tests&lt;/em&gt; only for the &amp;quot;parse flags&amp;quot; part of the program.&lt;/li&gt;
+&lt;li&gt;Writing &lt;em&gt;integration tests&lt;/em&gt; where the input is the command line given to
+the program and the output is the full effect of the program (observable
+output and/or environment changes).&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;The technique described in this post is helpful for both. It's a very simple
+concept that should be familiar to most programmers. The main goal of this
+post is to show how to do it with the tools provided by Go's &lt;tt class="docutils literal"&gt;flag&lt;/tt&gt; package.&lt;/p&gt;
+&lt;p&gt;Let's start by showing how the program flow described in the previous is split
+to enable testing:&lt;/p&gt;
+&lt;img alt="Program parsing command-line flags split into stages" class="align-center" src="https://eli.thegreenplace.net/images/2020/go-flag-testing-split.png" /&gt;
+&lt;p&gt;Instead of parsing a flag and invoking its related functionality directly, the
+values of parsed flags will be saved in a &lt;tt class="docutils literal"&gt;Config&lt;/tt&gt; value that can be used in
+tests. This lets us write unit-tests for the &amp;quot;parse flags&amp;quot; part of the program.&lt;/p&gt;
+&lt;p&gt;The following is sample &lt;tt class="docutils literal"&gt;parseFlags&lt;/tt&gt; for a toy program. The full code with tests is
+&lt;a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2020/go-testing-flags"&gt;available here&lt;/a&gt;.&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="kd"&gt;type&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;Config&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kd"&gt;struct&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;verbose&lt;/span&gt;&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="kt"&gt;bool&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;greeting&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kt"&gt;string&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;level&lt;/span&gt;&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="c1"&gt;// args are the positional (non-flag) command-line arguments.&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt;&lt;span class="kt"&gt;string&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="c1"&gt;// parseFlags parses the command-line arguments provided to the program.&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="c1"&gt;// Typically os.Args[0] is provided as &amp;#39;progname&amp;#39; and os.args[1:] as &amp;#39;args&amp;#39;.&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="c1"&gt;// Returns the Config in case parsing succeeded, or an error. In any case, the&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="c1"&gt;// output of the flag.Parse is returned in output.&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="c1"&gt;// A special case is usage requests with -h or -help: then the error&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="c1"&gt;// flag.ErrHelp is returned and output will contain the usage message.&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="kd"&gt;func&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;parseFlags&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;progname&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kt"&gt;string&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt;&lt;span class="kt"&gt;string&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;config&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="nx"&gt;Config&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;output&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kt"&gt;string&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kt"&gt;error&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;flags&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;flag&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;NewFlagSet&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;progname&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;flag&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;ContinueOnError&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="kd"&gt;var&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;buf&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;bytes&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Buffer&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;flags&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;SetOutput&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="nx"&gt;buf&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="kd"&gt;var&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;conf&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;Config&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;flags&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;BoolVar&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="nx"&gt;conf&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;verbose&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;quot;verbose&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;false&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;quot;set verbosity&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;flags&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;StringVar&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="nx"&gt;conf&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;greeting&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;quot;greeting&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;quot;&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;quot;set greeting&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;flags&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;IntVar&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="nx"&gt;conf&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;level&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;quot;level&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;quot;set level&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;flags&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Parse&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;!=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;nil&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;nil&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;buf&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;String&lt;/span&gt;&lt;span class="p"&gt;(),&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;conf&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;flags&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Args&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="nx"&gt;conf&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;buf&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;String&lt;/span&gt;&lt;span class="p"&gt;(),&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;nil&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;This code uses two features of the &lt;tt class="docutils literal"&gt;flag&lt;/tt&gt; package to make the approach work:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;Creating a custom &lt;tt class="docutils literal"&gt;flag.FlagSet&lt;/tt&gt; instead of using the default global one.&lt;/li&gt;
+&lt;li&gt;Using the &lt;tt class="docutils literal"&gt;XxxVar&lt;/tt&gt; variant of flag definition methods (e.g. &lt;tt class="docutils literal"&gt;BoolVar&lt;/tt&gt;) to
+tie parsed flag values to pre-defined variables.&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;There's a bit of care around handling usage flags like &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;-h&lt;/span&gt;&lt;/tt&gt;, but otherwise
+this code is trivial. Here's the rest of the program, simulating some
+arbitrary &amp;quot;work&amp;quot; given the parsed configuration:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="kd"&gt;func&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;doWork&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;config&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="nx"&gt;Config&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;fmt&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Printf&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;config = %+v\n&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="nx"&gt;config&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="kd"&gt;func&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;main&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;conf&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;output&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;parseFlags&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;os&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Args&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;os&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Args&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;:])&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;==&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;flag&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;ErrHelp&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;fmt&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Println&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;output&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;os&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Exit&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;else&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;!=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;nil&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;fmt&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Println&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;got error:&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;fmt&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Println&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;output:\n&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;output&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;os&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Exit&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;doWork&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;conf&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;With our &lt;tt class="docutils literal"&gt;parseFlags&lt;/tt&gt;, unit-testing of flags is straightforward:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="kd"&gt;func&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;TestParseFlagsCorrect&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="nx"&gt;testing&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;T&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="kd"&gt;var&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;tests&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt;&lt;span class="kd"&gt;struct&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt;&lt;span class="kt"&gt;string&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;conf&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;Config&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="p"&gt;}{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;{[]&lt;/span&gt;&lt;span class="kt"&gt;string&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;-verbose&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="nx"&gt;Config&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;verbose&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;greeting&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;quot;&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;level&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt;&lt;span class="kt"&gt;string&lt;/span&gt;&lt;span class="p"&gt;{}}},&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;{[]&lt;/span&gt;&lt;span class="kt"&gt;string&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;-level&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;quot;8&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;quot;-greeting&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;quot;joe&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;quot;-verbose&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;quot;foo&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;},&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="nx"&gt;Config&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;verbose&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;true&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;greeting&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;quot;joe&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;level&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;8&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt;&lt;span class="kt"&gt;string&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;foo&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;}}},&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="c1"&gt;// ... many more test entries here&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="k"&gt;for&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;_&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;tt&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;range&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;tests&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Run&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;strings&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Join&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;tt&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;quot; &amp;quot;&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kd"&gt;func&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="nx"&gt;testing&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;T&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="nx"&gt;conf&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;output&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;parseFlags&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;prog&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;tt&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;args&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;!=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;nil&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Errorf&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;err got %v, want nil&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;output&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;!=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;quot;&amp;quot;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Errorf&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;output got %q, want empty&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;output&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;!&lt;/span&gt;&lt;span class="nx"&gt;reflect&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;DeepEqual&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="nx"&gt;conf&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;tt&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;conf&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="nx"&gt;t&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Errorf&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;conf got %+v, want %+v&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="nx"&gt;conf&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;tt&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;conf&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;})&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;If we want to write integration tests for the whole program driven by
+a command line, it would look very similar to the test above. However, instead
+of comparing a &lt;tt class="docutils literal"&gt;Config&lt;/tt&gt; with an expected value, we'd compare the output
+and/or side effects of &lt;tt class="docutils literal"&gt;doWork&lt;/tt&gt; with expected values. Naturally, the test
+would likely have to be split into multiple variants with different table-driven
+outcomes, depending on the nature of &lt;tt class="docutils literal"&gt;doWork&lt;/tt&gt;. If &lt;tt class="docutils literal"&gt;doWork&lt;/tt&gt;'s only observable
+side effect is text output, things are simple. But &lt;tt class="docutils literal"&gt;doWork&lt;/tt&gt; could also modify
+the file system and/or run network servers/clients, in which case it's a bit
+trickier but no different from testing any such program, regardless of the flag
+parsing part.&lt;/p&gt;
+&lt;p&gt;The &lt;a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2020/go-testing-flags"&gt;code accompanying this post&lt;/a&gt;
+has a more complete set of tests and exercises some error scenarios.&lt;/p&gt;
+&lt;hr class="docutils" /&gt;
+&lt;table class="docutils footnote" frame="void" id="footnote-1" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#footnote-reference-1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;Given the invocation &lt;tt class="docutils literal"&gt;grep &lt;span class="pre"&gt;-i&lt;/span&gt; joe file.go&lt;/tt&gt;, we'll refer to &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;-i&lt;/span&gt;&lt;/tt&gt; as
+a &lt;em&gt;flag&lt;/em&gt; and to &lt;tt class="docutils literal"&gt;joe&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;file.go&lt;/tt&gt; as &lt;em&gt;positional arguments&lt;/em&gt;. The
+distinction is not terribly important for the sake of this post, however.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+</content><category term="misc"></category><category term="Go"></category><category term="Testing"></category></entry><entry><title>Dynamically generating Python test cases</title><link href="https://eli.thegreenplace.net/2014/04/02/dynamically-generating-python-test-cases" rel="alternate"></link><published>2014-04-02T06:44:15-07:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2014-04-02:/2014/04/02/dynamically-generating-python-test-cases</id><summary type="html">
+        &lt;p&gt;Testing is crucial. While many different kinds and levels of testing exist, there's good library support only for unit tests (the Python &lt;tt class="docutils literal"&gt;unittest&lt;/tt&gt; package and its moral equivalents in other languages). However, unit testing does not cover all kinds of testing we may want to do - for example, all kinds …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;Testing is crucial. While many different kinds and levels of testing exist, there's good library support only for unit tests (the Python &lt;tt class="docutils literal"&gt;unittest&lt;/tt&gt; package and its moral equivalents in other languages). However, unit testing does not cover all kinds of testing we may want to do - for example, all kinds of whole program tests and integration tests. This is where we usually end up with a custom &amp;quot;test runner&amp;quot; script.&lt;/p&gt;
+&lt;p&gt;Having written my share of such custom test runners, I've recently gravitated towards a very convenient approach which I want to share here. In short, I'm actually using Python's &lt;tt class="docutils literal"&gt;unittest&lt;/tt&gt;, combined with the dynamic nature of the language, to run all kinds of tests.&lt;/p&gt;
+&lt;p&gt;Let's assume my tests are some sort of data files which have to be fed to a program. The output of the program is compared to some &amp;quot;expected results&amp;quot; file, or maybe is encoded in the data file itself in some way. The details of this are immaterial, but seasoned programmers usually encounter such testing rigs very frequently. It commonly comes up when the program under test is a data-transformation mechanism of some sort (compiler, encryptor, encoder, compressor, translator etc.)&lt;/p&gt;
+&lt;p&gt;So you write a &amp;quot;test runner&amp;quot;. A script that looks at some directory tree, finds all the &amp;quot;test files&amp;quot; there, runs each through the transformation, compares, reports, etc. I'm sure all these test runners share a lot of common infrastructure - I know that mine do.&lt;/p&gt;
+&lt;p&gt;Why not employ Python's existing &amp;quot;test runner&amp;quot; capabilities to do the same?&lt;/p&gt;
+&lt;p&gt;Here's a very short code snippet that can serve as a template to achieve this:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; &lt;span style="color: #00007f"&gt;unittest&lt;/span&gt;
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;class&lt;/span&gt; &lt;span style="color: #00007f"&gt;TestsContainer&lt;/span&gt;(unittest.TestCase):
+    longMessage = &lt;span style="color: #00007f"&gt;True&lt;/span&gt;
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;make_test_function&lt;/span&gt;(description, a, b):
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;test&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;):
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.assertEqual(a, b, description)
+    &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; test
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; __name__ == &lt;span style="color: #7f007f"&gt;&amp;#39;__main__&amp;#39;&lt;/span&gt;:
+    testsmap = {
+        &lt;span style="color: #7f007f"&gt;&amp;#39;foo&amp;#39;&lt;/span&gt;: [&lt;span style="color: #007f7f"&gt;1&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;1&lt;/span&gt;],
+        &lt;span style="color: #7f007f"&gt;&amp;#39;bar&amp;#39;&lt;/span&gt;: [&lt;span style="color: #007f7f"&gt;1&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;2&lt;/span&gt;],
+        &lt;span style="color: #7f007f"&gt;&amp;#39;baz&amp;#39;&lt;/span&gt;: [&lt;span style="color: #007f7f"&gt;5&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;5&lt;/span&gt;]}
+
+    &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; name, params &lt;span style="color: #0000aa"&gt;in&lt;/span&gt; testsmap.iteritems():
+        test_func = make_test_function(name, params[&lt;span style="color: #007f7f"&gt;0&lt;/span&gt;], params[&lt;span style="color: #007f7f"&gt;1&lt;/span&gt;])
+        &lt;span style="color: #00007f"&gt;setattr&lt;/span&gt;(TestsContainer, &lt;span style="color: #7f007f"&gt;&amp;#39;test_{0}&amp;#39;&lt;/span&gt;.format(name), test_func)
+
+    unittest.main()
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;What happens here:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;The test class &lt;tt class="docutils literal"&gt;TestsContainer&lt;/tt&gt; will contain dynamically generated test methods.&lt;/li&gt;
+&lt;li&gt;&lt;tt class="docutils literal"&gt;make_test_function&lt;/tt&gt; creates a test function (a method, to be precise) that compares its inputs. This is just a trivial template - it could do anything, or there can be multiple such &amp;quot;makers&amp;quot; fur multiple purposes.&lt;/li&gt;
+&lt;li&gt;The loop creates test functions from the data description in &lt;tt class="docutils literal"&gt;testmap&lt;/tt&gt; and attaches them to the test class.&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;Keep in mind that this is a very basic example. I hope it's obvious that &lt;tt class="docutils literal"&gt;testmap&lt;/tt&gt; could really be test files found on disk, or whatever else. The main idea here is the dynamic test method creation.&lt;/p&gt;
+&lt;p&gt;So what do we gain from this, you may ask? Quite a lot. &lt;tt class="docutils literal"&gt;unittest&lt;/tt&gt; is powerful - armed to its teeth with useful tools for testing. You can now invoke tests from the command line, control verbosity, control &amp;quot;fast fail&amp;quot; behavior, easily filter which tests to run and which not to run, use all kinds of assertion methods for readability and reporting (why write your own smart list comparison assertions?). Moreover, you can build on top of any number of third-party tools for working with &lt;tt class="docutils literal"&gt;unittest&lt;/tt&gt; results - HTML/XML reporting, logging, automatic CI integration, and so on. The possibilities are endless.&lt;/p&gt;
+&lt;p&gt;One interesting variation on this theme is aiming the dynamic generation at a different testing &amp;quot;layer&amp;quot;. &lt;tt class="docutils literal"&gt;unittest&lt;/tt&gt; defines any number of &amp;quot;test cases&amp;quot; (classes), each with any number of &amp;quot;tests&amp;quot; (methods). In the code above, we generate a bunch of tests into a single test case. Here's a sample invocation to see this in action:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;$ python dynamic_test_methods.py -v
+test_bar (__main__.TestsContainer) ... FAIL
+test_baz (__main__.TestsContainer) ... ok
+test_foo (__main__.TestsContainer) ... ok
+
+======================================================================
+FAIL: test_bar (__main__.TestsContainer)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File &amp;quot;dynamic_test_methods.py&amp;quot;, line 8, in test
+    self.assertEqual(a, b, description)
+AssertionError: 1 != 2 : bar
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.001s
+
+FAILED (failures=1)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;As you can see, all data pairs in &lt;tt class="docutils literal"&gt;testmap&lt;/tt&gt; are translated into distinctly named test methods within the single test case &lt;tt class="docutils literal"&gt;TestsContainer&lt;/tt&gt;.&lt;/p&gt;
+&lt;p&gt;Very easily, we can cut this a different way, by generating a whole test case for each data item:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; &lt;span style="color: #00007f"&gt;unittest&lt;/span&gt;
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;class&lt;/span&gt; &lt;span style="color: #00007f"&gt;DynamicClassBase&lt;/span&gt;(unittest.TestCase):
+    longMessage = &lt;span style="color: #00007f"&gt;True&lt;/span&gt;
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;make_test_function&lt;/span&gt;(description, a, b):
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;test&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;):
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.assertEqual(a, b, description)
+    &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; test
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; __name__ == &lt;span style="color: #7f007f"&gt;&amp;#39;__main__&amp;#39;&lt;/span&gt;:
+    testsmap = {
+        &lt;span style="color: #7f007f"&gt;&amp;#39;foo&amp;#39;&lt;/span&gt;: [&lt;span style="color: #007f7f"&gt;1&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;1&lt;/span&gt;],
+        &lt;span style="color: #7f007f"&gt;&amp;#39;bar&amp;#39;&lt;/span&gt;: [&lt;span style="color: #007f7f"&gt;1&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;2&lt;/span&gt;],
+        &lt;span style="color: #7f007f"&gt;&amp;#39;baz&amp;#39;&lt;/span&gt;: [&lt;span style="color: #007f7f"&gt;5&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;5&lt;/span&gt;]}
+
+    &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; name, params &lt;span style="color: #0000aa"&gt;in&lt;/span&gt; testsmap.iteritems():
+        test_func = make_test_function(name, params[&lt;span style="color: #007f7f"&gt;0&lt;/span&gt;], params[&lt;span style="color: #007f7f"&gt;1&lt;/span&gt;])
+        klassname = &lt;span style="color: #7f007f"&gt;&amp;#39;Test_{0}&amp;#39;&lt;/span&gt;.format(name)
+        &lt;span style="color: #00007f"&gt;globals&lt;/span&gt;()[klassname] = &lt;span style="color: #00007f"&gt;type&lt;/span&gt;(klassname,
+                                   (DynamicClassBase,),
+                                   {&lt;span style="color: #7f007f"&gt;&amp;#39;test_gen_{0}&amp;#39;&lt;/span&gt;.format(name): test_func})
+
+    unittest.main()
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Most of the code here remains the same. The difference is in the lines within the loop: now instead of dynamically creating test methods and attaching them to the test case, we create whole test cases - one per data item, with a single test method. All test cases derive from &lt;tt class="docutils literal"&gt;DynamicClassBase&lt;/tt&gt; and hence from &lt;tt class="docutils literal"&gt;unittest.TestCase&lt;/tt&gt;, so they will be auto-discovered by the &lt;tt class="docutils literal"&gt;unittest&lt;/tt&gt; machinery. Now an execution will look like this:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;$ python dynamic_test_classes.py -v
+test_gen_bar (__main__.Test_bar) ... FAIL
+test_gen_baz (__main__.Test_baz) ... ok
+test_gen_foo (__main__.Test_foo) ... ok
+
+======================================================================
+FAIL: test_gen_bar (__main__.Test_bar)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File &amp;quot;dynamic_test_classes.py&amp;quot;, line 8, in test
+    self.assertEqual(a, b, description)
+AssertionError: 1 != 2 : bar
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.000s
+
+FAILED (failures=1)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Why would you want to generate whole test cases dynamically rather than just single tests? It all depends on your specific needs, really. In general, test cases are better isolated and share less, than tests within one test case. Moreover, you may have a huge amount of tests and want to use tools that shard your tests for parallel execution - in this case you almost certainly need separate test cases.&lt;/p&gt;
+&lt;p&gt;I've used this technique in a number of projects over the past couple of years and found it very useful; more than once, I replaced a whole complex test runner program with about 20-30 lines of code using this technique, and gained access to many more capabilities for free.&lt;/p&gt;
+&lt;p&gt;Python's built-in test discovery, reporting and running facilities are very powerful. Coupled with third-party tools they can be even more powerful. Leveraging all this power for &lt;em&gt;any&lt;/em&gt; kind of testing, and not just unit testing, is possible with very little code, due to Python's dynamism. I hope you find it useful too.&lt;/p&gt;
+
+    </content><category term="misc"></category><category term="Python"></category><category term="Testing"></category></entry><entry><title>Fixing tests by writing more tests</title><link href="https://eli.thegreenplace.net/2013/08/14/fixing-tests-by-writing-more-tests" rel="alternate"></link><published>2013-08-14T06:01:31-07:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2013-08-14:/2013/08/14/fixing-tests-by-writing-more-tests</id><summary type="html">
+        &lt;p&gt;When a test fails, the first instinct is usually to dive right in - go through the code, sprinkle printouts and logging statements all around, fire up the debugger, and so on. But often, the correct approach is to write additional tests. Does this sound crazy? Well, it isn't. It's one …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;When a test fails, the first instinct is usually to dive right in - go through the code, sprinkle printouts and logging statements all around, fire up the debugger, and so on. But often, the correct approach is to write additional tests. Does this sound crazy? Well, it isn't. It's one of those true and tried techniques used by many experienced programmers.&lt;/p&gt;
+&lt;p&gt;Allow me to elaborate. Tests for software fall broadly into the following categories. This taxonomy is a blunt generalization and varies considerably with software size and other characteristics. But it's not important in itself - I just use it to illustrate my point. So starting with the most specific and ending with the most general, these are:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;Unit tests&lt;/li&gt;
+&lt;li&gt;Module-level tests&lt;/li&gt;
+&lt;li&gt;Whole program tests&lt;/li&gt;
+&lt;li&gt;Integration tests (with other software)&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;From the first item (highly specific, targeted tests) on the list to the last (very general tests), coverage grows, as well as the complexity of debugging a failure. Debugging a unit test failure is usually quite easy. Integration tests can be devilishly difficult to debug, or even isolate and analyze. An unrelated component of the system may start failing intermittently when some other component (which passed all of its own tests) is changed. A compiler may start generating wrong code, but only when bootstrapped by compiling itself. It's those cases that send programmers crying to their therapist's couch.&lt;/p&gt;
+&lt;p&gt;So back to my original point. I posit that a great way to debug general tests is to write additional specific tests. Your module-level tests are failing? Write more unit tests. Your integration tests are failing? Write additional whole program tests, module tests or unit tests. The more specific the new tests are, the better. Remember that the most specific tests are the easiest to debug.&lt;/p&gt;
+&lt;p&gt;Debugging is all about the scientific method - you make assumptions and test them. Based on the results you make additional assumptions. Rinse. Repeat. While pondering about why something doesn't work - fortify your assumptions by writing tests for them. Facing a failing high-level test, try to write a more specific test that also fails. The benefits of this are two-fold. First, this will help you find the bug. Bugs are usually results of bad assumptions. This is especially true on the high generality level when pieces of software get integrated with others. More specific tests help verify those assumptions and are easier to debug. Second, you'll have more tests in the system when this bug-hunt ends, and that's always a good thing.&lt;/p&gt;
+
+    </content><category term="misc"></category><category term="Programming"></category><category term="Testing"></category></entry><entry><title>Automating boring testing activities with tox</title><link href="https://eli.thegreenplace.net/2012/05/07/automating-boring-testing-activities-with-tox" rel="alternate"></link><published>2012-05-07T04:27:08-07:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2012-05-07:/2012/05/07/automating-boring-testing-activities-with-tox</id><summary type="html">
+        &lt;p&gt;My &lt;a class="reference external" href="https://github.com/eliben/pyelftools"&gt;pyelftools&lt;/a&gt; project has a comprehensive set of tests, which I make sure to run before every release. This turned out to be a somewhat tiresome manual task, because of the following factors:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;There are three sets of tests in pyelftools: unit tests, full system tests (comparing the output of …&lt;/li&gt;&lt;/ol&gt;</summary><content type="html">
+        &lt;p&gt;My &lt;a class="reference external" href="https://github.com/eliben/pyelftools"&gt;pyelftools&lt;/a&gt; project has a comprehensive set of tests, which I make sure to run before every release. This turned out to be a somewhat tiresome manual task, because of the following factors:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;There are three sets of tests in pyelftools: unit tests, full system tests (comparing the output of my pyelftools-based &lt;tt class="docutils literal"&gt;readelf&lt;/tt&gt; clone with the real &lt;tt class="docutils literal"&gt;readelf&lt;/tt&gt;), and example tests (I hate out-of-date examples, so mine are self-testable).&lt;/li&gt;
+&lt;li&gt;I currently promise to keep pyelftools working on Python versions 2.6, 2.7 and 3.2; the tests should be run on all three.&lt;/li&gt;
+&lt;li&gt;I want to test that my &lt;tt class="docutils literal"&gt;setup.py&lt;/tt&gt; script is alright too, so it would be preferable to build a source distribution, install it in a &lt;tt class="docutils literal"&gt;virtualenv&lt;/tt&gt; and run the tests there. This also helps me test that the package is correctly &lt;tt class="docutils literal"&gt;pip&lt;/tt&gt;-installable, and that no artifact of my local setup makes the tests pass by chance.&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;To a programmer, this list just screams &amp;quot;repetition&amp;quot;, and hence some form of automation has to be conjured. Before you rush to roll your own, be sure the check out &lt;a class="reference external" href="http://pypi.python.org/pypi/tox"&gt;tox&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;tox was designed to solve exactly the problem I described above. Its description is &amp;quot;virtualenv-based automation of test activities&amp;quot; - spot on.&lt;/p&gt;
+&lt;p&gt;All I have to do in order to automate the testing routine described above is install tox, create a configuration file for it, and make sure to execute &lt;tt class="docutils literal"&gt;tox &lt;span class="pre"&gt;-rv&lt;/span&gt;&lt;/tt&gt; in the root of my project before every release. Done.&lt;/p&gt;
+&lt;p&gt;Here's my &lt;tt class="docutils literal"&gt;tox.ini&lt;/tt&gt; for pyelftools, in all its glory:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;[tox]
+envlist = py27,py26,py32
+
+[testenv]
+commands =
+    python test/run_all_unittests.py
+    python test/run_examples_test.py
+    python test/run_readelf_tests.py
+
+[testenv:py26]
+deps =
+    unittest2
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Basically, tox runs all the commands listed in &lt;tt class="docutils literal"&gt;[testenv]&lt;/tt&gt; for each &amp;quot;environment&amp;quot; listed in &lt;tt class="docutils literal"&gt;envlist&lt;/tt&gt;. It creates a &lt;tt class="docutils literal"&gt;virtualenv&lt;/tt&gt; for each such environment, which is exactly what I wanted.&lt;/p&gt;
+&lt;p&gt;Moreover, as you can see, tox helps to handle another problem I would have to deal with manually: I'm using the excellent &lt;a class="reference external" href="http://pypi.python.org/pypi/unittest2"&gt;unittest2&lt;/a&gt; package for the pyelftools unit tests. While this package is in the standard library of Python 2.7 and 3.2+, it has to be installed separately in 2.6; tox handles this by providing a &lt;tt class="docutils literal"&gt;deps&lt;/tt&gt; feature - I can specify the dependencies that need to be installed into the &lt;tt class="docutils literal"&gt;virtualenv&lt;/tt&gt; for the given environment.&lt;/p&gt;
+
+    </content><category term="misc"></category><category term="Python"></category><category term="Testing"></category></entry><entry><title>Python unit testing: parametrized test cases</title><link href="https://eli.thegreenplace.net/2011/08/02/python-unit-testing-parametrized-test-cases" rel="alternate"></link><published>2011-08-02T09:29:13-07:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2011-08-02:/2011/08/02/python-unit-testing-parametrized-test-cases</id><summary type="html">
+        &lt;p&gt;Python's standard &lt;tt class="docutils literal"&gt;unittest&lt;/tt&gt; library is great and I use it all the time. One thing missing from it, however, is a simple way of running parametrized test cases. In other words, you can't easily pass arguments into a &lt;tt class="docutils literal"&gt;unittest.TestCase&lt;/tt&gt; from outside.&lt;/p&gt;
+&lt;p&gt;Consider the use case: I have some &lt;tt class="docutils literal"&gt;TestCase …&lt;/tt&gt;&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;Python's standard &lt;tt class="docutils literal"&gt;unittest&lt;/tt&gt; library is great and I use it all the time. One thing missing from it, however, is a simple way of running parametrized test cases. In other words, you can't easily pass arguments into a &lt;tt class="docutils literal"&gt;unittest.TestCase&lt;/tt&gt; from outside.&lt;/p&gt;
+&lt;p&gt;Consider the use case: I have some &lt;tt class="docutils literal"&gt;TestCase&lt;/tt&gt; I want to invoke several times, each time passing it a different argument.&lt;/p&gt;
+&lt;p&gt;One approach often mentioned is create a base &lt;tt class="docutils literal"&gt;TestCase&lt;/tt&gt; for the bulk functionality and derive sub-classes from it for variations. But this isn't flexible enough - what if you want to add parameters from the outside (command-line) or test with a large amount of parameters?&lt;/p&gt;
+&lt;p&gt;Fortunately, Python is dynamic enough (and &lt;tt class="docutils literal"&gt;unittest&lt;/tt&gt; flexible enough) to allow a relatively straightforward solution.&lt;/p&gt;
+&lt;p&gt;Here's a class that makes it possible:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; &lt;span style="color: #00007f"&gt;unittest&lt;/span&gt;
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;class&lt;/span&gt; &lt;span style="color: #00007f"&gt;ParametrizedTestCase&lt;/span&gt;(unittest.TestCase):
+    &lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot; TestCase classes that want to be parametrized should&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        inherit from this class.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;    &amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;__init__&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;, methodName=&lt;span style="color: #7f007f"&gt;&amp;#39;runTest&amp;#39;&lt;/span&gt;, param=&lt;span style="color: #00007f"&gt;None&lt;/span&gt;):
+        &lt;span style="color: #00007f"&gt;super&lt;/span&gt;(ParametrizedTestCase, &lt;span style="color: #00007f"&gt;self&lt;/span&gt;).__init__(methodName)
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.param = param
+
+    @staticmethod
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;parametrize&lt;/span&gt;(testcase_klass, param=&lt;span style="color: #00007f"&gt;None&lt;/span&gt;):
+        &lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot; Create a suite containing all tests taken from the given&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;            subclass, passing them the parameter &amp;#39;param&amp;#39;.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        &amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+        testloader = unittest.TestLoader()
+        testnames = testloader.getTestCaseNames(testcase_klass)
+        suite = unittest.TestSuite()
+        &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; name &lt;span style="color: #0000aa"&gt;in&lt;/span&gt; testnames:
+            suite.addTest(testcase_klass(name, param=param))
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; suite
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Before I explain how this works, here's a sample usage. Let's define some test case that can be parametrized with an extra &lt;tt class="docutils literal"&gt;param&lt;/tt&gt; argument:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;class&lt;/span&gt; &lt;span style="color: #00007f"&gt;TestOne&lt;/span&gt;(ParametrizedTestCase):
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;test_something&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;):
+        &lt;span style="color: #00007f; font-weight: bold"&gt;print&lt;/span&gt; &lt;span style="color: #7f007f"&gt;&amp;#39;param =&amp;#39;&lt;/span&gt;, &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.param
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.assertEqual(&lt;span style="color: #007f7f"&gt;1&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;1&lt;/span&gt;)
+
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;test_something_else&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;):
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.assertEqual(&lt;span style="color: #007f7f"&gt;2&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;2&lt;/span&gt;)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Note how nothing except inheriting &lt;tt class="docutils literal"&gt;ParametrizedTestCase&lt;/tt&gt; is required. &lt;tt class="docutils literal"&gt;self.param&lt;/tt&gt; automagically becomes available in all test methods (as well as in &lt;tt class="docutils literal"&gt;setUp&lt;/tt&gt;, &lt;tt class="docutils literal"&gt;tearDown&lt;/tt&gt;, etc.)&lt;/p&gt;
+&lt;p&gt;And here is how to create and run parametrized instances of this test case:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;suite = unittest.TestSuite()
+suite.addTest(ParametrizedTestCase.parametrize(TestOne, param=&lt;span style="color: #007f7f"&gt;42&lt;/span&gt;))
+suite.addTest(ParametrizedTestCase.parametrize(TestOne, param=&lt;span style="color: #007f7f"&gt;13&lt;/span&gt;))
+unittest.TextTestRunner(verbosity=&lt;span style="color: #007f7f"&gt;2&lt;/span&gt;).run(suite)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;As expected, we get:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;test_something (__main__.TestOne) ... param = 42
+ok
+test_something_else (__main__.TestOne) ... ok
+test_something (__main__.TestOne) ... param = 13
+ok
+test_something_else (__main__.TestOne) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.000s
+
+OK
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Now, a word on how &lt;tt class="docutils literal"&gt;ParametrizedTestCase&lt;/tt&gt; works. It's a subclass of &lt;tt class="docutils literal"&gt;unittest.TestCase&lt;/tt&gt;, and the parametrization is done by defining its own constructor, which is similar to &lt;tt class="docutils literal"&gt;TestCase&lt;/tt&gt;'s constructor but adds an extra &lt;tt class="docutils literal"&gt;param&lt;/tt&gt; argument. This &lt;tt class="docutils literal"&gt;param&lt;/tt&gt; is then saved as the instance attribute &lt;tt class="docutils literal"&gt;self.param&lt;/tt&gt;. Test cases interested in being parametrized should then derive from &lt;tt class="docutils literal"&gt;ParametrizedTestCase&lt;/tt&gt;.&lt;/p&gt;
+&lt;p&gt;To actually create the parametrized test, &lt;tt class="docutils literal"&gt;ParametrizedTestCase.parametrize&lt;/tt&gt; should be invoked. It accepts two arguments:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;A subclass of &lt;tt class="docutils literal"&gt;ParametrizedTestCase&lt;/tt&gt; - essentially our custom test case class&lt;/li&gt;
+&lt;li&gt;The parameter we want to pass to this instance of the test case&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;And then uses the test name discovery facilities available in &lt;tt class="docutils literal"&gt;unittest.TestLoader&lt;/tt&gt; to create the tests and parametrize them.&lt;/p&gt;
+&lt;p&gt;As you can see in the usage example, the approach is easy to use and works quite well. I have a couple of qualms with it, however:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;It directly calls &lt;tt class="docutils literal"&gt;TestCase.__init__&lt;/tt&gt;, which isn't an officially documented feature.&lt;/li&gt;
+&lt;li&gt;When different parametrized instances of our test case run, we can't know which parameter was passed. I suppose some hack can be crafted that attaches the parameter value to the test name, but this is very much application-specific.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;I'm really interested in feedback on this post. Could this be done better? Any alternative approaches to achieve the same effect?&lt;/p&gt;
+
+    </content><category term="misc"></category><category term="Python"></category><category term="Testing"></category></entry><entry><title>Book review: "Writing Testbenches: Functional Verification of HDL Models" by Janick Bergeron</title><link href="https://eli.thegreenplace.net/2009/05/07/book-review-writing-testbenches-functional-verification-of-hdl-models-by-janick-bergeron" rel="alternate"></link><published>2009-05-07T18:04:34-07:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2009-05-07:/2009/05/07/book-review-writing-testbenches-functional-verification-of-hdl-models-by-janick-bergeron</id><summary type="html">
+&lt;p&gt;
+I have very mixed feelings about this book. On one hand, it provides some very
+valuable techniques for writing effective testbenches for HDL code. On the other
+hand, the book is written quite badly - in a very convoluted and disorganized
+style, with bizarre layout that wastes 40% of each page …&lt;/p&gt;</summary><content type="html">
+&lt;p&gt;
+I have very mixed feelings about this book. On one hand, it provides some very
+valuable techniques for writing effective testbenches for HDL code. On the other
+hand, the book is written quite badly - in a very convoluted and disorganized
+style, with bizarre layout that wastes 40% of each page and diagrams any 5-year
+old could have drawn much better with just a little effort.
+&lt;/p&gt;&lt;p&gt;
+
+The author tries to please everyone, by covering Verilog, VHDL, e and OpenVera!
+Yes, all of that. Of course, Verilog and VHDL are mutually exclusive in 99% of
+projects. So are OpenVera and e, so chances are that you're going to have to
+work quite hard just to find the information that interests you in this book. I,
+for example, was only interested in VHDL, which immediately rendered about 60%
+of the book useless for me. 
+&lt;/p&gt;&lt;p&gt;
+
+And as I've mentioned, the layout and diagrams are horrible. Come on, I have
+books from the 60s and the 70s with much prettier diagrams that actually help
+understanding, and aren't there just as fillers!
+&lt;/p&gt;&lt;p&gt;
+
+It's hard to avoid criticism, as you see. But I began the review on a positive
+note, and I will end it similarly. Hidden deep inside all the chaff, there's
+some good advice there, and methods that must be familiar to verification
+engineers that hope to undertake complex verification tasks. In particular,
+Chapter 5 is probably the most important in the book. Chapter 6 is also quite
+good, so if you want to save time, read just those two.
+&lt;/p&gt;
+
+    </content><category term="misc"></category><category term="Book reviews"></category><category term="Testing"></category></entry><entry><title>Writing tests first</title><link href="https://eli.thegreenplace.net/2008/10/10/writing-tests-first" rel="alternate"></link><published>2008-10-10T18:15:47-07:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2008-10-10:/2008/10/10/writing-tests-first</id><summary type="html">
+&lt;p&gt;
+I'm always writing lots of unit-tests for my code, in any language. Unit tests
+are a great way to increase the overall quality of the code. Most importantly,
+they allow one to make changes and refactor code with much less fear of breaking
+something.
+&lt;/p&gt;
+
+&lt;p&gt;
+&lt;a href="http://en.wikipedia.org/wiki/Test-driven_development"&gt;Test-driven
+development&lt;/a&gt; (TDD) takes unit-testing to …&lt;/p&gt;</summary><content type="html">
+&lt;p&gt;
+I'm always writing lots of unit-tests for my code, in any language. Unit tests
+are a great way to increase the overall quality of the code. Most importantly,
+they allow one to make changes and refactor code with much less fear of breaking
+something.
+&lt;/p&gt;
+
+&lt;p&gt;
+&lt;a href="http://en.wikipedia.org/wiki/Test-driven_development"&gt;Test-driven
+development&lt;/a&gt; (TDD) takes unit-testing to an extreme. According to this
+methodology, tests are written first, and only then code is written to make them
+pass. &lt;em&gt;"Never write a new line of code without a failing test requiring
+it"&lt;/em&gt; is a commonly quoted adage from the XP community.
+&lt;/p&gt;
+
+&lt;p&gt;
+I've always felt this is taking things a bit too far, and have rarely used TDD.
+Although eventually I end up with code well covered by tests, I write code
+first, and only then the unit tests.
+&lt;/p&gt;
+
+&lt;p&gt;
+One marked advantage of TDD is, however, tricking your own laziness. After
+writing a sizable chunk of code, it is somewhat boring and unexciting to spend
+hours (and sometimes days) writing tests for it. I'm feeling this extremely well
+with my &lt;a href="https://github.com/eliben/pycparser"&gt;C parser&lt;/a&gt; now. It's
+hard to write a partial parser, so I wrote most of the code limiting myself only
+to basic usability tests. Now, for the past few sessions I find myself facing my
+&lt;code&gt;test_&lt;/code&gt; files, in need of writing many many tests. This is boring,
+and I keep procrastinating.
+&lt;/p&gt;
+
+    </content><category term="misc"></category><category term="Programming"></category><category term="Testing"></category></entry><entry><title>Book review: "Test driven development by example", Kent Beck</title><link href="https://eli.thegreenplace.net/2006/03/16/book-review-test-driven-development-by-example-kent-beck" rel="alternate"></link><published>2006-03-16T10:13:00-08:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2006-03-16:/2006/03/16/book-review-test-driven-development-by-example-kent-beck</id><summary type="html">
+        &lt;p&gt;Kent Beck is one of the most known proponents and "spreaders" of eXtreme Programming, and is the author of the excellent "Extreme Programming explained" book. In "TDD by example", Beck tries to expand on the topic of test-driven-development (in short TDD), providing some examples and "testing patterns".&lt;/p&gt;
+&lt;p&gt;Unfortunately he failed …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;Kent Beck is one of the most known proponents and "spreaders" of eXtreme Programming, and is the author of the excellent "Extreme Programming explained" book. In "TDD by example", Beck tries to expand on the topic of test-driven-development (in short TDD), providing some examples and "testing patterns".&lt;/p&gt;
+&lt;p&gt;Unfortunately he failed in this task. "TDD by example" is a blunt, boring book which adds nothing new over the "Extreme Programming explained" primer. The examples are trivial, over-chewed and don't teach almost anything useful. The philosophy he presents is way "over-extreme", and I seriously doubt that anyone programs like that. What us is really in an example that "tests" the function add(a, b) which performs... that's right - addition of a to b. Beck "test drives" by writing the test "assertEquals(add(2, 2), 4)" and "just to see the green bar" implements add(a, b) as "return 4". Come on !! What does this teach ?&lt;/p&gt;
+&lt;p&gt;The last part of the book, concentrating on "design and test patterns" promised to be interesting but proved to be just a dry recycling of some points from Fowler's "Refactoring" book. The only thing I did learn from it was some interesting usage of Mock objects. At least it wasn't completely useless :-)&lt;/p&gt;
+&lt;p&gt;All in all, if you're even a little familiar with XP, this book is a waste of your time. If you aren't familiar with this method of development, by all means read Beck's fine "Extreme Programming explained".&lt;/p&gt;
+
+    </content><category term="misc"></category><category term="Book reviews"></category><category term="Programming"></category><category term="Testing"></category></entry></feed>

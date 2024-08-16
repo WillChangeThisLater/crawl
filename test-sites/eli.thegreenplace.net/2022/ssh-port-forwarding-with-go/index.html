@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>SSH port forwarding with Go - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to SSH port forwarding with Go">
+                        SSH port forwarding with Go
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> November 19, 2022 at 19:22</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/network-programming.html">Network Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This post shows how to set up SSH port forwarding (&quot;tunnels&quot;) - both local and
+remote - using the extended Go standard library.</p>
+<div class="section" id="setup">
+<h2>Setup</h2>
+<p>While you <em>could</em> set up <tt class="docutils literal">localhost</tt> forwarding for testing, to discuss a more
+realistic scenario I would recommend spinning up a basic <a class="reference external" href="https://en.wikipedia.org/wiki/Virtual_private_server">VPS</a>. For the purpose of
+writing this post, I run a bare-bones Ubuntu VPS on Digital Ocean with the
+public IP address
+159.89.238.232 (at the time of writing) and a <tt class="docutils literal">root</tt> user. You can easily do
+the same using any cloud provider (obviously, accessing <em>my</em> VPS won't work
+for you since it requires SSH authentication with a known set of keys).</p>
+</div>
+<div class="section" id="testing-the-setup-basic-remote-command-execution">
+<h2>Testing the setup - basic remote command execution</h2>
+<p>Before we start talking about tunnels, let's test our setup by doing something
+much simpler - basic SSH remote command execution. Here's the equivalent
+command-line invocation:</p>
+<div class="highlight"><pre><span></span>$ ssh root@159.89.238.232 &#39;uname -a&#39;
+Linux testdrop6 5.19.0-23-generic #24-Ubuntu SMP PREEMPT_DYNAMIC Fri Oct 14 05:39:57 UTC 2022 x86_64 x86_64 x86_64 GNU/Linux
+</pre></div>
+<p>This runs the command <tt class="docutils literal">uname <span class="pre">-a</span></tt> on my VPS. Here are a few things to be aware
+of:</p>
+<ul class="simple">
+<li>The <tt class="docutils literal">sshd</tt> server should be running on the remote server (VPS); run
+<tt class="docutils literal">service ssh status</tt> to double check. I use OpenSSH's implementations of
+both the <tt class="docutils literal">sshd</tt> server and <tt class="docutils literal">ssh</tt> client, but presumably other
+implementations could work as well.</li>
+<li>The default SSH port (22) should be open in whatever firewall the remote
+server is running. If your VPS runs Ubuntu, check the output of
+<tt class="docutils literal">ufw status</tt>.</li>
+<li>The first time you connect to the VPS with <tt class="docutils literal">ssh</tt>, it will ask you about
+checking the server's host key. Either do the due diligence to verify the key
+or just blindly accept it, but it's important for the VPS to have an entry
+in your local <tt class="docutils literal">known_hosts</tt> file.</li>
+</ul>
+<p>Now let's see how to accomplish the same task in Go; we'll be using &quot;extended
+stdlib&quot; package <a class="reference external" href="https://pkg.go.dev/golang.org/x/crypto/ssh">https://pkg.go.dev/golang.org/x/crypto/ssh</a> for this purpose. The
+full code for the samples in this post is <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2022/go-ssh">available on GitHub</a>.</p>
+<p>We'll start with the code that sets up the SSH client configuration for us:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">createSshConfig</span><span class="p">(</span><span class="nx">username</span><span class="p">,</span><span class="w"> </span><span class="nx">keyFile</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="nx">ssh</span><span class="p">.</span><span class="nx">ClientConfig</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">knownHostsCallback</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">knownhosts</span><span class="p">.</span><span class="nx">New</span><span class="p">(</span><span class="nx">sshConfigPath</span><span class="p">(</span><span class="s">&quot;known_hosts&quot;</span><span class="p">))</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">key</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">ReadFile</span><span class="p">(</span><span class="nx">keyFile</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatalf</span><span class="p">(</span><span class="s">&quot;unable to read private key: %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Create the Signer for this private key.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">signer</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">ssh</span><span class="p">.</span><span class="nx">ParsePrivateKey</span><span class="p">(</span><span class="nx">key</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatalf</span><span class="p">(</span><span class="s">&quot;unable to parse private key: %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// An SSH client is represented with a ClientConn.</span><span class="w"></span>
+<span class="w">  </span><span class="c1">//</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// To authenticate with the remote server you must pass at least one</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// implementation of AuthMethod via the Auth field in ClientConfig,</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// and provide a HostKeyCallback.</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">ssh</span><span class="p">.</span><span class="nx">ClientConfig</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">User</span><span class="p">:</span><span class="w"> </span><span class="nx">username</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Auth</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="nx">ssh</span><span class="p">.</span><span class="nx">AuthMethod</span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">ssh</span><span class="p">.</span><span class="nx">PublicKeys</span><span class="p">(</span><span class="nx">signer</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="p">},</span><span class="w"></span>
+<span class="w">    </span><span class="nx">HostKeyCallback</span><span class="p">:</span><span class="w">   </span><span class="nx">knownHostsCallback</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">HostKeyAlgorithms</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="kt">string</span><span class="p">{</span><span class="nx">ssh</span><span class="p">.</span><span class="nx">KeyAlgoED25519</span><span class="p">},</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">sshConfigPath</span><span class="p">(</span><span class="nx">filename</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="kt">string</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">filepath</span><span class="p">.</span><span class="nx">Join</span><span class="p">(</span><span class="nx">os</span><span class="p">.</span><span class="nx">Getenv</span><span class="p">(</span><span class="s">&quot;HOME&quot;</span><span class="p">),</span><span class="w"> </span><span class="s">&quot;.ssh&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">filename</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>In the interest of brevity, this code is not particularly generic: it's somewhat
+tuned for my local setup. It takes the VPS username and the path to the
+local private SSH key as parameters.</p>
+<p>First, it configures a &quot;host callback&quot; which is the same host key validation
+mechanism described earlier in the context of the <tt class="docutils literal">ssh</tt> command-line client.
+The method I'm using in this sample is reading from the local <tt class="docutils literal">known_hosts</tt>
+file, where the VPS will already be listed (since we accessed it with <tt class="docutils literal">ssh</tt>
+earlier). This part of the setup is a bit finicky and if you're running into
+trouble and just want to make progress, consider using
+<tt class="docutils literal">ssh.InsecureIgnoreHostKey</tt> instead.</p>
+<p>Next, it reads my private key and sets up the <tt class="docutils literal">ClientConfig</tt>. The <tt class="docutils literal">ED25519</tt>
+public key algorithm is expected, since this is the one I'm using for my
+SSH keys.</p>
+<p>With a client configuration in hand, the rest of the code is straightforward:</p>
+<div class="highlight"><pre><span></span><span class="nx">config</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">createSshConfig</span><span class="p">(</span><span class="o">*</span><span class="nx">username</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">keyFile</span><span class="p">)</span><span class="w"></span>
+
+<span class="nx">client</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">ssh</span><span class="p">.</span><span class="nx">Dial</span><span class="p">(</span><span class="s">&quot;tcp&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">addr</span><span class="p">,</span><span class="w"> </span><span class="nx">config</span><span class="p">)</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;Failed to dial: &quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="k">defer</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+
+<span class="c1">// Each ClientConn can support multiple interactive sessions,</span><span class="w"></span>
+<span class="c1">// represented by a Session.</span><span class="w"></span>
+<span class="nx">session</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">NewSession</span><span class="p">()</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;Failed to create session: &quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="k">defer</span><span class="w"> </span><span class="nx">session</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+
+<span class="c1">// Once a Session is created, you can a single command on</span><span class="w"></span>
+<span class="c1">// the remote side using the Run method.</span><span class="w"></span>
+<span class="nx">session</span><span class="p">.</span><span class="nx">Stdout</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Stdout</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">session</span><span class="p">.</span><span class="nx">Run</span><span class="p">(</span><span class="s">&quot;uname -a&quot;</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;Failed to run: &quot;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">Error</span><span class="p">())</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>We create a client and then an interactive session (this is similar to the
+interactive session we get if we simply <tt class="docutils literal">ssh</tt> into a server). Then the
+session is used to <tt class="docutils literal">Run</tt> a command. Invoking this Go program we should get
+the same output as the earlier <tt class="docutils literal">ssh</tt> command-line run:</p>
+<div class="highlight"><pre><span></span>$ go run ssh-execute-remote-cmd.go \
+    -addr 159.89.238.232:22 -user root \
+    -keyfile ~/.ssh/id_ed25519
+Linux testdrop6 5.19.0-23-generic #24-Ubuntu SMP PREEMPT_DYNAMIC Fri Oct 14 05:39:57 UTC 2022 x86_64 x86_64 x86_64 GNU/Linux
+</pre></div>
+</div>
+<div class="section" id="local-port-forwarding">
+<h2>Local port forwarding</h2>
+<p>Now that our setup is working, let's see how to implement a local port
+forwarding server in Go. But first, what does <em>local port forwarding</em> mean?
+The terminology can be a bit confusing here, so let's use a diagram. We'll start
+with the components:</p>
+<img alt="Basic diagram showing a local machine and remote machine with public IP" class="align-center" src="../../images/2022/local-remote-machine-basic.png" />
+<p>The characters in this story are:</p>
+<ol class="arabic simple">
+<li>The &quot;local machine&quot; - your laptop, home desktop or whatever you're using to
+read these posts and run the examples. Your local machine typically doesn't
+have a public-facing IP address because it's behind layers of NAT, routers
+and so on.</li>
+<li>The &quot;remote machine&quot; - any cloud server / VPS you control, that has at least
+a temporary IP address; just like the sample VPS I described earlier in this
+post.</li>
+</ol>
+<p>Local port forwarding means that we use SSH to create a tunnel (a logical
+bi-directional passthrough connection) between a port on the remote machine and
+a port on the local machine, and forward connections from local to remote.
+Here's the flow of events:</p>
+<img alt="Local port forwarding flow of events" class="align-center" src="../../images/2022/local-port-forwarding.png" />
+<p>It starts by having some server listen on port M on the remote machine. For
+example, the PostgreSQL server listens on port 5432. This port is most likely
+<em>not</em> exposed outside the machine for security and other reasons. But suppose we
+want to talk with our PostgreSQL database on the remote machine using <tt class="docutils literal">psql</tt>
+from our local machine.</p>
+<p>In step 2, the <tt class="docutils literal">ssh</tt> client is used to establish local port forwarding from
+port N on our local machine to port M on the remote machine. The <tt class="docutils literal">ssh</tt> client
+contacts the <tt class="docutils literal">sshd</tt> server running on the VPS (typically over the standard SSH
+port 22, but this can be configured) and they set up this connection.</p>
+<p>From this point on, local port N gives us a &quot;tunnel&quot; to remote port M.
+Connections to <tt class="docutils literal">localhost:N</tt> on the local machine will be automatically
+connected to port <tt class="docutils literal">M</tt> on the remote machine. To be completely clear: data will
+flow from the local client using port <tt class="docutils literal">N</tt> to the local <tt class="docutils literal">ssh</tt> client, from
+there to the remote <tt class="docutils literal">sshd</tt> server which in turn forwards it to the remote port
+<tt class="docutils literal">M</tt>; see the Appendix for more details.</p>
+<p>Let's test this using the <tt class="docutils literal">ssh</tt> client and our VPS setup. I'll use one of my
+favorite tools - netcat - to demonstrate how this works. First, I run this
+on my VPS:</p>
+<div class="highlight"><pre><span></span>remote# nc -lvk 7780
+Listening on 0.0.0.0 7780
+</pre></div>
+<p>This creates a TCP server listening on port 7780 and echoing any data it gets
+to stdout. Port 7780 is not exposed outside the VPS; it's not on the open ports
+list of <tt class="docutils literal">ufw</tt>. I cannot connect to it directly from my local machine.</p>
+<p>Let's set up local port forwarding now. Running this on the local machine:</p>
+<div class="highlight"><pre><span></span>$ ssh -N -L 7777:localhost:7780 root@159.89.238.232
+</pre></div>
+<p>The syntax here is a bit funky (read <tt class="docutils literal">man ssh</tt> for the gory details), but in
+a nutshell this means: create a tunnel between localhost port 7777 and port
+7780 on the given remote machine. Note that we have to give <tt class="docutils literal">ssh</tt> the username
+and IP address of the remote machine, just like when we were executing remote
+commands <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>.</p>
+<p>Having run the above <tt class="docutils literal">ssh</tt> command, we can treat local port 7777 as if it's
+a tunnel into the remote port 7780. <tt class="docutils literal">ssh</tt> listens on 7777 and forwards all
+connections where needed. We can test this by running <tt class="docutils literal">nc</tt> again, this time
+locally and in client mode:</p>
+<div class="highlight"><pre><span></span>$ echo &quot;foo bar&quot; | nc -N localhost 7777
+</pre></div>
+<p>Here we instruct <tt class="docutils literal">nc</tt> to open a TCP connection to <tt class="docutils literal">localhost:7777</tt>, send the
+message &quot;foo bar&quot; and close the connection. Looking at the server logs for our
+remote machine we'll see:</p>
+<div class="highlight"><pre><span></span>remote# nc -lvk 7780
+Listening on 0.0.0.0 7780
+Connection received on localhost 53090
+foo bar
+</pre></div>
+<p>Now that we've seen how to set up a tunnel using the standard <tt class="docutils literal">ssh</tt> client,
+let's turn our attention to Go. Here's a program to establish a local tunnel:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">addr</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;addr&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;ssh server address to dial as &lt;hostname&gt;:&lt;port&gt;&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">username</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;user&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;username for ssh&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">keyFile</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;keyfile&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;file with private key for SSH authentication&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">remotePort</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;rport&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;remote port for tunnel&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">localPort</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;lport&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;local port for tunnel&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Parse</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">config</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">createSshConfig</span><span class="p">(</span><span class="o">*</span><span class="nx">username</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">keyFile</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">client</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">ssh</span><span class="p">.</span><span class="nx">Dial</span><span class="p">(</span><span class="s">&quot;tcp&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">addr</span><span class="p">,</span><span class="w"> </span><span class="nx">config</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;Failed to dial: &quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">listener</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">net</span><span class="p">.</span><span class="nx">Listen</span><span class="p">(</span><span class="s">&quot;tcp&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;localhost:&quot;</span><span class="o">+*</span><span class="nx">localPort</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">listener</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Like ssh -L by default, local connections are handled one at a time.</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// While one local connection is active in runTunnel, others will be stuck</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// dialing, waiting for this Accept.</span><span class="w"></span>
+<span class="w">    </span><span class="nx">local</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">listener</span><span class="p">.</span><span class="nx">Accept</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// Issue a dial to the remote server on our SSH client; here &quot;localhost&quot;</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// refers to the remote server.</span><span class="w"></span>
+<span class="w">    </span><span class="nx">remote</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">Dial</span><span class="p">(</span><span class="s">&quot;tcp&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;localhost:&quot;</span><span class="o">+*</span><span class="nx">remotePort</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;tunnel established with&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">local</span><span class="p">.</span><span class="nx">LocalAddr</span><span class="p">())</span><span class="w"></span>
+<span class="w">    </span><span class="nx">runTunnel</span><span class="p">(</span><span class="nx">local</span><span class="p">,</span><span class="w"> </span><span class="nx">remote</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p><tt class="docutils literal">createSshConfig</tt> is the same as before. This program creates an SSH client
+and then listens on a local socket on the provided port. For each connection,
+it dials the &quot;remote&quot; port on through the SSH client and establishes a tunnel
+between the two connections. <tt class="docutils literal">runTunnel</tt> is implemented like this:</p>
+<div class="highlight"><pre><span></span><span class="c1">// runTunnel runs a tunnel between two connections; as soon as one connection</span><span class="w"></span>
+<span class="c1">// reaches EOF or reports an error, both connections are closed and this</span><span class="w"></span>
+<span class="c1">// function returns.</span><span class="w"></span>
+<span class="kd">func</span><span class="w"> </span><span class="nx">runTunnel</span><span class="p">(</span><span class="nx">local</span><span class="p">,</span><span class="w"> </span><span class="nx">remote</span><span class="w"> </span><span class="nx">net</span><span class="p">.</span><span class="nx">Conn</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">local</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">remote</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">done</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">make</span><span class="p">(</span><span class="kd">chan</span><span class="w"> </span><span class="kd">struct</span><span class="p">{},</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">go</span><span class="w"> </span><span class="kd">func</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">io</span><span class="p">.</span><span class="nx">Copy</span><span class="p">(</span><span class="nx">local</span><span class="p">,</span><span class="w"> </span><span class="nx">remote</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">done</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="kd">struct</span><span class="p">{}{}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}()</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">go</span><span class="w"> </span><span class="kd">func</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">io</span><span class="p">.</span><span class="nx">Copy</span><span class="p">(</span><span class="nx">remote</span><span class="p">,</span><span class="w"> </span><span class="nx">local</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">done</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="kd">struct</span><span class="p">{}{}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}()</span><span class="w"></span>
+
+<span class="w">  </span><span class="o">&lt;-</span><span class="nx">done</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It uses goroutines to copy data in both directions between two connections, and
+closes both connections as soon as one of them reaches EOF or reports an error.
+Instead of running <tt class="docutils literal">ssh <span class="pre">-N</span> <span class="pre">-L</span></tt> to establish the tunnel, we can now run this
+Go program with the same effect:</p>
+<div class="highlight"><pre><span></span>$ go run ssh-local-tunnel.go -addr 159.89.238.232:22 -user root \
+    -keyfile ~/.ssh/id_ed25519 \
+    -rport 7780 \
+    -lport 7777
+</pre></div>
+<p>The <tt class="docutils literal">ssh</tt> package is a really nice showcase of the power of Go interfaces;
+note how natural it appears in user code: just like a regular <tt class="docutils literal">net.Dial</tt> to a
+TCP address, <tt class="docutils literal">ssh.Client.Dial</tt> returns a value implementing the <tt class="docutils literal">net.Conn</tt>
+interface. For the user, it's completely seamless - one <tt class="docutils literal">net.Conn</tt> is as good
+as another, even if they're quite different underneath (one is a direct wrapper
+around a socket, the other a logical protocol layered on top of SSH).</p>
+</div>
+<div class="section" id="remote-port-forwarding">
+<h2>Remote port forwarding</h2>
+<p>We've discussed how local port forwarding works, what it can be used for and
+how to set it up. Now let's talk about its complement - <em>remote</em> port
+forwarding.</p>
+<p>Suppose you have a web application running locally on your machine and
+you want to test it from the public internet. Sure, you can access it from your
+browser at <tt class="docutils literal">localhost</tt> - but that's just a simple scenario. Suppose it's a
+backend for another online service and you really need a public address for it.
+But your local machine is behind a NAT, so that's pretty hard. At this point you
+will probably reach for a tool like <a class="reference external" href="https://ngrok.com/">ngrok</a> that creates
+a tunnel between your local application and some public-accessible path. Well,
+it turns out we don't actually need special tools here - <tt class="docutils literal">ssh</tt> can do the
+job <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.</p>
+<p>This is what a &quot;remote tunnel&quot; does - similarly to the local tunnel it creates
+a connection between a local port and a remote port, but the roles are flipped.
+<tt class="docutils literal">sshd</tt> will listen to connections on the <em>remote</em> port and route them to
+the <em>local</em> one. Here's a diagram:</p>
+<img alt="Remote port forwarding flow of events" class="align-center" src="../../images/2022/remote-port-forwarding.png" />
+<p>We have a program listening on port N locally, and we create a remote tunnel
+using the <tt class="docutils literal">ssh</tt> client. From this point on, <tt class="docutils literal">sshd</tt> on the remote machine
+starts listening to connections on port M.</p>
+<p>Whenever a connection to port M on the remote machine is made, <tt class="docutils literal">sshd</tt> forwards
+it to our local machine across the established tunnel, and our  <tt class="docutils literal">ssh</tt> client,
+in turn, forwards it to the local service on port N.</p>
+<p>Let's see how to set it up using standard tools before we jump to the Go
+implementation. This requires some preparation, because of obvious security
+reasons. We have to tell our remote machine that it's OK for external clients
+to access one of its ports, and we have to tell <tt class="docutils literal">sshd</tt> on that machine that
+it's OK to forward ports.</p>
+<p>For demonstration I'll use port 23000 on the remote machine; if you're using
+<tt class="docutils literal">ufw</tt>, follow these instructions (if you have a different firewall YMMV, or
+if you don't have a firewall at all feel free to skip):</p>
+<div class="highlight"><pre><span></span># ufw allow 23000
+Rule added
+Rule added (v6)
+
+# ufw status
+Status: active
+
+To                         Action      From
+--                         ------      ----
+OpenSSH                    ALLOW       Anywhere
+23000                      ALLOW       Anywhere
+OpenSSH (v6)               ALLOW       Anywhere (v6)
+23000 (v6)                 ALLOW       Anywhere (v6)
+
+# ufw enable
+Command may disrupt existing ssh connections. Proceed with operation (y|n)? y
+Firewall is active and enabled on system startup
+</pre></div>
+<p>At this point it may be worth testing that it actually works by running an
+<tt class="docutils literal">nc</tt> server listening on port 23000 and accessing it from your local machine.</p>
+<p>The second thing we should do is tell <tt class="docutils literal">sshd</tt> it's OK to forward ports. The
+setting is called <tt class="docutils literal">GatewayPorts</tt> and it should be set to <tt class="docutils literal">yes</tt> in our
+<tt class="docutils literal">/etc/ssh/sshd_config</tt> file on the remote machine. See <tt class="docutils literal">man sshd_config</tt>
+for more details.</p>
+<p>Assuming this was done, we're now ready to forward ports. Locally, I'll run
+a simple <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2022/go-and-proxies/http-server-debug-request-headers.go">debugging HTTP server</a>
+listening on port 8080:</p>
+<div class="highlight"><pre><span></span>$ go run http-server-debug-request-headers.go
+2022/11/16 22:32:54 Starting server on 127.0.0.1:8080
+</pre></div>
+<p>And in a separate terminal the <tt class="docutils literal">ssh</tt> command that sets up remote port
+forwarding (<tt class="docutils literal"><span class="pre">-R</span></tt> option) from remote port 23000 to local port 8080:</p>
+<div class="highlight"><pre><span></span>$ ssh -N -R 23000:localhost:8080 root@159.89.238.232
+</pre></div>
+<p>Now we're all set! A <tt class="docutils literal">curl</tt> from the local machine should now hit my debugging
+server through a public IP address:</p>
+<div class="highlight"><pre><span></span>$ curl http://159.89.238.232:23000/hi/there
+hello /hi/there
+</pre></div>
+<p>And we can easily access it from a browser as well. It's a bit funny that we're
+running a local client to access a local server through a remote machine! Feel
+free to prove to yourself that this is &quot;real&quot; by accessing the same address
+from a different computer (like your phone!).</p>
+<p>Now let's turn to the Go implementation. A lot of its code will be shared with
+the previous samples, so I'll just show what's different - the <tt class="docutils literal">main</tt> function
+itself:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">addr</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;addr&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;ssh server address to dial as &lt;hostname&gt;:&lt;port&gt;&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">username</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;user&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;username for ssh&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">keyFile</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;keyfile&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;file with private key for SSH authentication&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">remotePort</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;rport&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;remote port for tunnel&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">localPort</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;lport&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;local port for tunnel&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Parse</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">config</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">createSshConfig</span><span class="p">(</span><span class="o">*</span><span class="nx">username</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">keyFile</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">client</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">ssh</span><span class="p">.</span><span class="nx">Dial</span><span class="p">(</span><span class="s">&quot;tcp&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">addr</span><span class="p">,</span><span class="w"> </span><span class="nx">config</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;Failed to dial: &quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">listener</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">Listen</span><span class="p">(</span><span class="s">&quot;tcp&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;localhost:&quot;</span><span class="o">+*</span><span class="nx">remotePort</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">listener</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">remote</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">listener</span><span class="p">.</span><span class="nx">Accept</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">go</span><span class="w"> </span><span class="kd">func</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">local</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">net</span><span class="p">.</span><span class="nx">Dial</span><span class="p">(</span><span class="s">&quot;tcp&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;localhost:&quot;</span><span class="o">+*</span><span class="nx">localPort</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">      </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;tunnel established with&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">local</span><span class="p">.</span><span class="nx">LocalAddr</span><span class="p">())</span><span class="w"></span>
+<span class="w">      </span><span class="nx">runTunnel</span><span class="p">(</span><span class="nx">local</span><span class="p">,</span><span class="w"> </span><span class="nx">remote</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}()</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>In spirit, the main server loop is similar to the local tunnel example, but
+there are a couple of key differences:</p>
+<ol class="arabic simple">
+<li>Whereas the local tunnel listens on the local port and creates remote
+connections in response to local connections, in the remote case these
+roles are inverted: we listen for remote connections, and spawn local
+connections in response.</li>
+<li>This tunnel implementation supports more concurrency since we want to be
+able to handle multiple remote clients connecting to our local server
+simultaneously. Therefore, a new goroutine is spun up in response to new
+remote connections.</li>
+</ol>
+</div>
+<div class="section" id="appendix-how-ssh-implements-tunnels">
+<h2>Appendix: how SSH implements tunnels</h2>
+<p>The standard networking stack is all about layering and multiplexing. When we
+create sockets between services it feels very convenient and natural, but lower
+level protocols (like IP) have no notion of connections or even ports. They just
+send packets that could get lost, corrupted or arrive out of order. Transport
+protocols like TCP are layered on top of these packets and provide additional
+abstractions.</p>
+<p>Two computers connected together may have the illusion of communicating over
+several sockets (and ports) simultaneously, while in reality they're just
+sending IP packets there and back.</p>
+<p>SSH is no different. It's an application layer protocol sitting on top of TCP.
+Deep down, there's a single TCP socket (usually on port 22) for exchanging
+information. Once the cryptographic setup is finished and the channel is secure,
+SSH gives users the illusion of multiple communications happening
+simultaneously, but it's just packets flowing over the socket. You can have
+multiple interactive SSH terminals running at the same time, and multiple
+&quot;channels&quot; - which is SSH's term for data streams that are used for port
+forwarding.</p>
+<p>The SSH protocol itself is described in <a class="reference external" href="https://www.rfc-editor.org/rfc/rfc4251">RFC 4251</a>, and its <em>connection protocol</em> is
+described in <a class="reference external" href="https://www.rfc-editor.org/rfc/rfc4254">RFC 4254</a>. This is the
+part of the protocol that takes care of multiplexing multiple communication
+streams on top of the single encrypted socket SSH establishes. Here's a quote
+from RFC 4254:</p>
+<blockquote>
+<p>All terminal sessions, forwarded connections, etc., are channels.
+Either side may open a channel.  Multiple channels are multiplexed
+into a single connection.</p>
+<p>Channels are identified by numbers at each end.  The number referring
+to a channel may be different on each side.  Requests to open a
+channel contain the sender's channel number.  Any other channel-
+related messages contain the recipient's channel number for the
+channel.</p>
+<p>Channels are flow-controlled.  No data may be sent to a channel until
+a message is received to indicate that window space is available.</p>
+</blockquote>
+<p>Forwarded ports (tunnels) are mapped directly onto these SSH channels. Each
+forwarded port gets a channel, and data sent to these ports is encapsulated in
+SSH connection protocol packets with the appropriate channel number. The SSH
+client or server on the other end unpacks this packet, looks at the channel
+number and sends the data down the port corresponding to the channel.</p>
+<p>There are many additional sources of information on how SSH channels work. I
+found these two particularly useful:</p>
+<ul class="simple">
+<li><a class="reference external" href="https://dev.to/progrium/the-history-and-future-of-socket-level-multiplexing-1d5n">This post</a>
+discusses more of the philosophy behind how this works and provides
+interesting context. If you're interested in port forwarding, I strongly
+recommend reading this one.</li>
+<li><a class="reference external" href="https://ophirharpaz.com/posts/how-does-ssh-port-forwarding-work/">This one</a> dives deep into the code
+of a specific SSH implementation (DropBear), with C code snippets showing how
+channels are implemented.</li>
+</ul>
+<p>Finally, I want to note that the idea of protocol multiplexing keeps being
+reused in networking protocols. HTTP/2 uses multiplexing (with similar
+packet-level encapsulation on top of TLS/TCP) to mix simultaneous multiple
+connections and features like server push. QUIC (HTTP/3) takes it one step
+farther and multiplexes everything on top of UDP, doing away with TCP
+connections altogether.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>As before, this presupposes that the local machine possesses a private
+SSH key for the <tt class="docutils literal">root</tt> user on the VPS; the public dual of this key
+is supposed to be in <tt class="docutils literal">.ssh/authorized_keys</tt> on the remote machine.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td><p class="first">Interestingly, the original implementation of ngrok was based upon a
+tool called <tt class="docutils literal">localtunnel</tt> which itself was just a script wrapping
+<tt class="docutils literal">ssh</tt>, using an approach that's very similar to the one
+presented in this post.</p>
+<p class="last">This is not to say that ngrok isn't useful! It has a large number of
+very convenient features that go above and beyond the simple tunnels I'm
+showing here.</p>
+</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

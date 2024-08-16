@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Interface method calls with the Go register ABI - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Interface method calls with the Go register ABI">
+                        Interface method calls with the Go register ABI
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> March 28, 2022 at 20:25</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/compilation.html">Compilation</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This post takes a deeper look into how Go compiles method invocations;
+specifically, how it compiles <em>interface</em> method invocations. Many online
+descriptions of this process are outdated, because the Go compiler has switched
+to a new, <a class="reference external" href="https://go.dev/s/regabi">register-based ABI</a> in
+the <a class="reference external" href="https://go.dev/doc/go1.17">1.17 release</a> for AMD64. Go 1.18 enabled
+the register-based ABI for <a class="reference external" href="https://go.dev/doc/go1.18">additional architectures</a>, but this post will focus on AMD64.</p>
+<p>We'll look at a simple piece of Go code to demonstrate
+the machine code Go generates and explaining how it works. This code represents
+the inner loop of <a class="reference external" href="https://en.wikipedia.org/wiki/Bubble_sort">Bubble sort</a>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">bubbleUp</span><span class="p">(</span><span class="nx">x</span><span class="w"> </span><span class="nx">sort</span><span class="p">.</span><span class="nx">Interface</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">n</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">x</span><span class="p">.</span><span class="nx">Len</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="nx">n</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">x</span><span class="p">.</span><span class="nx">Less</span><span class="p">(</span><span class="nx">i</span><span class="p">,</span><span class="w"> </span><span class="nx">i</span><span class="o">-</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">x</span><span class="p">.</span><span class="nx">Swap</span><span class="p">(</span><span class="nx">i</span><span class="p">,</span><span class="w"> </span><span class="nx">i</span><span class="o">-</span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It goes through a data structure once, moving at least one element into its
+final position. The data structure is abstracted away with the <a class="reference external" href="https://pkg.go.dev/sort#Interface">sort.Interface
+interface</a>, which lets us query its
+length, check if one element is smaller than another and to swap elements.</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">Interface</span><span class="w"> </span><span class="kd">interface</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Len</span><span class="p">()</span><span class="w"> </span><span class="kt">int</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Less</span><span class="p">(</span><span class="nx">i</span><span class="p">,</span><span class="w"> </span><span class="nx">j</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Swap</span><span class="p">(</span><span class="nx">i</span><span class="p">,</span><span class="w"> </span><span class="nx">j</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>I've covered <tt class="docutils literal">sort.Interface</tt> in more detail in an <a class="reference external" href="../../2020/embedding-in-go-part-3-interfaces-in-structs/index.html">older post</a>.
+Typically, the actual value passed into <tt class="docutils literal">bubbleUp</tt> will be a slice of some
+sort, but it can really be anything, as long as it implements
+<tt class="docutils literal">sort.Interface</tt>.</p>
+<div class="section" id="interface-layout-in-memory">
+<h2>Interface layout in memory</h2>
+<p>First, let's discuss how values of interface types are laid out in memory by the
+Go compiler. This was also covered in <a class="reference external" href="../../2021/go-internals-invariance-and-memory-layout-of-slices/index.html">another post</a>,
+which I encourage you to read. A quick reminder: any interface value occupies
+two quadwords (on a 64-bit machine), holding two pointers: the first points to
+the dispatch table for the methods of the value, and the second points to the
+runtime value itself.</p>
+<p>This structure can be observed <a class="reference external" href="https://github.com/golang/go/blob/master/src/runtime/runtime2.go">in the Go runtime</a>:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">iface</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">tab</span><span class="w">  </span><span class="o">*</span><span class="nx">itab</span><span class="w"></span>
+<span class="w">  </span><span class="nx">data</span><span class="w"> </span><span class="nx">unsafe</span><span class="p">.</span><span class="nx">Pointer</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The <tt class="docutils literal">itab</tt> type is:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">itab</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">inter</span><span class="w"> </span><span class="o">*</span><span class="nx">interfacetype</span><span class="w"></span>
+<span class="w">  </span><span class="nx">_type</span><span class="w"> </span><span class="o">*</span><span class="nx">_type</span><span class="w"></span>
+<span class="w">  </span><span class="nx">hash</span><span class="w">  </span><span class="kt">uint32</span><span class="w"> </span><span class="c1">// copy of _type.hash. Used for type switches.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">_</span><span class="w">     </span><span class="p">[</span><span class="mi">4</span><span class="p">]</span><span class="kt">byte</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fun</span><span class="w">   </span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="kt">uintptr</span><span class="w"> </span><span class="c1">// variable sized. fun[0]==0 means _type does not implement inter.</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>I'll leave a fuller coverage of this type to another time, but for our purposes
+the important field is <tt class="docutils literal">fun</tt>, which is a variable-sized array of function
+pointers - the dispatch table. This is where the generated code will expect to
+find functions, as we'll see shortly.</p>
+</div>
+<div class="section" id="some-notes-on-the-internal-go-abi">
+<h2>Some notes on the internal Go ABI</h2>
+<p>The <a class="reference external" href="https://go.dev/s/regabi">Go ABI</a> discussed here is the <em>internal</em> ABI
+of Go. As the linked page is quick to warn the reader - this ABI is completely
+unstable and can change between Go releases; in fact, as mentioned above it
+just changed in very fundamental way very recently.</p>
+<p>In the next section we're going to walk through a detailed disassembly of the
+<tt class="docutils literal">bubbleUp</tt> function. In preparation for that, I'd like to cover some salient
+points from the current Go ABI that will be useful to grok the generated machine
+code.</p>
+<p>The current Go ABI is uses registers for function call
+arguments and return values. On the AMD64 architecture, the following registers
+are used in order:</p>
+<div class="highlight"><pre><span></span>RAX, RBX, RCX, RDI, RSI, R8, R9, R10, R11
+</pre></div>
+<p>Some values occupy multiple registers. One relevant example is interface values.
+As described in the previous section, interface values are represented by the
+<tt class="docutils literal">iface</tt> structure, which occupies two quadwords. Therefore, when an interface
+value is passed as the first argument to a function, it occupies <tt class="docutils literal">RAX</tt> and
+<tt class="docutils literal">RBX</tt> for the table pointer and the data pointer, respectively. If the
+interface is passed as a second argument and the first argument already takes
+up <tt class="docutils literal">RAX</tt>, it would be passed in <tt class="docutils literal">RBX</tt> and <tt class="docutils literal">RCX</tt>, and so on. By the way,
+the Go disassembly refers to these by the names <tt class="docutils literal">AX</tt>, <tt class="docutils literal">BX</tt> etc. (without the
+<tt class="docutils literal">R</tt> prefix).</p>
+<p>The same registers are used for the return values of functions, in the same
+order. For a function returning a single value (fitting into a quadword), this
+value will be placed in <tt class="docutils literal">RAX</tt>.</p>
+<p>Moreover, in the current Go register ABI there are no callee-saved registers;
+values that are live across calls have to be stored on the stack by the caller
+before a call is performed.</p>
+</div>
+<div class="section" id="disassembling-bubbleup">
+<h2>Disassembling bubbleUp</h2>
+<p>Let's now work through the disassembly generated for <tt class="docutils literal">bubbleUp</tt> by running:</p>
+<div class="highlight"><pre><span></span>$ go tool compile -S bubble.go
+</pre></div>
+<p>The disassembly is cleaned up a bit to remove some directives for the garbage
+collector (<tt class="docutils literal">PCDATA</tt> and <tt class="docutils literal">FUNCDATA</tt>). Each block of disassembly is followed
+by an explanation of what it does.</p>
+<p>This is the function prologue, which we won't cover:</p>
+<div class="highlight"><pre><span></span>&quot;&quot;.bubbleUp STEXT size=182 args=0x10 locals=0x38 funcid=0x0 align=0x0
+  0x0000 00000 (bubble.go:11)  TEXT  &quot;&quot;.bubbleUp(SB), ABIInternal, $56-16
+  0x0000 00000 (bubble.go:11)  CMPQ  SP, 16(R14)
+  0x0004 00004 (bubble.go:11)  JLS   152
+  0x000a 00010 (bubble.go:11)  SUBQ  $56, SP
+  0x000e 00014 (bubble.go:11)  MOVQ  BP, 48(SP)
+  0x0013 00019 (bubble.go:11)  LEAQ  48(SP), BP
+</pre></div>
+<p>The main code generated for the function's body is next:</p>
+<div class="highlight"><pre><span></span>0x0018 00024 (bubble.go:12)  MOVQ  AX, &quot;&quot;.x+64(SP)
+0x001d 00029 (bubble.go:12)  MOVQ  BX, &quot;&quot;.x+72(SP)
+0x0022 00034 (bubble.go:12)  MOVQ  24(AX), CX
+0x0026 00038 (bubble.go:12)  MOVQ  BX, AX
+0x0029 00041 (bubble.go:12)  CALL  CX
+</pre></div>
+<p>The parameter to <tt class="docutils literal">bubbleUp</tt> is <tt class="docutils literal">x sort.Interface</tt> - the interface value.
+As we've seen above, the interface value in Go is represented by two quadwords,
+and according to the ABI will be laid out in two consecutive registers: <tt class="docutils literal">AX</tt>
+and <tt class="docutils literal">BX</tt>. The code starts by saving these onto the stack because the
+registers will be needed in a subsequent call.</p>
+<p>Then the compiler needs to arrange for the call <tt class="docutils literal">x.Len()</tt>. For this it needs
+to find which function to call, and then generate the code to call it.</p>
+<p>The function to call is taken from <tt class="docutils literal">24(AX)</tt>. He's how it works:</p>
+<ul class="simple">
+<li>As mentioned earlier, <tt class="docutils literal">AX</tt> is the first quadword of the interface value
+<tt class="docutils literal">x</tt> passed into <tt class="docutils literal">bubbleUp</tt>.</li>
+<li>Based on the layout of <tt class="docutils literal">iface</tt>, <tt class="docutils literal">AX</tt> is therefore a pointer to the
+<tt class="docutils literal">itab</tt> structure.</li>
+<li>The addressing mode <tt class="docutils literal">24(AX)</tt> means the address at <tt class="docutils literal">AX+24</tt> (24 is decimal
+and means literally &quot;24 bytes&quot;), so this is the value loaded into <tt class="docutils literal">CX</tt>.</li>
+<li>Since offset 24 in <tt class="docutils literal">itab</tt> points to <tt class="docutils literal">fun</tt>, this means that the address
+of the first method in the interface is loaded into <tt class="docutils literal">CX</tt>.</li>
+<li>The methods in each interface are sorted by name <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>, so the address of
+<tt class="docutils literal">x</tt>'s <tt class="docutils literal">Len</tt> method ends up in <tt class="docutils literal">CX</tt>.</li>
+</ul>
+<p>Now that the function is found, the code sets up its arguments for invocation.
+Since <tt class="docutils literal">Len</tt> has no parameters, the only argument passed is the receiver (the
+value this method is invoked on). <tt class="docutils literal">bubbleUp</tt>'s own second argument - which
+lives in <tt class="docutils literal">BX</tt> is passed as the first argument to <tt class="docutils literal">Len</tt>. Since <tt class="docutils literal">BX</tt> is
+the second quadword of the interface value - it holds the data pointer, which
+is the value itself - exactly what we need.</p>
+<div class="highlight"><pre><span></span>0x002b 00043 (bubble.go:12)  MOVQ  AX, &quot;&quot;.n+24(SP)
+</pre></div>
+<p><tt class="docutils literal">Len</tt> returns a single integer value, which is returned in <tt class="docutils literal">AX</tt>. That's
+<tt class="docutils literal">n</tt> in the Go code. Here <tt class="docutils literal">AX</tt> is saved onto the stack (because it's going to
+be clobbered soon).</p>
+<div class="highlight"><pre><span></span>0x0030 00048 (bubble.go:12)  MOVL  $1, CX
+0x0035 00053 (bubble.go:13)  JMP   69               ----\
+0x0037 00055 (bubble.go:13)  MOVQ  &quot;&quot;.i+32(SP), DX      |
+0x003c 00060 (bubble.go:13)  LEAQ  1(DX), CX            |
+0x0040 00064 (bubble.go:13)  MOVQ  &quot;&quot;.n+24(SP), AX      |
+0x0045 00069 (bubble.go:13)  CMPQ  AX, CX          &lt;&lt;---/
+0x0048 00072 (bubble.go:13)  JLE   142
+</pre></div>
+<p>This implements a part of the loop's condition. It starts by assigning
+<tt class="docutils literal">i = 1</tt> in <tt class="docutils literal">CX</tt> and jumps to the condition, which compares <tt class="docutils literal">AX</tt> (remember,
+that's <tt class="docutils literal">n</tt>) to <tt class="docutils literal">CX</tt> and jumps out of the loop if <tt class="docutils literal">n &lt;= i</tt>.</p>
+<p>The code between the <tt class="docutils literal">JMP</tt> and its target handles the <tt class="docutils literal">i++</tt> part, acting
+on registers that were saved on the stack throughout the loop iteration.</p>
+<p>Now it's time to call <tt class="docutils literal">x.Less</tt>. It's the second function in the interface's
+dispatch table, so its offset in <tt class="docutils literal">itab</tt> is 32 (recall that the first
+function's offset is 24).</p>
+<div class="highlight"><pre><span></span>0x004a 00074 (bubble.go:13)  MOVQ  CX, &quot;&quot;.i+32(SP)
+0x004f 00079 (bubble.go:14)  MOVQ  &quot;&quot;.x+64(SP), DX
+0x0054 00084 (bubble.go:14)  MOVQ  32(DX), SI
+0x0058 00088 (bubble.go:14)  LEAQ  -1(CX), DI
+0x005c 00092 (bubble.go:14)  MOVQ  DI, &quot;&quot;..autotmp_4+40(SP)
+0x0061 00097 (bubble.go:14)  MOVQ  &quot;&quot;.x+72(SP), AX
+0x0066 00102 (bubble.go:14)  MOVQ  CX, BX
+0x0069 00105 (bubble.go:14)  MOVQ  DI, CX
+0x006c 00108 (bubble.go:14)  CALL  SI
+</pre></div>
+<p>This code grabs the <tt class="docutils literal">iface</tt> back from the stack where it was saved, and places
+it in <tt class="docutils literal">DX</tt>. It then loads <tt class="docutils literal">32(DX)</tt> into <tt class="docutils literal">SI</tt> - so <tt class="docutils literal">SI</tt> will contain the
+address of <tt class="docutils literal">Less</tt> method of <tt class="docutils literal">x</tt>, as described before. We have to pass in
+three arguments:</p>
+<ul class="simple">
+<li>The value itself (the method receiver) in <tt class="docutils literal">AX</tt></li>
+<li><tt class="docutils literal">i</tt> in <tt class="docutils literal">BX</tt></li>
+<li><tt class="docutils literal"><span class="pre">i-1</span></tt> in <tt class="docutils literal">CX</tt> (you see it happening with the <tt class="docutils literal">LEAQ</tt> instruction that's
+used to subtract 1 from <tt class="docutils literal">i</tt></li>
+</ul>
+<p>There's a bit of a register dance here that's required to set up all the
+arguments properly, but otherwise it should be very clear.</p>
+<div class="highlight"><pre><span></span>0x006e 00110 (bubble.go:14)  TESTB  AL, AL
+0x0070 00112 (bubble.go:14)  JEQ  55
+</pre></div>
+<p>If <tt class="docutils literal">Less</tt> returns a zero value (meaning <tt class="docutils literal">false</tt>), we skip back to the next
+loop iteration without calling <tt class="docutils literal">Swap</tt>. Otherwise, the call to <tt class="docutils literal">Swap</tt>
+follows:</p>
+<div class="highlight"><pre><span></span>0x0072 00114 (bubble.go:15)  MOVQ  &quot;&quot;.x+64(SP), DX
+0x0077 00119 (bubble.go:15)  MOVQ  40(DX), SI
+0x007b 00123 (bubble.go:15)  MOVQ  &quot;&quot;.x+72(SP), AX
+0x0080 00128 (bubble.go:15)  MOVQ  &quot;&quot;.i+32(SP), BX
+0x0085 00133 (bubble.go:15)  MOVQ  &quot;&quot;..autotmp_4+40(SP), CX
+0x008a 00138 (bubble.go:15)  CALL  SI
+</pre></div>
+<p>By now this should be familiar; this code finds the third function in the
+interface's <tt class="docutils literal">itab</tt> with <tt class="docutils literal">40(DX)</tt>, sets up its arguments and calls it.</p>
+<p>This is the back-edge to the loop condition handler (recall that it will jump
+past this instruction when the loop is done):</p>
+<div class="highlight"><pre><span></span>0x008c 00140 (bubble.go:15)  JMP  55
+</pre></div>
+<p>And finally the function's epilogue and return:</p>
+<div class="highlight"><pre><span></span>0x008e 00142 (bubble.go:18)  MOVQ  48(SP), BP
+0x0093 00147 (bubble.go:18)  ADDQ  $56, SP
+0x0097 00151 (bubble.go:18)  RET
+0x0098 00152 (bubble.go:18)  NOP
+</pre></div>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>This is all, of course, implementation details, and can easily change
+in a future go release.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

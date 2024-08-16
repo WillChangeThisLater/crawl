@@ -1,0 +1,890 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"><title>Eli Bendersky's website - Serial port</title><link href="https://eli.thegreenplace.net/" rel="alternate"></link><link href="https://eli.thegreenplace.net/feeds/serial-port.atom.xml" rel="self"></link><id>https://eli.thegreenplace.net/</id><updated>2024-05-04T19:46:23-07:00</updated><entry><title>Co-routines as an alternative to state machines</title><link href="https://eli.thegreenplace.net/2009/08/29/co-routines-as-an-alternative-to-state-machines" rel="alternate"></link><published>2009-08-29T14:32:54-07:00</published><updated>2023-06-30T23:16:27-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2009-08-29:/2009/08/29/co-routines-as-an-alternative-to-state-machines</id><summary type="html">
+        &lt;div class="section" id="jib"&gt;
+&lt;p&gt;Observation:&lt;/p&gt;
+&lt;blockquote&gt;
+Co-routines are to state machines what recursion is to stacks&lt;/blockquote&gt;
+&lt;p&gt;When you have to traverse some sort of a nested data structure (say, a binary tree), one approach is to create a stack that remembers where in the tree you are. Another, much more elegant approach, is to write …&lt;/p&gt;&lt;/div&gt;</summary><content type="html">
+        &lt;div class="section" id="jib"&gt;
+&lt;p&gt;Observation:&lt;/p&gt;
+&lt;blockquote&gt;
+Co-routines are to state machines what recursion is to stacks&lt;/blockquote&gt;
+&lt;p&gt;When you have to traverse some sort of a nested data structure (say, a binary tree), one approach is to create a stack that remembers where in the tree you are. Another, much more elegant approach, is to write the function recursively. A recursive function employs the machine stack used to implicitly implement function calls - you get the benefits of the stack without paying the cost of reduced readability.&lt;/p&gt;
+&lt;p&gt;In this article I'll try to show, using a simple, yet very realistic example why co-routines do the same to state machines.&lt;/p&gt;
+&lt;div class="section" id="the-problem-serial-framing"&gt;
+&lt;h4&gt;The problem - serial framing&lt;/h4&gt;
+&lt;p&gt;I've written a detailed &lt;a class="reference external" href="https://eli.thegreenplace.net/2009/08/12/framing-in-serial-communications/"&gt;article&lt;/a&gt; about framing earlier this month. The simple summary is: we have an endless incoming stream of bytes, from which we need to deduce structured data frames. That is, we have to find where a frame starts, where it ends and what is the data it carries. For this purpose we use a special header value, footer value and an escape byte (DLE).&lt;/p&gt;
+&lt;p&gt;A complete Python implementation is described &lt;a class="reference external" href="https://eli.thegreenplace.net/2009/08/20/frames-and-protocols-for-the-serial-port-in-python/"&gt;here&lt;/a&gt;, but in this article I will present the solution in a simplified manner, keeping all irrelevant details out.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="the-state-machine"&gt;
+&lt;h4&gt;The state machine&lt;/h4&gt;
+&lt;p&gt;Given a stream and receiving one byte at a time, here is the state machine that describes the framing process:&lt;/p&gt;
+&lt;img class="align-center" style="width: 285px;" src="https://eli.thegreenplace.net/images/2009/08/statemachine1_framing.png" /&gt;
+&lt;p&gt;Only inputs and state transitions are shown. The framing process outputs complete frames when moving from the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;IN_MSG&lt;/span&gt;&lt;/tt&gt; state to the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;WAIT_HEADER&lt;/span&gt;&lt;/tt&gt; stage (this happens when a footer is received) &lt;a class="footnote-reference" href="#id4" id="id1"&gt;[1]&lt;/a&gt;&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="implementing-the-state-machine"&gt;
+&lt;h4&gt;Implementing the state machine&lt;/h4&gt;
+&lt;p&gt;Here's an implementation of this state machine in Python. The internal state is kept in an object:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;class&lt;/span&gt; &lt;span style="color: #00007f"&gt;ProtocolWrapper&lt;/span&gt;(&lt;span style="color: #00007f"&gt;object&lt;/span&gt;):
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;__init__&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;,
+            header=&lt;span style="color: #7f007f"&gt;&amp;#39;\x61&amp;#39;&lt;/span&gt;,
+            footer=&lt;span style="color: #7f007f"&gt;&amp;#39;\x62&amp;#39;&lt;/span&gt;,
+            dle=&lt;span style="color: #7f007f"&gt;&amp;#39;\xAB&amp;#39;&lt;/span&gt;,
+            after_dle_func=&lt;span style="color: #00007f; font-weight: bold"&gt;lambda&lt;/span&gt; x: x):
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.header = header
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.footer = footer
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.dle = dle
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.after_dle_func = after_dle_func
+
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.state = &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.WAIT_HEADER
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.frame = &lt;span style="color: #7f007f"&gt;&amp;#39;&amp;#39;&lt;/span&gt;
+
+    &lt;span style="color: #007f00"&gt;# internal state&lt;/span&gt;
+    (WAIT_HEADER, IN_MSG, AFTER_DLE) = &lt;span style="color: #00007f"&gt;range&lt;/span&gt;(&lt;span style="color: #007f7f"&gt;3&lt;/span&gt;)
+
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;input&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;, byte):
+        &lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot; Receive a byte.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;            If this byte completes a frame, the&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;            frame is returned. Otherwise, None&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;            is returned.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        &amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+        &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.state == &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.WAIT_HEADER:
+            &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; byte == &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.header:
+                &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.state = &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.IN_MSG
+                &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.frame = &lt;span style="color: #7f007f"&gt;&amp;#39;&amp;#39;&lt;/span&gt;
+
+            &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f"&gt;None&lt;/span&gt;
+        &lt;span style="color: #00007f; font-weight: bold"&gt;elif&lt;/span&gt; &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.state == &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.IN_MSG:
+            &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; byte == &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.footer:
+                &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.state = &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.WAIT_HEADER
+                &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.frame
+            &lt;span style="color: #00007f; font-weight: bold"&gt;elif&lt;/span&gt; byte == &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.dle:
+                &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.state = &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.AFTER_DLE
+            &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt;:
+                &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.frame += byte
+            &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f"&gt;None&lt;/span&gt;
+        &lt;span style="color: #00007f; font-weight: bold"&gt;elif&lt;/span&gt; &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.state == &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.AFTER_DLE:
+            &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.frame += &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.after_dle_func(byte)
+            &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.state = &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.IN_MSG
+            &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f"&gt;None&lt;/span&gt;
+        &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt;:
+            &lt;span style="color: #00007f; font-weight: bold"&gt;raise&lt;/span&gt; AssertionError()
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Note that the code of the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;input&lt;/span&gt;&lt;/tt&gt; method closely follows the state diagram. This is how implementations of state machines are - it's generally difficult to understand what's going on in the code without having some sort of a state diagram in front of your eyes. In this case the state machine has just 3 states, but it can be easily 20 for more complex needs. Understanding such a state function with 20 states is impossible without a diagram.&lt;/p&gt;
+&lt;p&gt;Anyhow, here's some test code that simulates a stream of data with a couple of frames and invalid data in between:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;bytes = &lt;span style="color: #7f007f"&gt;&amp;#39;&amp;#39;&lt;/span&gt;.join(&lt;span style="color: #00007f"&gt;chr&lt;/span&gt;(b) &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; b &lt;span style="color: #0000aa"&gt;in&lt;/span&gt;
+            [&lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x70, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x24,
+             &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x61, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x99, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;xAF, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;xD1, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x62,
+             &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x56, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x62,
+             &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x61, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;xAB, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;xAB, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x14, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x62,
+             &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x7
+            ])
+
+pw = ProtocolWrapper()
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; byte &lt;span style="color: #0000aa"&gt;in&lt;/span&gt; bytes:
+    frame = pw.input(byte)
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; frame:
+        &lt;span style="color: #00007f; font-weight: bold"&gt;print&lt;/span&gt; &lt;span style="color: #7f007f"&gt;&amp;#39;Got frame:&amp;#39;&lt;/span&gt;, frame.encode(&lt;span style="color: #7f007f"&gt;&amp;#39;hex&amp;#39;&lt;/span&gt;)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;This prints:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;Got frame: 99afd1
+Got frame: ab14
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class="section" id="co-routines"&gt;
+&lt;h4&gt;Co-routines&lt;/h4&gt;
+&lt;p&gt;I don't intend to teach the theory behind co-routines here, and I'll assume at least a basic familiarity with the concept. My goal is to show a real-life, relevant example that demonstrates how co-routines relate to state machines.&lt;/p&gt;
+&lt;p&gt;&lt;a class="reference external" href="http://www.chiark.greenend.org.uk/~sgtatham/coroutines.html"&gt;This link&lt;/a&gt; is a good tutorial on co-routines (in C, of all languages), and there's of course &lt;a class="reference external" href="http://en.wikipedia.org/wiki/Coroutines"&gt;Wikipedia&lt;/a&gt; and &lt;a class="reference external" href="http://www.c2.com/cgi/wiki?CoRoutine"&gt;C2&lt;/a&gt;. But the &lt;strong&gt;absolutely best&lt;/strong&gt; tutorial, with focus on Python, is David Beazley's presentation from this year's PyCon: &lt;a class="reference external" href="http://www.dabeaz.com/coroutines/index.html"&gt;A curious course on coroutines and concurrency&lt;/a&gt;. It is while reading this tutorial that the connection finally 'clicked' in my head. It is most highly recommended &lt;a class="footnote-reference" href="#id5" id="id2"&gt;[2]&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;If there's one description of co-routines you should remember while reading this article and later, it is that co-routines save the control state of a function between calls. Kinda like recursion - you know exactly where are you going to return after a function call.&lt;/p&gt;
+&lt;p&gt;When you call a co-routine, it doesn't start all over from the beginning. Rather, it starts from right after where it returned (yielded control) the previous time it was called.&lt;/p&gt;
+&lt;p&gt;This also explains why co-routines can replace state machines. The &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;input&lt;/span&gt;&lt;/tt&gt; method of &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;ProtocolWrapper&lt;/span&gt;&lt;/tt&gt; is invoked multiple times. Since it's a &amp;quot;normal&amp;quot; function, it begins running from its first line for each invocation. This is why it needs to keep a state machine - to know it's current &amp;quot;place in the world&amp;quot; when the next byte is received. With co-routines this isn't necessary - co-routines start exactly where they stopped the previous time they were called - so no state keeping is required!&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="using-co-routines-for-framing"&gt;
+&lt;h4&gt;Using co-routines for framing&lt;/h4&gt;
+&lt;p&gt;Without further ado, here is the co-routine implementation of the framing problem:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;@coroutine
+&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;unwrap_protocol&lt;/span&gt;(header=&lt;span style="color: #7f007f"&gt;&amp;#39;\x61&amp;#39;&lt;/span&gt;,
+                    footer=&lt;span style="color: #7f007f"&gt;&amp;#39;\x62&amp;#39;&lt;/span&gt;,
+                    dle=&lt;span style="color: #7f007f"&gt;&amp;#39;\xAB&amp;#39;&lt;/span&gt;,
+                    after_dle_func=&lt;span style="color: #00007f; font-weight: bold"&gt;lambda&lt;/span&gt; x: x,
+                    target=&lt;span style="color: #00007f"&gt;None&lt;/span&gt;):
+    &lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot; Simplified framing (protocol unwrapping)&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        co-routine.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;    &amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+    &lt;span style="color: #007f00"&gt;# Outer loop looking for a frame header&lt;/span&gt;
+    &lt;span style="color: #007f00"&gt;#&lt;/span&gt;
+    &lt;span style="color: #00007f; font-weight: bold"&gt;while&lt;/span&gt; &lt;span style="color: #00007f"&gt;True&lt;/span&gt;:
+        byte = (&lt;span style="color: #00007f; font-weight: bold"&gt;yield&lt;/span&gt;)
+        frame = &lt;span style="color: #7f007f"&gt;&amp;#39;&amp;#39;&lt;/span&gt;
+
+        &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; byte == header:
+            &lt;span style="color: #007f00"&gt;# Capture the full frame&lt;/span&gt;
+            &lt;span style="color: #007f00"&gt;#&lt;/span&gt;
+            &lt;span style="color: #00007f; font-weight: bold"&gt;while&lt;/span&gt; &lt;span style="color: #00007f"&gt;True&lt;/span&gt;:
+                byte = (&lt;span style="color: #00007f; font-weight: bold"&gt;yield&lt;/span&gt;)
+                &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; byte == footer:
+                    target.send(frame)
+                    &lt;span style="color: #00007f; font-weight: bold"&gt;break&lt;/span&gt;
+                &lt;span style="color: #00007f; font-weight: bold"&gt;elif&lt;/span&gt; byte == dle:
+                    byte = (&lt;span style="color: #00007f; font-weight: bold"&gt;yield&lt;/span&gt;)
+                    frame += after_dle_func(byte)
+                &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt;:
+                    frame += byte
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Look how simple and elegant it is. You can tell immediately what it does just by looking at the source code - no state diagrams are needed.&lt;/p&gt;
+&lt;p&gt;We loop over frames. A frame starts with a header byte. After a header byte has been received, we accumulate the bytes of the frame until a footer is encountered. The &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;(yield)&lt;/span&gt;&lt;/tt&gt; calls is where the magic is. The function suspends at these points until it is called again &lt;a class="footnote-reference" href="#id6" id="id3"&gt;[3]&lt;/a&gt;. Then, the value passed in the new call is returned from &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;(yield)&lt;/span&gt;&lt;/tt&gt; and the co-routine proceeds from the same place.&lt;/p&gt;
+&lt;p&gt;Note how the state machine is &lt;em&gt;implicitly&lt;/em&gt; embedded in this code. It's there, but you don't see it - it's hiding in the control structures (the IFs, ELSEs and the WHILEs) of the function.&lt;/p&gt;
+&lt;p&gt;When a complete frame is received, it is sent to the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;target&lt;/span&gt;&lt;/tt&gt; of the co-routine, which may process it at will. After executing &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;send&lt;/span&gt;&lt;/tt&gt;, the co-routine breaks out of the inner loop and suspends waiting for a new header in the outer loop.&lt;/p&gt;
+&lt;p&gt;The &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;&amp;#64;coroutine&lt;/span&gt;&lt;/tt&gt; decorator is a simple utility required for Python co-routines:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;coroutine&lt;/span&gt;(func):
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;start&lt;/span&gt;(*args,**kwargs):
+        cr = func(*args,**kwargs)
+        cr.next()
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; cr
+    &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; start
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;This is needed to bring a co-routine to its first &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;yield&lt;/span&gt;&lt;/tt&gt; and suspend there. You can just use this decorator without worrying about the details, until you become more comfortable with the concept to understand the exact inner workings described in PEP 342.&lt;/p&gt;
+&lt;p&gt;To test this co-routine implementation we also need a simple &amp;quot;sink&amp;quot; co-routine (using Dave Beazley's terminology from his presentation). This will be the receiver of the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;send&lt;/span&gt;&lt;/tt&gt; calls made by our co-routine:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;@coroutine
+&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;frame_receiver&lt;/span&gt;():
+    &lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot; A simple co-routine &amp;quot;sink&amp;quot; for receiving&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        full frames.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;    &amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+    &lt;span style="color: #00007f; font-weight: bold"&gt;while&lt;/span&gt; &lt;span style="color: #00007f"&gt;True&lt;/span&gt;:
+        frame = (&lt;span style="color: #00007f; font-weight: bold"&gt;yield&lt;/span&gt;)
+        &lt;span style="color: #00007f; font-weight: bold"&gt;print&lt;/span&gt; &lt;span style="color: #7f007f"&gt;&amp;#39;Got frame:&amp;#39;&lt;/span&gt;, frame.encode(&lt;span style="color: #7f007f"&gt;&amp;#39;hex&amp;#39;&lt;/span&gt;)
+
+bytes = &lt;span style="color: #7f007f"&gt;&amp;#39;&amp;#39;&lt;/span&gt;.join(&lt;span style="color: #00007f"&gt;chr&lt;/span&gt;(b) &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; b &lt;span style="color: #0000aa"&gt;in&lt;/span&gt;
+            [&lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x70, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x24,
+             &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x61, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x99, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;xAF, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;xD1, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x62,
+             &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x56, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x62,
+             &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x61, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;xAB, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;xAB, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x14, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x62,
+             &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x7
+            ])
+
+unwrapper = unwrap_protocol(
+                target=frame_receiver())
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; byte &lt;span style="color: #0000aa"&gt;in&lt;/span&gt; bytes:
+    unwrapper.send(byte)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Prints:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;Got frame: 99afd1
+Got frame: ab14
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class="section" id="conclusion"&gt;
+&lt;h4&gt;Conclusion&lt;/h4&gt;
+&lt;p&gt;I'll repeat the quote from the beginning of the article:&lt;/p&gt;
+&lt;blockquote&gt;
+Co-routines are to state machines what recursion is to stacks&lt;/blockquote&gt;
+&lt;p&gt;Recursion helps process nested data structures without employing explicit stacks.&lt;/p&gt;
+&lt;p&gt;Similarly, co-routines help solve problems involving state, without using explicit state machines. The resulting code is not centered on the states, but rather on the logic of the tasks, which makes it much simpler to understand.&lt;/p&gt;
+&lt;p&gt;Co-routines are a useful tool to have in one's toolbox. It is worthwhile to spend some time getting acquainted with them.&lt;/p&gt;
+&lt;div align="center" class="align-center"&gt;&lt;img class="align-center" src="https://eli.thegreenplace.net/images/hline.jpg" style="width: 320px; height: 5px;" /&gt;&lt;/div&gt;
+&lt;table class="docutils footnote" frame="void" id="id4" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;Such a state machine is called a &lt;a class="reference external" href="http://en.wikipedia.org/wiki/Mealy"&gt;Mealy machine&lt;/a&gt; - it generates output based on the current state &lt;em&gt;and&lt;/em&gt; input. Most state machines implemented in software are of this type.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id5" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id2"&gt;[2]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;For Python there's also PEP 342 - but I recommend going over it only after you've read Dave's tutorial.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id6" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id3"&gt;[3]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;Technically, a co-routine is created once by calling it. Then, we have a &amp;quot;co-routine object&amp;quot; on which we can execute &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;send&lt;/span&gt;&lt;/tt&gt; methods, passing the arguments to &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;yield&lt;/span&gt;&lt;/tt&gt; via &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;send&lt;/span&gt;&lt;/tt&gt;. This is how co-routines are implemented in Python. It might look different in another language, but the concept stays the same.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+    </content><category term="misc"></category><category term="Python"></category><category term="Serial port"></category></entry><entry><title>Frames and protocols for the serial port - in Python</title><link href="https://eli.thegreenplace.net/2009/08/20/frames-and-protocols-for-the-serial-port-in-python" rel="alternate"></link><published>2009-08-20T07:01:44-07:00</published><updated>2024-05-04T19:46:23-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2009-08-20:/2009/08/20/frames-and-protocols-for-the-serial-port-in-python</id><summary type="html">
+        &lt;div class="section" id="jab"&gt;
+&lt;div class="section" id="some-preliminaries"&gt;
+&lt;h4&gt;Some preliminaries&lt;/h4&gt;
+&lt;p&gt;If you've been following this blog recently, you must have noticed that many of the posts in these past few weeks are about using Python to communicate via the serial port. I specifically decided to write them as separate posts and not as part of a series, because …&lt;/p&gt;&lt;/div&gt;&lt;/div&gt;</summary><content type="html">
+        &lt;div class="section" id="jab"&gt;
+&lt;div class="section" id="some-preliminaries"&gt;
+&lt;h4&gt;Some preliminaries&lt;/h4&gt;
+&lt;p&gt;If you've been following this blog recently, you must have noticed that many of the posts in these past few weeks are about using Python to communicate via the serial port. I specifically decided to write them as separate posts and not as part of a series, because I think that each post is interesting in itself &lt;a class="footnote-reference" href="#id7" id="id1"&gt;[1]&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;But just in case you got confused, here's the logical order:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;&lt;a class="reference external" href="https://eli.thegreenplace.net/2009/07/30/setting-up-python-to-work-with-the-serial-port/"&gt;Setting up Python to work with the serial port&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="reference external" href="https://eli.thegreenplace.net/2009/08/07/a-live-data-monitor-with-python-pyqt-and-pyserial/"&gt;A “live” data monitor with Python, PyQt and PySerial&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="reference external" href="https://eli.thegreenplace.net/2009/08/12/framing-in-serial-communications/"&gt;Framing in serial communications&lt;/a&gt;&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;In this post I want to present some useful Python code to implement the ideas of (3). Additionally, I'll introduce a very useful library for constructing frames from various forms of data.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="code"&gt;
+&lt;h4&gt;Code&lt;/h4&gt;
+&lt;p&gt;The code for this post is available &lt;a href="https://github.com/eliben/code-for-blog/tree/main/2009/protocol"&gt;here&lt;/a&gt;.
+It contains the modules discussed, the sample code shown and even some unit tests.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="arrays-of-data-in-python"&gt;
+&lt;h4&gt;Arrays of data in Python&lt;/h4&gt;
+&lt;p&gt;When we think about a sequence of bytes in Python, two approaches come to mind: an array of integers in the range 0-255, or a 'packed' string. Here's some Python terminal action that displays the difference:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&amp;gt;&amp;gt;&amp;gt; arr = [&lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x45, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;xAB, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;xC3, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x16]
+&amp;gt;&amp;gt;&amp;gt; arr
+[&lt;span style="color: #007f7f"&gt;69&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;171&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;195&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;22&lt;/span&gt;]
+&amp;gt;&amp;gt;&amp;gt; &lt;span style="color: #00007f"&gt;str&lt;/span&gt; = &lt;span style="color: #7f007f"&gt;&amp;#39;\x45\xAB\xC3\x16&amp;#39;&lt;/span&gt;
+&amp;gt;&amp;gt;&amp;gt; &lt;span style="color: #00007f"&gt;str&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;&amp;#39;E\xab\xc3\x16&amp;#39;&lt;/span&gt;
+&amp;gt;&amp;gt;&amp;gt; &lt;span style="color: #7f007f"&gt;&amp;#39;&amp;#39;&lt;/span&gt;.join(&lt;span style="color: #00007f"&gt;chr&lt;/span&gt;(b) &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; b &lt;span style="color: #0000aa"&gt;in&lt;/span&gt; arr)
+&lt;span style="color: #7f007f"&gt;&amp;#39;E\xab\xc3\x16&amp;#39;&lt;/span&gt;
+&amp;gt;&amp;gt;&amp;gt; [&lt;span style="color: #00007f"&gt;ord&lt;/span&gt;(b) &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; b &lt;span style="color: #0000aa"&gt;in&lt;/span&gt; &lt;span style="color: #00007f"&gt;str&lt;/span&gt;]
+[&lt;span style="color: #007f7f"&gt;69&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;171&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;195&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;22&lt;/span&gt;]
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;This shows that the two formats are essentially interchangeable, and also that it's very easy to convert between the two.&lt;/p&gt;
+&lt;p&gt;The format we're going to use is the packed string, because this is what the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;pyserial&lt;/span&gt;&lt;/tt&gt; module uses to send and receive data.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="serializing-data"&gt;
+&lt;h4&gt;Serializing data&lt;/h4&gt;
+&lt;p&gt;So, to send data over the serial port we first have to turn it into a packed string - this is called serialization &lt;a class="footnote-reference" href="#id8" id="id2"&gt;[2]&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Python has a couple of built-in ways to do that - with the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;array&lt;/span&gt;&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;struct&lt;/span&gt;&lt;/tt&gt; modules. However, both are suitable for fairly simple and unsophisticated data. To serialize arbitrarily sophisticated data formats, it's much better to use the powerful and flexible &lt;a class="reference external" href="http://construct.wikispaces.com/"&gt;construct&lt;/a&gt; library &lt;a class="footnote-reference" href="#id9" id="id3"&gt;[3]&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Here's a sample message format defined with &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;construct&lt;/span&gt;&lt;/tt&gt; (from &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;sampleformat.py&lt;/span&gt;&lt;/tt&gt; in this article's code archive):&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;from&lt;/span&gt; &lt;span style="color: #00007f"&gt;construct&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; *
+
+message_crc = Struct(&lt;span style="color: #7f007f"&gt;&amp;#39;message_crc&amp;#39;&lt;/span&gt;, ULInt32(&lt;span style="color: #7f007f"&gt;&amp;#39;crc&amp;#39;&lt;/span&gt;))
+
+message_format = Struct(&lt;span style="color: #7f007f"&gt;&amp;#39;message_format&amp;#39;&lt;/span&gt;,
+    ULInt16(&lt;span style="color: #7f007f"&gt;&amp;#39;msg_id&amp;#39;&lt;/span&gt;),
+    ULInt16(&lt;span style="color: #7f007f"&gt;&amp;#39;dest_addr&amp;#39;&lt;/span&gt;),
+    Enum(Byte(&lt;span style="color: #7f007f"&gt;&amp;#39;command_type&amp;#39;&lt;/span&gt;),
+        RESTART = &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x40,
+        RESTART_ACK = &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x80,
+        SIGNAL = &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x22,
+        _default_ = Pass
+    ),
+    BitStruct(&lt;span style="color: #7f007f"&gt;&amp;#39;flags&amp;#39;&lt;/span&gt;,
+        Flag(&lt;span style="color: #7f007f"&gt;&amp;#39;on&amp;#39;&lt;/span&gt;),
+        BitField(&lt;span style="color: #7f007f"&gt;&amp;#39;status&amp;#39;&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;3&lt;/span&gt;),
+        Flag(&lt;span style="color: #7f007f"&gt;&amp;#39;cache&amp;#39;&lt;/span&gt;),
+        Padding(&lt;span style="color: #007f7f"&gt;3&lt;/span&gt;)
+    ),
+    Byte(&lt;span style="color: #7f007f"&gt;&amp;#39;datalen&amp;#39;&lt;/span&gt;),
+    Array(&lt;span style="color: #00007f; font-weight: bold"&gt;lambda&lt;/span&gt; ctx: ctx[&lt;span style="color: #7f007f"&gt;&amp;#39;datalen&amp;#39;&lt;/span&gt;], Byte(&lt;span style="color: #7f007f"&gt;&amp;#39;data&amp;#39;&lt;/span&gt;)),
+    Embed(message_crc)
+)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;It shows off a few interesting features of &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;construct&lt;/span&gt;&lt;/tt&gt;:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;Explicit specification of endianness for multi-byte fields&lt;/li&gt;
+&lt;li&gt;Enumerations&lt;/li&gt;
+&lt;li&gt;Support for byte-oriented and bit-oriented fields&lt;/li&gt;
+&lt;li&gt;Arrays of data with specified length&lt;/li&gt;
+&lt;li&gt;Embedded structs&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;The message should look roughly familiar for anyone designing and using binary protocols. It's very typical of how real formats look - some ID fields, flags, data, CRC &lt;a class="footnote-reference" href="#id10" id="id4"&gt;[4]&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Here's how this message format can be used to pack and unpack a message:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&amp;gt;&amp;gt;&amp;gt; &lt;span style="color: #00007f; font-weight: bold"&gt;from&lt;/span&gt; &lt;span style="color: #00007f"&gt;sampleformat&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; message_format
+&amp;gt;&amp;gt;&amp;gt; &lt;span style="color: #00007f; font-weight: bold"&gt;from&lt;/span&gt; &lt;span style="color: #00007f"&gt;construct&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; *
+&amp;gt;&amp;gt;&amp;gt; raw = message_format.build(Container(
+...         msg_id=&lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x1234,
+...         dest_addr=&lt;span style="color: #007f7f"&gt;0&lt;/span&gt;xacba,
+...         command_type=&lt;span style="color: #7f007f"&gt;&amp;#39;RESTART&amp;#39;&lt;/span&gt;,
+...         flags=Container(on=&lt;span style="color: #007f7f"&gt;1&lt;/span&gt;, cache=&lt;span style="color: #007f7f"&gt;0&lt;/span&gt;, status=&lt;span style="color: #007f7f"&gt;4&lt;/span&gt;),
+...         datalen=&lt;span style="color: #007f7f"&gt;4&lt;/span&gt;,
+...         data=[&lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x1, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;xff, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;xff, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;xdd],
+...         crc=&lt;span style="color: #007f7f"&gt;0&lt;/span&gt;x12345678))
+&amp;gt;&amp;gt;&amp;gt; raw.encode(&lt;span style="color: #7f007f"&gt;&amp;#39;hex&amp;#39;&lt;/span&gt;)
+&lt;span style="color: #7f007f"&gt;&amp;#39;3412baac40c00401ffffdd78563412&amp;#39;&lt;/span&gt;
+&amp;gt;&amp;gt;&amp;gt; c = message_format.parse(raw)
+&amp;gt;&amp;gt;&amp;gt; &lt;span style="color: #00007f; font-weight: bold"&gt;print&lt;/span&gt; c
+Container:
+    msg_id = &lt;span style="color: #007f7f"&gt;4660&lt;/span&gt;
+    dest_addr = &lt;span style="color: #007f7f"&gt;44218&lt;/span&gt;
+    command_type = &lt;span style="color: #7f007f"&gt;&amp;#39;RESTART&amp;#39;&lt;/span&gt;
+    flags = Container:
+        on = &lt;span style="color: #00007f"&gt;True&lt;/span&gt;
+        status = &lt;span style="color: #007f7f"&gt;4&lt;/span&gt;
+        cache = &lt;span style="color: #00007f"&gt;False&lt;/span&gt;
+    datalen = &lt;span style="color: #007f7f"&gt;4&lt;/span&gt;
+    data = [
+        &lt;span style="color: #007f7f"&gt;1&lt;/span&gt;
+        &lt;span style="color: #007f7f"&gt;255&lt;/span&gt;
+        &lt;span style="color: #007f7f"&gt;255&lt;/span&gt;
+        &lt;span style="color: #007f7f"&gt;221&lt;/span&gt;
+    ]
+    crc = &lt;span style="color: #007f7f"&gt;305419896&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;A few things to note here:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;&lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;message_format&lt;/span&gt;&lt;/tt&gt; is an object with two useful methods: &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;build&lt;/span&gt;&lt;/tt&gt; for packing data into a string, and &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;parse&lt;/span&gt;&lt;/tt&gt; for unpacking it back from a string.&lt;/li&gt;
+&lt;li&gt;&lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;Container&lt;/span&gt;&lt;/tt&gt; is a class taken from &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;construct&lt;/span&gt;&lt;/tt&gt;. It's just a simple data container holding its data items in attributes. Any compatible object would do here (duck typing!) - for example a &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;namedtuple&lt;/span&gt;&lt;/tt&gt;. I chose &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;Container&lt;/span&gt;&lt;/tt&gt; because it comes with &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;construct&lt;/span&gt;&lt;/tt&gt; anyway and is simple and useful.&lt;/li&gt;
+&lt;li&gt;&lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;raw&lt;/span&gt;&lt;/tt&gt; is a packed string. The &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;encode&lt;/span&gt;&lt;/tt&gt; string method is used here to show the hex values of the string's bytes.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/div&gt;
+&lt;div class="section" id="framing-protocol-wrapping-and-unwrapping"&gt;
+&lt;h4&gt;Framing (protocol wrapping and unwrapping)&lt;/h4&gt;
+&lt;p&gt;&lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;protocolwrapper.py&lt;/span&gt;&lt;/tt&gt; in the code archive&lt;/a&gt; is a faithful Python implementation of the &lt;a class="reference external" href="https://eli.thegreenplace.net/2009/08/12/framing-in-serial-communications/"&gt;Framing in serial communications article.&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;Not much more to say about it here - the code is commented and should be simple to understand if you're familiar with the theory.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="putting-it-all-together"&gt;
+&lt;h4&gt;Putting it all together&lt;/h4&gt;
+&lt;p&gt;The process of sending is:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;Serialize all the fields into a packed string using the message format object&lt;/li&gt;
+&lt;li&gt;Compute the CRC and insert it into the frame&lt;/li&gt;
+&lt;li&gt;Wrap the frame with the protocol&lt;/li&gt;
+&lt;li&gt;Now we have a string ready to send that represents the complete message&lt;/li&gt;
+&lt;/ol&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;from&lt;/span&gt; &lt;span style="color: #00007f"&gt;zlib&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; crc32
+&lt;span style="color: #00007f; font-weight: bold"&gt;from&lt;/span&gt; &lt;span style="color: #00007f"&gt;protocolwrapper&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; (
+    ProtocolWrapper, ProtocolStatus)
+&lt;span style="color: #00007f; font-weight: bold"&gt;from&lt;/span&gt; &lt;span style="color: #00007f"&gt;sampleformat&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; (
+    message_format, message_crc, Container)
+
+
+PROTOCOL_HEADER = &lt;span style="color: #7f007f"&gt;&amp;#39;\x11&amp;#39;&lt;/span&gt;
+PROTOCOL_FOOTER = &lt;span style="color: #7f007f"&gt;&amp;#39;\x12&amp;#39;&lt;/span&gt;
+PROTOCOL_DLE = &lt;span style="color: #7f007f"&gt;&amp;#39;\x90&amp;#39;&lt;/span&gt;
+
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;build_message_to_send&lt;/span&gt;(
+        msg_id, dest_addr, command_type,
+        flag_on, flag_cache, flag_status, data):
+    &lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot; Given the data, builds a message for&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        transmittion, computing the CRC and packing&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        the protocol.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        Returns the packed message ready for&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        transmission on the serial port.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;    &amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+    datalen = &lt;span style="color: #00007f"&gt;len&lt;/span&gt;(data)
+    flags = Container(  on=flag_on,
+                        cache=flag_cache,
+                        status=flag_status)
+
+    &lt;span style="color: #007f00"&gt;# Build the raw message string. CRC is empty&lt;/span&gt;
+    &lt;span style="color: #007f00"&gt;# for now&lt;/span&gt;
+    &lt;span style="color: #007f00"&gt;#&lt;/span&gt;
+    raw = message_format.build(Container(
+        msg_id=msg_id,
+        dest_addr=dest_addr,
+        command_type=command_type,
+        flags=flags,
+        datalen=datalen,
+        data=data,
+        crc=&lt;span style="color: #007f7f"&gt;0&lt;/span&gt;))
+
+    &lt;span style="color: #007f00"&gt;# Compute the CRC field and append it to the&lt;/span&gt;
+    &lt;span style="color: #007f00"&gt;# message instead of the empty CRC specified&lt;/span&gt;
+    &lt;span style="color: #007f00"&gt;# initially.&lt;/span&gt;
+    &lt;span style="color: #007f00"&gt;#&lt;/span&gt;
+    msg_without_crc = raw[:-&lt;span style="color: #007f7f"&gt;4&lt;/span&gt;]
+    msg_crc = message_crc.build(Container(
+        crc=crc32(msg_without_crc)))
+
+    &lt;span style="color: #007f00"&gt;# Append the CRC field&lt;/span&gt;
+    &lt;span style="color: #007f00"&gt;#&lt;/span&gt;
+    msg = msg_without_crc + msg_crc
+
+    pw = ProtocolWrapper(
+            header=PROTOCOL_HEADER,
+            footer=PROTOCOL_FOOTER,
+            dle=PROTOCOL_DLE)
+
+    &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; pw.wrap(msg)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The receiving process is:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;Unwrap the protocol to receive a frame&lt;/li&gt;
+&lt;li&gt;Unpack the frame into separate fields using the frame format&lt;/li&gt;
+&lt;li&gt;Compute the CRC and compare it to the one received&lt;/li&gt;
+&lt;li&gt;If all is OK, we have received a new valid frame&lt;/li&gt;
+&lt;/ol&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span style="color: #007f00"&gt;# Sample: receiving a message&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;#&lt;/span&gt;
+pw = ProtocolWrapper(
+        header=PROTOCOL_HEADER,
+        footer=PROTOCOL_FOOTER,
+        dle=PROTOCOL_DLE)
+
+&lt;span style="color: #007f00"&gt;# Feed all the bytes of &amp;#39;msg&amp;#39; sequentially&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;# into pw.input&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;#&lt;/span&gt;
+status = &lt;span style="color: #00007f"&gt;map&lt;/span&gt;(pw.input, msg)
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; status[-&lt;span style="color: #007f7f"&gt;1&lt;/span&gt;] == ProtocolStatus.MSG_OK:
+    rec_msg = pw.last_message
+
+    &lt;span style="color: #007f00"&gt;# Parse the received CRC into a 32-bit integer&lt;/span&gt;
+    &lt;span style="color: #007f00"&gt;#&lt;/span&gt;
+    rec_crc = message_crc.parse(rec_msg[-&lt;span style="color: #007f7f"&gt;4&lt;/span&gt;:]).crc
+
+    &lt;span style="color: #007f00"&gt;# Compute the CRC on the message&lt;/span&gt;
+    &lt;span style="color: #007f00"&gt;#&lt;/span&gt;
+    calc_crc = crc32(rec_msg[:-&lt;span style="color: #007f7f"&gt;4&lt;/span&gt;])
+
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; rec_crc != calc_crc:
+        &lt;span style="color: #00007f; font-weight: bold"&gt;print&lt;/span&gt; &lt;span style="color: #7f007f"&gt;&amp;#39;Error: CRC mismatch&amp;#39;&lt;/span&gt;
+
+    &lt;span style="color: #00007f; font-weight: bold"&gt;print&lt;/span&gt; message_format.parse(rec_msg)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;These are just examples, of course. Your own code will depend on the structure of your frames and how you receive your data. But it can serve as a basic template for implementing arbitrary complex serial protocols in a robust way.&lt;/p&gt;
+&lt;div align="center" class="align-center"&gt;&lt;img class="align-center" src="https://eli.thegreenplace.net/images/hline.jpg" style="width: 320px; height: 5px;" /&gt;&lt;/div&gt;
+&lt;table class="docutils footnote" frame="void" id="id7" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;By the way, all the posts on this topic are collected in the &lt;a class="reference external" href="https://eli.thegreenplace.net/tag/serial-port"&gt;Serial Port category&lt;/a&gt;.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id8" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id2"&gt;[2]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;Python already has nice libraries for serialization (&lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;pickle&lt;/span&gt;&lt;/tt&gt;, &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;shelve&lt;/span&gt;&lt;/tt&gt;, &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;json&lt;/span&gt;&lt;/tt&gt; and others), but there's a problem! It's usually not Python we have on the other side of the serial link! Two Python programs would find a better, faster method to communicate (like TCP/IP). When we use Python with &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;pyserial&lt;/span&gt;&lt;/tt&gt; it's because we actually want to communicate with some embedded hardware (implemented in C or even as an FPGA/ASIC with VHDL or Verilog) or other physical equipment. So pickling the data won't help here.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id9" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id3"&gt;[3]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;This is not a tutorial of &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;construct&lt;/span&gt;&lt;/tt&gt; though. There's a pretty good one on &lt;a class="reference external" href="http://construct.wikispaces.com/tutorial"&gt;its website&lt;/a&gt;&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id10" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id4"&gt;[4]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;&lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;construct&lt;/span&gt;&lt;/tt&gt; has sample formats for well-known protocols like TCP and ARP, and binary files like PNG and ELF32.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+    </content><category term="misc"></category><category term="Python"></category><category term="Serial port"></category></entry><entry><title>Framing in serial communications</title><link href="https://eli.thegreenplace.net/2009/08/12/framing-in-serial-communications" rel="alternate"></link><published>2009-08-12T05:16:47-07:00</published><updated>2023-06-30T23:16:27-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2009-08-12:/2009/08/12/framing-in-serial-communications</id><summary type="html">
+        &lt;div class="section" id="introduction"&gt;
+&lt;h3&gt;Introduction&lt;/h3&gt;
+&lt;p&gt;In the &lt;a class="reference external" href="https://eli.thegreenplace.net/2009/08/07/a-live-data-monitor-with-python-pyqt-and-pyserial/"&gt;previous post&lt;/a&gt; we've seen how to send and receive data on the serial port with Python and plot it live using a pretty GUI.&lt;/p&gt;
+&lt;p&gt;Notice that the sender script (sender_sim.py) is just sending one byte at a time. The &amp;quot;chunks&amp;quot; of data in the protocol between …&lt;/p&gt;&lt;/div&gt;</summary><content type="html">
+        &lt;div class="section" id="introduction"&gt;
+&lt;h3&gt;Introduction&lt;/h3&gt;
+&lt;p&gt;In the &lt;a class="reference external" href="https://eli.thegreenplace.net/2009/08/07/a-live-data-monitor-with-python-pyqt-and-pyserial/"&gt;previous post&lt;/a&gt; we've seen how to send and receive data on the serial port with Python and plot it live using a pretty GUI.&lt;/p&gt;
+&lt;p&gt;Notice that the sender script (sender_sim.py) is just sending one byte at a time. The &amp;quot;chunks&amp;quot; of data in the protocol between the sender and receiver are single bytes. This is simple and convenient, but hardly sufficient in the general sense. We want to be able to send multiple-byte data frames between the communicating parties.&lt;/p&gt;
+&lt;p&gt;However, there are some challenges that arise immediately:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;The receiver is just receiving a stream of bytes from the serial port. How does it know when a message begins or ends? How does it know how long the message is?&lt;/li&gt;
+&lt;li&gt;Even more seriously, we can not assume a noise-free channel. This is real, physical hardware stuff. Bytes and whole chunks can and will be lost due to electrical noise. Worse, other bytes will be distorted (say, a single bit can be flipped due to noise).&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;To see how this can be done in a safe and tested manner, we first have to learn about the basics of the Data Link Layer in computer networks.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="data-link-layer"&gt;
+&lt;h3&gt;Data Link Layer&lt;/h3&gt;
+&lt;p&gt;Given a physical layer that can transmit signals between devices, the job of the Data Link Layer &lt;a class="footnote-reference" href="#id9" id="id1"&gt;[1]&lt;/a&gt; is (roughly stated) to transmit whole frames of data, with some means of assuring the integrity of the data (lack of errors). When we use sockets to communicate over TCP or UDP on the internet, the framing is taken care of deep in the hardware, and we don't even feel it. On the serial port, however, we must take care of the framing and error handling ourselves &lt;a class="footnote-reference" href="#id10" id="id2"&gt;[2]&lt;/a&gt;.&lt;/p&gt;
+&lt;div class="section" id="framing"&gt;
+&lt;h4&gt;Framing&lt;/h4&gt;
+&lt;p&gt;In chapter 3 of his &lt;a class="reference external" href="https://eli.thegreenplace.net/2009/08/08/book-review-computer-networks-4th-edition-by-andrew-tanenbaum/"&gt;&amp;quot;Computer Networks&amp;quot;&lt;/a&gt; textbook, Tanenbaum defines the following methods of framing:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;Inserting time gaps between frames&lt;/li&gt;
+&lt;li&gt;Physical layer coding violations&lt;/li&gt;
+&lt;li&gt;Character count&lt;/li&gt;
+&lt;li&gt;Flag bytes with byte stuffing&lt;/li&gt;
+&lt;li&gt;Flag bytes with bit stuffing&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;Methods (1) and (2) are only suitable for a hardware-implemented data link layer &lt;a class="footnote-reference" href="#id11" id="id3"&gt;[3]&lt;/a&gt;. It is very difficult (read: impossible) to ensure timing when multiple layers of software (running on Windows!) are involved. (2) is an interesting hardware method - but out of the scope of this article.&lt;/p&gt;
+&lt;p&gt;Method (3) means specifying in the frame header the number of bytes in the frame. The trouble with this is that the count can be garbled by a transmission error. In such a case, it's very difficult to &amp;quot;resynchronize&amp;quot;. This method is rarely used.&lt;/p&gt;
+&lt;p&gt;Methods (4) and (5) are somewhat similar. In this article I'll focus on (4), as (5) is not suitable for serial port communications.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="flag-bytes-with-byte-stuffing"&gt;
+&lt;h4&gt;Flag bytes with byte stuffing&lt;/h4&gt;
+&lt;p&gt;Let's begin with a simple idea and develop it into a full, robust scheme.&lt;/p&gt;
+&lt;p&gt;&lt;em&gt;Flag bytes&lt;/em&gt; are special byte values that denote when a frame begins and ends. Suppose that we want to be able to send frames of arbitrary length. A special start flag byte will denote the beginning of the frame, and an end flag byte will denote its end.&lt;/p&gt;
+&lt;img src="https://eli.thegreenplace.net/images/2009/08/flags_data.png" /&gt;
+&lt;p&gt;A question arises, however. Suppose that the value of the end flag is 0x98. What if the value 0x98 appears somewhere in the data? The protocol will get confused and end the message.&lt;/p&gt;
+&lt;p&gt;There is a simple solution to this problem that will be familiar to all programmers who know about escaping quotes and special characters in strings. It is called &lt;em&gt;byte stuffing&lt;/em&gt;, or &lt;em&gt;octet stuffing&lt;/em&gt;, or simply &lt;em&gt;escaping&lt;/em&gt; &lt;a class="footnote-reference" href="#id12" id="id4"&gt;[4]&lt;/a&gt;. The scheme goes as follows:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;Whenever a flag (start or end) byte appears in the data, we shall insert a special escape byte (ESC) before it. When the receiver sees an ESC, it knows to ignore it and not insert it into the actual data received (de-stuffing).&lt;/li&gt;
+&lt;li&gt;Whenever ESC itself has to appear in the data, another ESC is prepended to it. The receiver removes the first one but keeps the second one &lt;a class="footnote-reference" href="#id13" id="id5"&gt;[5]&lt;/a&gt;.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;Here are a few examples:&lt;/p&gt;
+&lt;img src="https://eli.thegreenplace.net/images/2009/08/escaping.png" /&gt;
+&lt;p&gt;Note that we didn't specify what the data is - it's arbitrary and up the the protocol to decide. The only really required part of the data is some kind of error checking - a checksum, or better yet a CRC. This is customarily the last byte (or last word) of the frame, referring to all the bytes in the frame (in its un-stuffed form).&lt;/p&gt;
+&lt;p&gt;This scheme is quite robust: any lost byte (be it a flag, an escape, a data byte or a checksum byte) will cause the receiver to lose just one frame, after which it will resynchronize onto the start flag byte of the next one.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="ppp"&gt;
+&lt;h4&gt;PPP&lt;/h4&gt;
+&lt;p&gt;As a matter of fact, this method is a slight simplification of the &lt;a class="reference external" href="http://en.wikipedia.org/wiki/Point-to-Point_Protocol"&gt;Point-to-Point Protocol&lt;/a&gt; (PPP) which is used by most ISPs for providing ADSL internet to home users, so there's a good chance you're using it now to surf the net and read this article! The framing of PPP is defined in &lt;a class="reference external" href="http://tools.ietf.org/html/rfc1662"&gt;RFC 1662&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;In particular, PPP does the following:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;Both the start and end flag bytes are 0x7E (they shouldn't really be different, if you think about it)&lt;/li&gt;
+&lt;li&gt;The escape byte is 0x7D&lt;/li&gt;
+&lt;li&gt;Whenever a flag or escape byte appears in the message, it is escaped by 0x7D and the byte itself is XOR-ed with 0x20. So, for example 0x7E becomes 0x7D 0x5E. Similarly 0x7D becomes 0x7D 0x5D. The receiver unsuffs the escape byte and XORs the next byte with 0x20 again to get the original &lt;a class="footnote-reference" href="#id14" id="id6"&gt;[6]&lt;/a&gt;.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class="section" id="an-example"&gt;
+&lt;h3&gt;An example&lt;/h3&gt;
+&lt;p&gt;Let's now see a completely worked-out example that demonstrates how this works.&lt;/p&gt;
+&lt;p&gt;Suppose we define the following protocol:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;Start flag: 0x12&lt;/li&gt;
+&lt;li&gt;End flag: 0x13&lt;/li&gt;
+&lt;li&gt;Escape (DLE): 0x7D&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;And the sender wants to send the following data message (let's ignore its contents for the sake of the example - they're really not that important). The original data is in &lt;strong&gt;(a)&lt;/strong&gt;:&lt;/p&gt;
+&lt;img src="https://eli.thegreenplace.net/images/2009/08/example1.png" /&gt;
+&lt;p&gt;The data contains two flags that need to be escaped - an end flag at position 2 (counting from 0, of course!), and a DLE at position 4.&lt;/p&gt;
+&lt;p&gt;The sender's data link layer &lt;a class="footnote-reference" href="#id15" id="id7"&gt;[7]&lt;/a&gt; turns the data into the frame shown in &lt;strong&gt;(b)&lt;/strong&gt; - start and end flags are added, and in-message flags are escaped.&lt;/p&gt;
+&lt;p&gt;Let's see how the receiver handles such a frame. For demonstration, assume that the first byte the receiver draws from the serial port is not a real part of the message (we want to see how it handles this). In the following diagram, 'Receiver state' is the state of the receiver &lt;em&gt;after&lt;/em&gt; the received byte. 'Data buffer' is the currently accumulated message buffer to pass to an upper level:&lt;/p&gt;
+&lt;img src="https://eli.thegreenplace.net/images/2009/08/example1_rcv.png" /&gt;
+&lt;p&gt;A few things to note:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;The &amp;quot;stray&amp;quot; byte before the header is ignored: according to the protocol each frame has to start with a header, so this isn't part of the frame.&lt;/li&gt;
+&lt;li&gt;The start and end flags are not inserted into the data buffer&lt;/li&gt;
+&lt;li&gt;Escapes (DLEs) are correctly handled by a special state&lt;/li&gt;
+&lt;li&gt;When the frame is finished with an end flag, the receiver has a frame ready to pass to an upper level, and comes back waiting for a header - a new frame.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;Finally, we see that the message received is exactly the message sent. All the protocol details (flags, escapes and so on) were transparently handled by the data link layer &lt;a class="footnote-reference" href="#id16" id="id8"&gt;[8]&lt;/a&gt;.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="conclusion"&gt;
+&lt;h3&gt;Conclusion&lt;/h3&gt;
+&lt;p&gt;There are several methods of handling framing in communications, although most are unsuitable to be used on top of the serial port. Among the ones that are suitable, the most commonly used is &lt;em&gt;byte stuffing&lt;/em&gt;. By defining a couple of &amp;quot;magic value&amp;quot; flags and careful rules of escaping, this framing methods is both robust and easy to implement as a software layer. It is also widely used as PPP depends on it.&lt;/p&gt;
+&lt;p&gt;Finally, it's important to remember that for a high level of robustness, it's required to add some kind of error checking into the protocol - such as computing a CRC on the message and appending it as the last word of the message, which the receiver can verify before deciding that the message is valid.&lt;/p&gt;
+&lt;div align="center" class="align-center"&gt;&lt;img class="align-center" src="https://eli.thegreenplace.net/images/hline.jpg" style="width: 320px; height: 5px;" /&gt;&lt;/div&gt;
+&lt;table class="docutils footnote" frame="void" id="id9" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;The Data Link Layer is layer 2 in the &lt;a class="reference external" href="http://en.wikipedia.org/wiki/OSI_model"&gt;OSI model&lt;/a&gt;. In the &lt;a class="reference external" href="http://en.wikipedia.org/wiki/TCP/IP_model"&gt;TCP/IP model&lt;/a&gt; it's simply called the &amp;quot;link layer&amp;quot;.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id10" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id2"&gt;[2]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;The serial port can be configured to add parity bits to bytes. These days, this option is rarely used, because:&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;A single parity bit isn't a very strong means of detecting errors. 2-bit errors fool it.&lt;/li&gt;
+&lt;li&gt;Error handling is usually done by stronger means at a higher level.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;table class="docutils footnote" frame="void" id="id11" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id3"&gt;[3]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;For example Ethernet (802.3) uses 12 octets of idle characters between frames.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id12" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id4"&gt;[4]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;You might run into the term DLE - Data Link Escape, which means the same thing. I will use the acronyms DLE and ESC interchangeably.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id13" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id5"&gt;[5]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;Just like quotes and escape characters in strings! In C: &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;&amp;quot;I&lt;/span&gt; &lt;span class="pre"&gt;say&lt;/span&gt; &lt;span class="pre"&gt;\&amp;quot;Hello\&amp;quot;&amp;quot;&lt;/span&gt;&lt;/tt&gt;. To escape the escape, repeat it: &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;&amp;quot;Here&lt;/span&gt; &lt;span class="pre"&gt;comes&lt;/span&gt; &lt;span class="pre"&gt;the&lt;/span&gt; &lt;span class="pre"&gt;backslash:&lt;/span&gt; &lt;span class="pre"&gt;\\&lt;/span&gt; &lt;span class="pre"&gt;-&lt;/span&gt; &lt;span class="pre"&gt;seen&lt;/span&gt; &lt;span class="pre"&gt;it?&amp;quot;&lt;/span&gt;&lt;/tt&gt;&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id14" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id6"&gt;[6]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;I'd love to hear why this XOR-ing is required. One simple reason I can think of is to prevent the flag and escape bytes appearing &amp;quot;on the line&amp;quot; even after they're escaped. Presumably this improves resynchronization if the escape byte is lost?&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id15" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id7"&gt;[7]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;Which is just a fancy way to say &amp;quot;a protocol wrapping function&amp;quot;, since the layer is implemented in software.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id16" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id8"&gt;[8]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;Such transparency is one of the greatest ideas of layered network protocols. So when we implement protocols in software, it's a good thing to keep in mind - transparency aids modularity and decoupling, it's a &lt;em&gt;good thing&lt;/em&gt;.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;/div&gt;
+
+    </content><category term="misc"></category><category term="EE &amp; Embedded"></category><category term="Serial port"></category></entry><entry><title>A "live" data monitor with Python, PyQt and PySerial</title><link href="https://eli.thegreenplace.net/2009/08/07/a-live-data-monitor-with-python-pyqt-and-pyserial" rel="alternate"></link><published>2009-08-07T14:57:57-07:00</published><updated>2024-05-04T19:46:23-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2009-08-07:/2009/08/07/a-live-data-monitor-with-python-pyqt-and-pyserial</id><summary type="html">
+        &lt;p&gt;The previous &lt;a class="reference external" href="https://eli.thegreenplace.net/2009/07/30/setting-up-python-to-work-with-the-serial-port/"&gt;couple&lt;/a&gt; of &lt;a class="reference external" href="https://eli.thegreenplace.net/2009/07/31/listing-all-serial-ports-on-windows-with-python/"&gt;posts&lt;/a&gt; about the PySerial module for serial communications with Python were just a basic introduction. Let's now see something much more useful.&lt;/p&gt;
+&lt;p&gt;PySerial makes Python a great tool for serial communications from a computer, as it can be easily combined with other powerful Python libraries to …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;The previous &lt;a class="reference external" href="https://eli.thegreenplace.net/2009/07/30/setting-up-python-to-work-with-the-serial-port/"&gt;couple&lt;/a&gt; of &lt;a class="reference external" href="https://eli.thegreenplace.net/2009/07/31/listing-all-serial-ports-on-windows-with-python/"&gt;posts&lt;/a&gt; about the PySerial module for serial communications with Python were just a basic introduction. Let's now see something much more useful.&lt;/p&gt;
+&lt;p&gt;PySerial makes Python a great tool for serial communications from a computer, as it can be easily combined with other powerful Python libraries to create full-scale applications. In my case, I'm using PyQt with its plotting supplementary PyQwt to create nice &amp;quot;live&amp;quot; plotting applications, that can be combined with the serial port. Here's a demo:&lt;/p&gt;
+&lt;p&gt;Download &lt;a href="https://github.com/eliben/code-for-blog/tree/main/2009/plotting_data_monitor"&gt;plotting_data_monitor&lt;/a&gt;- it's a small demo application written in Python that requires the following modules to be installed on your machine:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;PyQt&lt;/li&gt;
+&lt;li&gt;PyQwt&lt;/li&gt;
+&lt;li&gt;PySerial&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;What does it do? Well, it basically shows how to combine all these powers of Python into a single application in a simple way. You can choose a serial port and then run the monitor (all via the menu). If another program is sending data to the specified port, you'll see the plot updating &amp;quot;in real time&amp;quot;:&lt;/p&gt;
+&lt;img src="https://eli.thegreenplace.net/images/2009/08/datamonitor_shot.png" /&gt;
+&lt;p&gt;If you have nothing sending data to your machine, no worries. If you've installed com0com or a similar virtual port emulator like I explained &lt;a class="reference external" href="https://eli.thegreenplace.net/2009/07/30/setting-up-python-to-work-with-the-serial-port/"&gt;here&lt;/a&gt;, configure it to connect two ports together.&lt;/p&gt;
+&lt;p&gt;Then, download sender_sim.py which is a very simple data-sending script (the data it provides is a pleasant pseudo-randomized sinusoid). You may want to change the port name hard-coded in it, if your port numbers are different.&lt;/p&gt;
+&lt;p&gt;When both this sender and the monitor run on the same machine,  you'll be able to see the live plotting. Note that I've added a couple of extra features from PyQwt:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;A &amp;quot;thermo&amp;quot; bar that shows the average temperature&lt;/li&gt;
+&lt;li&gt;A knob that sets how often the monitor updates the screen&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;These widgets, and a few others, make PyQwt quite a nice library for emulating Labview-type &amp;quot;lab control&amp;quot; applications in Python. I recommend it highly.&lt;/p&gt;
+&lt;div class="section" id="how-does-it-work"&gt;
+&lt;h3&gt;How does it work&lt;/h3&gt;
+&lt;p&gt;The monitor is a toy demo, but it's based on a few powerful tools I use for real applications. For example, the serial communication itself is performed in a separate thread (in the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;com_monitor&lt;/span&gt;&lt;/tt&gt; module). The thread issues blocking reads on the serial port in a loop, and communicates the data to the GUI via a &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;Queue&lt;/span&gt;&lt;/tt&gt; (together with an accurate timestamp for every data chunk received). This is a robust and safe implementation that can be used for many kinds of GUI-based monitoring applications.&lt;/p&gt;
+&lt;p&gt;The GUI itself is updated using a periodic timer (&lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;QTimer&lt;/span&gt;&lt;/tt&gt;) that runs whenever the monitor is running. The timer event handler checks whether new data has arrived from the monitor and updates the display widgets accordingly.&lt;/p&gt;
+&lt;p&gt;The rest of the code is your usual PyQt bureaucracy - creating the menu, the status bar, the GUI widgets, laying everything out nicely and connecting events.&lt;/p&gt;
+&lt;p&gt;I hope people will find this code useful. If you have trouble running it or understanding how it works, let me know. I recommend using the latest Python 2.6 versions of all the required modules. I checked it only on Windows, but there's no reason whatsoever for it not to run on other OSes out of the box.&lt;/p&gt;
+&lt;/div&gt;
+
+    </content><category term="misc"></category><category term="Python"></category><category term="Serial port"></category></entry><entry><title>Listing all serial ports on Windows with Python</title><link href="https://eli.thegreenplace.net/2009/07/31/listing-all-serial-ports-on-windows-with-python" rel="alternate"></link><published>2009-07-31T07:41:00-07:00</published><updated>2024-05-04T19:46:23-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2009-07-31:/2009/07/31/listing-all-serial-ports-on-windows-with-python</id><summary type="html">
+        &lt;div class="section" id="blob"&gt;
+&lt;p&gt;There are several methods for getting a list of all serial (COM) ports on a Windows machine. Here I want to focus on one that seems to work very well on the computers I tried, and incidentally it's also the simplest to implement.&lt;/p&gt;
+&lt;div class="section" id="digging-into-the-registry"&gt;
+&lt;h4&gt;Digging into the registry&lt;/h4&gt;
+&lt;p&gt;The list of …&lt;/p&gt;&lt;/div&gt;&lt;/div&gt;</summary><content type="html">
+        &lt;div class="section" id="blob"&gt;
+&lt;p&gt;There are several methods for getting a list of all serial (COM) ports on a Windows machine. Here I want to focus on one that seems to work very well on the computers I tried, and incidentally it's also the simplest to implement.&lt;/p&gt;
+&lt;div class="section" id="digging-into-the-registry"&gt;
+&lt;h4&gt;Digging into the registry&lt;/h4&gt;
+&lt;p&gt;The list of serial ports on the machine appears under the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;HARDWARE\\DEVICEMAP\\SERIALCOMM&lt;/span&gt;&lt;/tt&gt; key in the Windows registry. You can use the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;regedit&lt;/span&gt;&lt;/tt&gt; tool to reach this key and make sure the serial ports defined on your machine are there (including the &lt;a class="reference external" href="https://eli.thegreenplace.net/2009/07/30/setting-up-python-to-work-with-the-serial-port/"&gt;virtual ports&lt;/a&gt; created with com0com or another emulator).&lt;/p&gt;
+&lt;p&gt;Reading the registry in Python is very simple using the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;_winreg&lt;/span&gt;&lt;/tt&gt; module:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; &lt;span style="color: #00007f"&gt;_winreg&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;as&lt;/span&gt; &lt;span style="color: #00007f"&gt;winreg&lt;/span&gt;
+&lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; &lt;span style="color: #00007f"&gt;itertools&lt;/span&gt;
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;enumerate_serial_ports&lt;/span&gt;():
+    &lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot; Uses the Win32 registry to return an&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        iterator of serial (COM) ports&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        existing on this computer.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;    &amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+    path = &lt;span style="color: #7f007f"&gt;&amp;#39;HARDWARE\\DEVICEMAP\\SERIALCOMM&amp;#39;&lt;/span&gt;
+    &lt;span style="color: #00007f; font-weight: bold"&gt;try&lt;/span&gt;:
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path)
+    &lt;span style="color: #00007f; font-weight: bold"&gt;except&lt;/span&gt; WindowsError:
+        &lt;span style="color: #00007f; font-weight: bold"&gt;raise&lt;/span&gt; IterationError
+
+    &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; i &lt;span style="color: #0000aa"&gt;in&lt;/span&gt; itertools.count():
+        &lt;span style="color: #00007f; font-weight: bold"&gt;try&lt;/span&gt;:
+            val = winreg.EnumValue(key, i)
+            &lt;span style="color: #00007f; font-weight: bold"&gt;yield&lt;/span&gt; &lt;span style="color: #00007f"&gt;str&lt;/span&gt;(val[&lt;span style="color: #007f7f"&gt;1&lt;/span&gt;])
+        &lt;span style="color: #00007f; font-weight: bold"&gt;except&lt;/span&gt; EnvironmentError:
+            &lt;span style="color: #00007f; font-weight: bold"&gt;break&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;There are other methods for listing the serial ports, but for the time being I'll stick to this one.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="port-names"&gt;
+&lt;h4&gt;Port names&lt;/h4&gt;
+&lt;p&gt;As I've mentioned in the &lt;a class="reference external" href="https://eli.thegreenplace.net/2009/07/30/setting-up-python-to-work-with-the-serial-port/"&gt;last post&lt;/a&gt;, Windows requires some port names to appear in a &amp;quot;full&amp;quot; form prepended by several special characters. AFAIK these are all the ports except &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;COM[1..9]&lt;/span&gt;&lt;/tt&gt;. Here's a simple function for generating a &amp;quot;full name&amp;quot; suitable for passing to PySerial:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; &lt;span style="color: #00007f"&gt;re&lt;/span&gt;
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;full_port_name&lt;/span&gt;(portname):
+    &lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot; Given a port-name (of the form COM7,&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        COM12, CNCA0, etc.) returns a full&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        name suitable for opening with the&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        Serial class.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;    &amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+    m = re.match(&lt;span style="color: #7f007f"&gt;&amp;#39;^COM(\d+)$&amp;#39;&lt;/span&gt;, portname)
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; m &lt;span style="color: #0000aa"&gt;and&lt;/span&gt; &lt;span style="color: #00007f"&gt;int&lt;/span&gt;(m.group(&lt;span style="color: #007f7f"&gt;1&lt;/span&gt;)) &amp;lt; &lt;span style="color: #007f7f"&gt;10&lt;/span&gt;:
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; portname
+    &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #7f007f"&gt;&amp;#39;\\\\.\\&amp;#39;&lt;/span&gt; + portname
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;While the &amp;quot;simple&amp;quot; name returned by &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;enumerate_serial_ports&lt;/span&gt;&lt;/tt&gt; is readable and suitable for display to the user, only the full name can be passed to &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;serial.Serial&lt;/span&gt;&lt;/tt&gt; for opening the port.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="a-simple-gui-for-listing-the-ports"&gt;
+&lt;h4&gt;A simple GUI for listing the ports&lt;/h4&gt;
+&lt;p&gt;Finally, I've coded a simple PyQt based GUI for listing the available ports and allowing the user to try and open them (even if the port appears as available on a computer, it may be in use by another program - so opening it will fail).&lt;/p&gt;
+&lt;img src="https://eli.thegreenplace.net/images/2009/07/listserialports.png" /&gt;
+&lt;p&gt;Here's the code. It assumes that the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;enumerate_serial_ports&lt;/span&gt;&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;full_port_name&lt;/span&gt;&lt;/tt&gt; functions were placed in a module called &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;serialutils&lt;/span&gt;&lt;/tt&gt; somewhere on the Python path.&lt;/p&gt;
+&lt;p&gt;Also, note how the simple port names from &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;enumerate_serial_ports&lt;/span&gt;&lt;/tt&gt; are shown in the list widget, and when trying to actually open the port, the program converts them into full names &amp;quot;under the hood&amp;quot;. This is a common practice in serial-port programming.&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;Lists the serial ports available on the&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;(Windows) computer.&lt;/span&gt;
+
+&lt;span style="color: #7f007f"&gt;Eli Bendersky (eliben@gmail.com)&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;License: this code is in the public domain&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+&lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; &lt;span style="color: #00007f"&gt;sys&lt;/span&gt;
+&lt;span style="color: #00007f; font-weight: bold"&gt;from&lt;/span&gt; &lt;span style="color: #00007f"&gt;PyQt4.QtCore&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; *
+&lt;span style="color: #00007f; font-weight: bold"&gt;from&lt;/span&gt; &lt;span style="color: #00007f"&gt;PyQt4.QtGui&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; *
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; &lt;span style="color: #00007f"&gt;serial&lt;/span&gt;
+&lt;span style="color: #00007f; font-weight: bold"&gt;from&lt;/span&gt; &lt;span style="color: #00007f"&gt;serial.serialutil&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; SerialException
+&lt;span style="color: #00007f; font-weight: bold"&gt;from&lt;/span&gt; &lt;span style="color: #00007f"&gt;serialutils&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; full_port_name, enumerate_serial_ports
+
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;class&lt;/span&gt; &lt;span style="color: #00007f"&gt;ListPortsDialog&lt;/span&gt;(QDialog):
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;__init__&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;, parent=&lt;span style="color: #00007f"&gt;None&lt;/span&gt;):
+        &lt;span style="color: #00007f"&gt;super&lt;/span&gt;(ListPortsDialog, &lt;span style="color: #00007f"&gt;self&lt;/span&gt;).__init__(parent)
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.setWindowTitle(&lt;span style="color: #7f007f"&gt;&amp;#39;List of serial ports&amp;#39;&lt;/span&gt;)
+
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.ports_list = QListWidget()
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.tryopen_button = QPushButton(&lt;span style="color: #7f007f"&gt;&amp;#39;Try to open&amp;#39;&lt;/span&gt;)
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.connect(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;.tryopen_button, SIGNAL(&lt;span style="color: #7f007f"&gt;&amp;#39;clicked()&amp;#39;&lt;/span&gt;),
+            &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.on_tryopen)
+
+        layout = QVBoxLayout()
+        layout.addWidget(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;.ports_list)
+        layout.addWidget(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;.tryopen_button)
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.setLayout(layout)
+
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.fill_ports_list()
+
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;on_tryopen&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;):
+        cur_item = &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.ports_list.currentItem()
+        &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; cur_item &lt;span style="color: #0000aa"&gt;is&lt;/span&gt; &lt;span style="color: #0000aa"&gt;not&lt;/span&gt; &lt;span style="color: #00007f"&gt;None&lt;/span&gt;:
+            fullname = full_port_name(&lt;span style="color: #00007f"&gt;str&lt;/span&gt;(cur_item.text()))
+            &lt;span style="color: #00007f; font-weight: bold"&gt;try&lt;/span&gt;:
+                ser = serial.Serial(fullname, &lt;span style="color: #007f7f"&gt;38400&lt;/span&gt;)
+                ser.close()
+                QMessageBox.information(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;, &lt;span style="color: #7f007f"&gt;&amp;#39;Success&amp;#39;&lt;/span&gt;,
+                    &lt;span style="color: #7f007f"&gt;&amp;#39;Opened %s successfully&amp;#39;&lt;/span&gt; % cur_item.text())
+            &lt;span style="color: #00007f; font-weight: bold"&gt;except&lt;/span&gt; SerialException, e:
+                QMessageBox.critical(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;, &lt;span style="color: #7f007f"&gt;&amp;#39;Failure&amp;#39;&lt;/span&gt;,
+                    &lt;span style="color: #7f007f"&gt;&amp;#39;Failed to open %s:\n%s&amp;#39;&lt;/span&gt; % (
+                        cur_item.text(), e))
+
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;fill_ports_list&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;):
+        &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; portname &lt;span style="color: #0000aa"&gt;in&lt;/span&gt; enumerate_serial_ports():
+            &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.ports_list.addItem(portname)
+
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; __name__ == &lt;span style="color: #7f007f"&gt;&amp;quot;__main__&amp;quot;&lt;/span&gt;:
+    app = QApplication(sys.argv)
+    form = ListPortsDialog()
+    form.show()
+    app.exec_()
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;This runs with ActivePython 2.5.2, PyQt 4.4.3, and the latest PySerial.&lt;/p&gt;
+&lt;p&gt;Some utility code for this post can be found in &lt;a href="https://github.com/eliben/code-for-blog/tree/main/2009/eblib"&gt;this
+directory.&lt;/a&gt;&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+    </content><category term="misc"></category><category term="Python"></category><category term="Serial port"></category></entry><entry><title>Setting up Python to work with the serial port</title><link href="https://eli.thegreenplace.net/2009/07/30/setting-up-python-to-work-with-the-serial-port" rel="alternate"></link><published>2009-07-30T07:21:59-07:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2009-07-30:/2009/07/30/setting-up-python-to-work-with-the-serial-port</id><summary type="html">
+        &lt;div class="section" id="bla"&gt;
+&lt;p&gt;The serial port (a.k.a. COM-port, or RS232) is slowly disappearing from desktop and laptop computers, but it's still a very important tool for embedded engineers and people controlling equipment in general. The reason for this is that the serial port is very simple to set-up and use both …&lt;/p&gt;&lt;/div&gt;</summary><content type="html">
+        &lt;div class="section" id="bla"&gt;
+&lt;p&gt;The serial port (a.k.a. COM-port, or RS232) is slowly disappearing from desktop and laptop computers, but it's still a very important tool for embedded engineers and people controlling equipment in general. The reason for this is that the serial port is very simple to set-up and use both from embedded software code (the vast majority of MCUs and controllers have UART ports) and from a PC.&lt;/p&gt;
+&lt;p&gt;A few years ago I've written several posts about working with the serial port using Perl and C++ on a Windows PC.&lt;/p&gt;
+&lt;p&gt;Since last year, having moved to Python, I've been happily employing the excellent &lt;a class="reference external" href="http://pyserial.sourceforge.net/"&gt;PySerial&lt;/a&gt; module to do this. I want to write a couple of posts on combining PySerial with GUIs and dynamic charts, but first I'll have to explain how to set it up.&lt;/p&gt;
+&lt;div class="section" id="installing-a-com-port-emulator"&gt;
+&lt;h4&gt;Installing a COM-port emulator&lt;/h4&gt;
+&lt;p&gt;As I've mentioned, it's hard to come by a PC with real COM ports these days. Although there are many &lt;a class="reference external" href="http://www.usbserial.com/"&gt;USB to RS-232&lt;/a&gt; adapters on the market, the simplest thing to do if all you have is a single computer is installing an emulator. One that I recommend is called &lt;a class="reference external" href="http://com0com.sourceforge.net/"&gt;com0com&lt;/a&gt;. It is simple to install and works pretty well.&lt;/p&gt;
+&lt;p&gt;So, download com0com and follow the installation instructions carefully to create two virtual COM ports which are connected to each other. For me com0com created ports named CNCA0 and CNCB0 - in future versions the names may be different, but it really doesn't matter.&lt;/p&gt;
+&lt;p&gt;Make sure to read the Q&amp;amp;A section in the README file of com0com. For instance, I had turned on buffer overrun emulation because I didn't want the sender to hang when no receiver is connected at the paired port.&lt;/p&gt;
+&lt;p&gt;At this stage if you're familiar with HyperTerminal, you can check that the ports are indeed working and connected to each other &lt;a class="footnote-reference" href="#id6" id="id1"&gt;[1]&lt;/a&gt;.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="installing-pyserial"&gt;
+&lt;h4&gt;Installing PySerial&lt;/h4&gt;
+&lt;p&gt;Installing &lt;a class="reference external" href="http://pyserial.sourceforge.net/"&gt;PySerial&lt;/a&gt; is very easy either by using &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;easy_install&lt;/span&gt;&lt;/tt&gt; or by downloading the source package and installing it with &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;python&lt;/span&gt; &lt;span class="pre"&gt;setup.py&lt;/span&gt; &lt;span class="pre"&gt;install&lt;/span&gt;&lt;/tt&gt;. &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;PySerial&lt;/span&gt;&lt;/tt&gt; doesn't require compilation on Windows.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="a-simple-sender"&gt;
+&lt;h4&gt;A simple sender&lt;/h4&gt;
+&lt;p&gt;Here's a simple sender script that opens a port, sends the string &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;hello&lt;/span&gt;&lt;/tt&gt;, and closes it:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; &lt;span style="color: #00007f"&gt;serial&lt;/span&gt;
+
+port = &lt;span style="color: #7f007f"&gt;&amp;quot;\\\\.\\CNCB0&amp;quot;&lt;/span&gt;
+ser = serial.Serial(port, &lt;span style="color: #007f7f"&gt;38400&lt;/span&gt;)
+x = ser.write(&lt;span style="color: #7f007f"&gt;&amp;#39;hello&amp;#39;&lt;/span&gt;)
+ser.close()
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Note the port name. At least on Windows, when the serial port name is not one of &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;COM[1..9]&lt;/span&gt;&lt;/tt&gt;, you'll have to use this funny quoting to make it work &lt;a class="footnote-reference" href="#id7" id="id3"&gt;[2]&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;This sender can be tested by either opening HyperTerminal on port CNCA0 prior to running it (but make sure to set up the baudrate to 38400, parity to None, stop bits to 1 and hardware control to None) &lt;a class="footnote-reference" href="#id8" id="id4"&gt;[3]&lt;/a&gt;.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="a-non-blocking-receiver"&gt;
+&lt;h4&gt;A non-blocking receiver&lt;/h4&gt;
+&lt;p&gt;The beauty of PySerial is that it allows non-blocking reads from the serial port in a very simple way &lt;a class="footnote-reference" href="#id9" id="id5"&gt;[4]&lt;/a&gt;. The following is a simple non-blocking receiver that listens on a port and prints out received data:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; &lt;span style="color: #00007f"&gt;serial&lt;/span&gt;
+&lt;span style="color: #00007f; font-weight: bold"&gt;from&lt;/span&gt; &lt;span style="color: #00007f"&gt;time&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; sleep
+
+port = &lt;span style="color: #7f007f"&gt;&amp;quot;\\\\.\\CNCA0&amp;quot;&lt;/span&gt;
+ser = serial.Serial(port, &lt;span style="color: #007f7f"&gt;38400&lt;/span&gt;, timeout=&lt;span style="color: #007f7f"&gt;0&lt;/span&gt;)
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;while&lt;/span&gt; &lt;span style="color: #00007f"&gt;True&lt;/span&gt;:
+    data = ser.read(&lt;span style="color: #007f7f"&gt;9999&lt;/span&gt;)
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; &lt;span style="color: #00007f"&gt;len&lt;/span&gt;(data) &amp;gt; &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;:
+        &lt;span style="color: #00007f; font-weight: bold"&gt;print&lt;/span&gt; &lt;span style="color: #7f007f"&gt;&amp;#39;Got:&amp;#39;&lt;/span&gt;, data
+
+    sleep(&lt;span style="color: #007f7f"&gt;0.5&lt;/span&gt;)
+    &lt;span style="color: #00007f; font-weight: bold"&gt;print&lt;/span&gt; &lt;span style="color: #7f007f"&gt;&amp;#39;not blocked&amp;#39;&lt;/span&gt;
+
+ser.close()
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;What this does is basically sleep for half a second, and then check if new data has arrived on the serial port. If it has (the length of received data is not 0), the data is printed out. During the loop the receiver keeps printing &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;not&lt;/span&gt; &lt;span class="pre"&gt;blocked&lt;/span&gt;&lt;/tt&gt; to demonstrate that the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;serial.read&lt;/span&gt;&lt;/tt&gt; call isn't blocking.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="closing-the-loop"&gt;
+&lt;h4&gt;Closing the loop&lt;/h4&gt;
+&lt;p&gt;Make sure HyperTerminal is not running. Run the receiver, and then in a separate window run the sender. You'll get something like the following output:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;not blocked
+not blocked
+not blocked
+not blocked
+Got: hello
+not blocked
+not blocked
+not blocked
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The amount of &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;not&lt;/span&gt; &lt;span class="pre"&gt;blocked&lt;/span&gt;&lt;/tt&gt; messages depends on how long the receiver ran before and after you ran the sender.&lt;/p&gt;
+&lt;img src="https://eli.thegreenplace.net/images/hline.jpg" /&gt;
+&lt;table class="docutils footnote" frame="void" id="id6" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;It's worthwhile to learn how to use HyperTerminal if you're working with serial ports. HT is a convenient tool for &amp;quot;sanity checking&amp;quot; of your computer's ports and the programs you develop to communicate.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id7" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id3"&gt;[2]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;Note that half of the backslashes are there to quote other backslashes. Using Python's raw strings it's definitely possible to write the port name as &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;r&amp;quot;\\.\CNCB0&amp;quot;&lt;/span&gt;&lt;/tt&gt;, but I'm keeping the longer syntax for compatibility with standard notation and C code.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id8" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id4"&gt;[3]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;I'm not just pulling these out of a sleeve. These settings are the defaults of PySerial.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id9" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id5"&gt;[4]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;Non-blocking reads are very important in interactive applications - you surely don't want to hang your GUI until a new piece of data arrives on the serial port.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+
+    </content><category term="misc"></category><category term="Python"></category><category term="Serial port"></category></entry><entry><title>null-modem, physical and virtual COM ports</title><link href="https://eli.thegreenplace.net/2006/11/18/null-modem-physical-and-virtual-com-ports" rel="alternate"></link><published>2006-11-18T11:41:17-08:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2006-11-18:/2006/11/18/null-modem-physical-and-virtual-com-ports</id><summary type="html">
+        When we connect two devices (say a PC and some embedded board, or two PCs) with a serial cable (RS232) we use a female female cross-cable. Apparently this is called a "null modem" connection - and if one doesn't have a cross-cable, one can use a special null modem adapter. &lt;a href="http://en.wikipedia.org/wiki/Null_modem"&gt;This …&lt;/a&gt;</summary><content type="html">
+        When we connect two devices (say a PC and some embedded board, or two PCs) with a serial cable (RS232) we use a female female cross-cable. Apparently this is called a "null modem" connection - and if one doesn't have a cross-cable, one can use a special null modem adapter. &lt;a href="http://en.wikipedia.org/wiki/Null_modem"&gt;This wikipedia article&lt;/a&gt; provides a nice overview of the subject.
+
+If you just want to hack on some serial port code on your computer without actually connecting anything, there are also virtual null modem drivers that emulate serial ports on the PC and can "connect them together". For instance, such a driver can be used to create two new ports, say COM13 and COM14 and "connect them". Then, to applications it seems that ports COM13 and COM14 really exist on the computer, and if one application sends something to COM13 then the application listening at COM14 will receive it, and vice versa.
+
+A couple of free programs to allow this are: &lt;a href="http://developer.berlios.de/projects/n8vbvcomdriver/"&gt;N8VB vCOM&lt;/a&gt; and &lt;a href="http://sourceforge.net/projects/com0com"&gt;com0com&lt;/a&gt;.
+    </content><category term="misc"></category><category term="Hardware &amp; Gadgets"></category><category term="Programming"></category><category term="Serial port"></category></entry><entry><title>once again: perl, serial ports and what's between them</title><link href="https://eli.thegreenplace.net/2006/02/13/once-again-perl-serial-ports-and-whats-between-them" rel="alternate"></link><published>2006-02-13T22:06:00-08:00</published><updated>2024-05-04T19:46:23-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2006-02-13:/2006/02/13/once-again-perl-serial-ports-and-whats-between-them</id><summary type="html">
+        &lt;p&gt;As I wrote before, I managed to avoid using the Win32::SerialPort module for sending data to the serial port (COM) by employing a C++ slave program that listens to a socket and transmits whatever it gets to the serial port.&lt;/p&gt;
+&lt;p&gt;Today, I finally perfected this scheme. Now my C …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;As I wrote before, I managed to avoid using the Win32::SerialPort module for sending data to the serial port (COM) by employing a C++ slave program that listens to a socket and transmits whatever it gets to the serial port.&lt;/p&gt;
+&lt;p&gt;Today, I finally perfected this scheme. Now my C++ program (104 Kb !) is a full-duplex serial port &amp;lt;-&amp;gt; socket bridge. It is created by the Perl 'master' script and starts listening to the socket and to the serial port. When it gets something from the socket (sent by the Perl script) it transmits it to the serial port. When it gets something from the serial port, it sends it to the Perl script using the socket.&lt;/p&gt;
+&lt;p&gt;The Perl script can now either send serial data by shoving it into the socket or query it, in a convenient non-blocking way (thank you ioctl(), see &lt;a href="http://www.perlmonks.org/?node_id=529812" rel="nofollow"&gt;this&lt;/a&gt;), to see if anything new has arrived.&lt;/p&gt;
+&lt;p&gt;The C++ bridge works in two threads. One waits (using recv()) on the socket to get data from the master and transmit it to the serial port. The other waits on the serial port and transmits what it gets into the socket.&lt;/p&gt;
+&lt;p&gt;For now I'm actually doing this using two sockets, one for each way (master -&amp;gt; slave and slave -&amp;gt; master). In theory this is doable with a single bi-directional socket, though I may leave it as it is to allow future flexibility.
+&lt;/p&gt;
+
+Update (05.03.2008): I've released this publicly.
+Here's a &lt;a href="https://github.com/eliben/code-for-blog/tree/main/2005/perl_serial_comm"&gt;direct ink&lt;/a&gt;.
+ 
+    </content><category term="misc"></category><category term="EE &amp; Embedded"></category><category term="Perl"></category><category term="Serial port"></category></entry><entry><title>perl master, C++ slave, bound for serial port programming</title><link href="https://eli.thegreenplace.net/2005/12/04/perl-master-c-slave-bound-for-serial-port-programming" rel="alternate"></link><published>2005-12-04T22:07:00-08:00</published><updated>2024-05-04T19:46:23-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2005-12-04:/2005/12/04/perl-master-c-slave-bound-for-serial-port-programming</id><summary type="html">
+        &lt;p&gt;&lt;b&gt;Introduction&lt;/b&gt;&lt;/p&gt;
+&lt;p&gt;I wrote about this topic *SO* much before, but hey, I work with this a lot. Using the PC's serial (COM) port is very useful when working with embedded hardware &amp; software. It's an excellent way to control the hardware from the PC, to gather and plot data, and to …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;&lt;b&gt;Introduction&lt;/b&gt;&lt;/p&gt;
+&lt;p&gt;I wrote about this topic *SO* much before, but hey, I work with this a lot. Using the PC's serial (COM) port is very useful when working with embedded hardware &amp; software. It's an excellent way to control the hardware from the PC, to gather and plot data, and to generally impress your EE co-workers who don't always have an intuitive understanding of how I turn relays on and off using "this Perl program".&lt;/p&gt;
+&lt;p&gt;One of my best creations in this area is a light-weight but powerful serial port monitor (that can monitor and log time-tagged data from several ports simultaneously), written in C++, following a prototype I wrote in Perl.&lt;/p&gt;
+&lt;p&gt;But receiving data is not always enough. It's great to be able to plot all my A2D samples from the FPGA in an Excel chart, but the other direction is also important - sending data from the PC to the custom hardware.&lt;/p&gt;
+&lt;p&gt;For that, on my PC I employ a nice Perl script which uses Win32::SerialPort. But since that module is difficult to install on other PC's, I came up with a solution
+to run scripts in a "hosted environment" created with PAR.&lt;/p&gt;
+&lt;p&gt;However, this method is also not completely satisfactory &amp; flexible enough. Moreover, the PARed executable is a heavy 3 MB which is really inconvenient in some cases.&lt;/p&gt;
+&lt;p&gt;&lt;b&gt;Solution&lt;/b&gt;&lt;/p&gt;
+&lt;p&gt;As I mentioned before, the awful Win32::SerialPort module makes it very difficult to work with serial ports in Perl. Until I find the time to write something better, I have real problems to solve at work, so I must pick the best tool for the job. And for this job, the best tool is C++, using the excellent CSerial library which is readily available on the web (LGPL).&lt;/p&gt;
+&lt;p&gt;On the other hand, general data munging is much nicer with Perl and complex binary data is especially easily managed with pack &amp; unpack. Besides, Perl scripts are easier to change and need no compilation, thus making them generally more convenient to use for "quick tries", which is very important.&lt;/p&gt;
+&lt;p&gt;So today I finally decided to merge the good from the two worlds - C++'s ability to gracefully handle serial port communications, and Perl's general usability and productivity. The result is a very nice hack, which at its base is very simple.&lt;/p&gt;
+&lt;p&gt;&lt;b&gt;The slave&lt;/b&gt;&lt;/p&gt;
+&lt;p&gt;The slave is a small C++ program that starts, receives the serial port's information (name, baudrate, parity, etc.) from the command line, dutifully opens a socket on port 14441 of the localhost (ip 127.0.0.1), using Win32's WinSock library, sends a notification that it's ready to receive data and waits. When it gets a data buffer, it transmits it to the serial port it's tied to.&lt;/p&gt;
+&lt;p&gt;&lt;b&gt;The master&lt;/b&gt;&lt;/p&gt;
+&lt;p&gt;The master is a Perl script that runs the slave as a child process (using Win32::Process), and listens on port 14441 (using IO::Socket::INET), waiting for the slave to connect. When the slave connects and says it's ready, the master sends it a buffer of data to transmit to the serial port.&lt;/p&gt;
+&lt;p&gt;&lt;b&gt;Conclusion&lt;/b&gt;&lt;/p&gt;
+&lt;p&gt;A happy couple - a 90 Kb executable (slave) + the master script now do anything the more bulky PARed script did, and with much area for future improvement and flexibility (because the C++ CSerial class is so nice to work with). It a good experience of mixing many things together (serial communications, processes, sockets), and I learned once again that sockets are a great IPC technique, even when no more than the local host is needed. But the main conclusion for today is:&lt;/p&gt;
+&lt;p&gt;Use the right tool for the job !
+&lt;/p&gt;
+
+&lt;strong&gt;Update:&lt;/strong&gt; I've finally packed the code of what I'm describing here for distribution. &lt;a href="https://github.com/eliben/code-for-blog/tree/main/2005/perl_serial_comm"&gt;Here it is&lt;/a&gt;.
+    </content><category term="misc"></category><category term="C &amp; C++"></category><category term="EE &amp; Embedded"></category><category term="Perl"></category><category term="Serial port"></category></entry></feed>

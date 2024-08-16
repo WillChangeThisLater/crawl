@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Design patterns in Go's database/sql package - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Design patterns in Go's database/sql package">
+                        Design patterns in Go's database/sql package
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> March 27, 2019 at 06:25</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/databases.html">Databases</a>
+        ,
+    <a href="../../tag/plugins.html">Plugins</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>Using SQL databases from Go is easy, in three steps:</p>
+<div class="highlight"><pre><span></span><span class="c1">// Step 1: import the main SQL package</span><span class="w"></span>
+<span class="kn">import</span><span class="w"> </span><span class="s">&quot;database/sql&quot;</span><span class="w"></span>
+
+<span class="c1">// Step 2: import a driver package to use a specific SQL database</span><span class="w"></span>
+<span class="kn">import</span><span class="w"> </span><span class="nx">_</span><span class="w"> </span><span class="s">&quot;github.com/mattn/go-sqlite3&quot;</span><span class="w"></span>
+
+<span class="c1">// Step 3: open a database using a registered driver name</span><span class="w"></span>
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// ...</span><span class="w"></span>
+<span class="w">  </span><span class="nx">db</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">sql</span><span class="p">.</span><span class="nx">Open</span><span class="p">(</span><span class="s">&quot;sqlite3&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;database.db&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// ...</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>From this point on, the <tt class="docutils literal">db</tt> object can be used to query and modify the
+database, with the same code suitable for all the supported SQL databases. If we
+want to change our database from SQLite to PostgreSQL, it's very likely that we
+only need to import a different driver and provide a different name in the call
+to <tt class="docutils literal">sql.Open</tt> <a class="footnote-reference" href="index.html#sql1" id="footnote-reference-1">[1]</a>.</p>
+<p>In this post I want to briefly examine some of the design patterns and
+architecture behind <tt class="docutils literal">database/sql</tt> that makes this all possible.</p>
+<div class="section" id="the-main-design-pattern">
+<h2>The main design pattern</h2>
+<p>The architecture of <tt class="docutils literal">database/sql</tt> is governed by one overarching design
+pattern. I was trying to figure out which of the classical design patterns it
+resembles most, and the <a class="reference external" href="https://en.wikipedia.org/wiki/Strategy_pattern">Strategy Pattern</a> seems the closest, though
+it's not quite that. Let me know if you can think of a closer correspondence
+<a class="footnote-reference" href="index.html#sql2" id="footnote-reference-2">[2]</a>.</p>
+<p>It goes like this: we have a common interface we want to present to users,
+with an implementation that's specific to every DB backend. Obviously, this
+sounds like a classic interface + implementation, which Go is particularly good
+at with its robust support for interfaces.</p>
+<p>So the first idea would be: create some <tt class="docutils literal">DB</tt> interface which the user
+interacts with, and each backend implements this interface. Sounds simple,
+right?</p>
+<p>Sure, but there are some issues with this approach. Remember that Go recommends
+interfaces to be small, with just a handful of methods to implement. Here we'd
+need a much larger <tt class="docutils literal">DB</tt> interface, and this leads to problems:</p>
+<ol class="arabic simple">
+<li>Adding user-facing capabilities is difficult because they may require
+adding methods to the interface. This breaks all the interface
+implementations and requires multiple standalone projects to update their
+code.</li>
+<li>Encapsulating functionality that is common to all database backends is
+difficult, because there is no natural place to add it if the user interacts
+directly with the <tt class="docutils literal">DB</tt> interface. It has to be implemented separately for
+each backend, which is wasteful and logistically complicated.</li>
+<li>If backends want to add optional capabilities, this is challenging with
+a single interface without resorting to type-casts for specific backends.</li>
+</ol>
+<p>Therefore, a better idea seems to be: split up the user-facing type and
+functionality from the common backend interface. Graphically, it looks like
+this:</p>
+<img alt="SQL DB and driver interface diagram" class="align-center" src="../../images/2019/database_sql_diagram.png" />
+<p><tt class="docutils literal">DB</tt> is a user-facing type. It's not an interface, but a <em>concrete</em> type (a
+struct) implemented in <tt class="docutils literal">database/sql</tt> itself. It is backend-independent and
+encapsulates a lot of functionality that is common to all backends, like
+<a class="reference external" href="https://en.wikipedia.org/wiki/Connection_pool">connection pooling</a>.</p>
+<p>To do backend-specific work (such as issue SQL queries to the actual database),
+<tt class="docutils literal">DB</tt> uses an interface called <tt class="docutils literal">database/sql/driver.Driver</tt> (and several
+other interfaces that define connections, transactions, etc). This interface
+is lower-level, and it's implemented by each database backend. In the diagram
+above we can see implementations from the <tt class="docutils literal">pq</tt> package (for PostreSQL)
+and from the <tt class="docutils literal">sqlite3</tt> package.</p>
+<p>This approach helps <tt class="docutils literal">database/sql</tt> elegantly address the problems mentioned
+earlier:</p>
+<ol class="arabic simple">
+<li>Adding user-facing capabilities doesn't necessarily require an interface
+change now, as long as the capability can be implemented in the
+backend-independent layer (<tt class="docutils literal">DB</tt> and its sister types).</li>
+<li>Functionality that's common to all database backends now has a natural place
+to be in. I've mentioned connection pooling, but there is a lot of other
+stuff the backend-independent types in <tt class="docutils literal">database/sql</tt> add on top of the
+backend-specific implementations. Another example: handling retries for bad
+connection to the database server.</li>
+<li>If backends add optional capabilities, these can be selectively utilized in
+the backend-independent layer without exposing them directly to the user.</li>
+</ol>
+</div>
+<div class="section" id="registering-drivers">
+<h2>Registering drivers</h2>
+<p>Another interesting aspect of the design of <tt class="docutils literal">database/sql</tt> is how database
+drivers register themselves with the main package. It's a nice example of
+implementing <em>compile-time plugins</em> in Go.</p>
+<p>As the code sample at the top of this post shows, <tt class="docutils literal">database/sql</tt> knows about
+the imported drivers' names, and can open them by name with <tt class="docutils literal">sql.Open</tt>. How
+does that work?</p>
+<p>The trick is in the blank import:</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nx">_</span><span class="w"> </span><span class="s">&quot;github.com/mattn/go-sqlite3&quot;</span><span class="w"></span>
+</pre></div>
+<p>While it doesn't actually import any names from the package, it does invoke its
+<tt class="docutils literal">init</tt> function, which in case of <tt class="docutils literal">sqlite3</tt> is:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">init</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">sql</span><span class="p">.</span><span class="nx">Register</span><span class="p">(</span><span class="s">&quot;sqlite3&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">SQLiteDriver</span><span class="p">{})</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>In <tt class="docutils literal">sql.go</tt>, <tt class="docutils literal">Register</tt> adds a mapping from a string name to an
+implementation of the <tt class="docutils literal">driver.Driver</tt> interface; the mapping is in a global
+map:</p>
+<div class="highlight"><pre><span></span><span class="kd">var</span><span class="w"> </span><span class="p">(</span><span class="w"></span>
+<span class="w">    </span><span class="nx">driversMu</span><span class="w"> </span><span class="nx">sync</span><span class="p">.</span><span class="nx">RWMutex</span><span class="w"></span>
+<span class="w">    </span><span class="nx">drivers</span><span class="w">   </span><span class="p">=</span><span class="w"> </span><span class="nb">make</span><span class="p">(</span><span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">]</span><span class="nx">driver</span><span class="p">.</span><span class="nx">Driver</span><span class="p">)</span><span class="w"></span>
+<span class="p">)</span><span class="w"></span>
+
+<span class="c1">// Register makes a database driver available by the provided name.</span><span class="w"></span>
+<span class="c1">// If Register is called twice with the same name or if driver is nil,</span><span class="w"></span>
+<span class="c1">// it panics.</span><span class="w"></span>
+<span class="kd">func</span><span class="w"> </span><span class="nx">Register</span><span class="p">(</span><span class="nx">name</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">driver</span><span class="w"> </span><span class="nx">driver</span><span class="p">.</span><span class="nx">Driver</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">driversMu</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="nx">driversMu</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">driver</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nb">panic</span><span class="p">(</span><span class="s">&quot;sql: Register driver is nil&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">dup</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">drivers</span><span class="p">[</span><span class="nx">name</span><span class="p">];</span><span class="w"> </span><span class="nx">dup</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nb">panic</span><span class="p">(</span><span class="s">&quot;sql: Register called twice for driver &quot;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">name</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">drivers</span><span class="p">[</span><span class="nx">name</span><span class="p">]</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">driver</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>When <tt class="docutils literal">sql.Open</tt> is called, it looks up the name in the <tt class="docutils literal">drivers</tt> map and can
+then instantiate a <tt class="docutils literal">DB</tt> object with the proper driver implementation attached.
+You can also call the <tt class="docutils literal">sql.Drivers</tt> function at any time to get the names of
+all the registered drivers.</p>
+<p>This approach implements a <em>compile-time</em> plugin, because the <tt class="docutils literal">import</tt>s for
+the included backends happen when the Go code is compiled. The binary has a
+fixed set of database drivers built into it. Go also has support for <em>run-time</em>
+plugins, but that is a topic for a separate post.</p>
+</div>
+<div class="section" id="custom-types-with-the-scanner-interface">
+<h2>Custom types with the <tt class="docutils literal">Scanner</tt> interface</h2>
+<p>Another interesting architectural feature of the <tt class="docutils literal">database/sql</tt> package is
+supporting storage and retrieval of custom types in the database. The
+<tt class="docutils literal">Rows.Scan</tt> method is typically used to read columns from a row. It takes a
+sequence of <tt class="docutils literal">interface{}</tt> to be generic, using a type switch underneath to
+select the right reader depending on the type of an argument.</p>
+<p>For customization, <tt class="docutils literal">Rows.Scan</tt> supports types that implement the
+<tt class="docutils literal">sql.Scanner</tt> interface, and then invokes their <tt class="docutils literal">Scan</tt> method to perform
+the actual data read.</p>
+<p>One built-in example is <tt class="docutils literal">sql.NullString</tt>. If we try to <tt class="docutils literal">Scan</tt> a column into
+a <tt class="docutils literal">string</tt> variable:</p>
+<div class="highlight"><pre><span></span><span class="kd">var</span><span class="w"> </span><span class="nx">id</span><span class="w"> </span><span class="kt">int</span><span class="w"></span>
+<span class="kd">var</span><span class="w"> </span><span class="nx">username</span><span class="w"> </span><span class="kt">string</span><span class="w"></span>
+<span class="nx">err</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">rows</span><span class="p">.</span><span class="nx">Scan</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">username</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>and that column has a <tt class="docutils literal">NULL</tt> value, we'll get an error:</p>
+<div class="highlight"><pre><span></span>sql: Scan error on column index 1, name &quot;username&quot;:
+    unsupported Scan, storing driver.Value type &lt;nil&gt; into type *string
+</pre></div>
+<p>We can avoid this by using a <tt class="docutils literal">sql.NullString</tt> instead:</p>
+<div class="highlight"><pre><span></span><span class="kd">var</span><span class="w"> </span><span class="nx">id</span><span class="w"> </span><span class="kt">int</span><span class="w"></span>
+<span class="kd">var</span><span class="w"> </span><span class="nx">username</span><span class="w"> </span><span class="nx">sql</span><span class="p">.</span><span class="nx">NullString</span><span class="w"></span>
+<span class="nx">err</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">rows</span><span class="p">.</span><span class="nx">Scan</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">username</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>Here <tt class="docutils literal">username</tt> will have its <tt class="docutils literal">Valid</tt> field set to <tt class="docutils literal">false</tt> for a <tt class="docutils literal">NULL</tt>
+column. This works because <tt class="docutils literal">NullString</tt> implements the <tt class="docutils literal">Scanner</tt> interface.</p>
+<p>A more interesting example involves types that are specific to certain database
+backends. For example, while PostgrSQL supports <a class="reference external" href="https://www.postgresql.org/docs/9.1/arrays.html">array types</a>, some other databases (like
+SQLite) do not. So <tt class="docutils literal">database/sql</tt> cannot support array types natively, but
+features like the <tt class="docutils literal">Scanner</tt> interface make it possible for user code to
+interact with such data fairly easily anyway.</p>
+<p>To extend the previous example, suppose our rows also have a list of activities
+(as strings) for each user <a class="footnote-reference" href="index.html#sql3" id="footnote-reference-3">[3]</a>. Then the <tt class="docutils literal">Scan</tt> would go like this:</p>
+<div class="highlight"><pre><span></span><span class="kd">var</span><span class="w"> </span><span class="nx">id</span><span class="w"> </span><span class="kt">int</span><span class="w"></span>
+<span class="kd">var</span><span class="w"> </span><span class="nx">username</span><span class="w"> </span><span class="nx">sql</span><span class="p">.</span><span class="nx">NullString</span><span class="w"></span>
+<span class="kd">var</span><span class="w"> </span><span class="nx">activities</span><span class="w"> </span><span class="p">[]</span><span class="kt">string</span><span class="w"></span>
+<span class="nx">err</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">rows</span><span class="p">.</span><span class="nx">Scan</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">username</span><span class="p">,</span><span class="w"> </span><span class="nx">pq</span><span class="p">.</span><span class="nx">Array</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">activities</span><span class="p">))</span><span class="w"></span>
+</pre></div>
+<p>The <tt class="docutils literal">pq.Array</tt> function is provided by the <a class="reference external" href="https://godoc.org/github.com/lib/pq">pq PostgreSQL binding</a>. It takes a slice and converts it to an
+anonymous type that implements the <tt class="docutils literal">sql.Scanner</tt> interface.</p>
+<p>This is a nice way to <em>escape the abstraction</em> when necessary. Even though it's
+great to have a uniform interface to access many kinds of databases, sometimes
+we really do want to use a specific DB with its specific features. It would be
+a shame to give up <tt class="docutils literal">database/sql</tt> in this case, and we don't have to - because
+of these features that let specific database backends provide custom behavior.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="sql1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>Assuming we only use standard SQL syntax in our queries that both
+databases support, of course.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="sql2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>I first encountered an explicit discussion of this pattern in the
+<a class="reference external" href="https://github.com/google/go-cloud">Go CDK project</a>, which I recently
+joined. The Go CDK uses a similar approach for its portable
+types, and its <a class="reference external" href="https://github.com/google/go-cloud/blob/master/internal/docs/design.md#portable-types-and-drivers">design documentation</a>
+calls it the <em>portable type and driver pattern</em>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="sql3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>I realize that multi-valued fields are not good relational design. This
+is just an example.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

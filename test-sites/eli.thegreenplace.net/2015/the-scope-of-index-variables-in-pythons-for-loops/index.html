@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>The scope of index variables in Python's for loops - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to The scope of index variables in Python's for loops">
+                        The scope of index variables in Python's for loops
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> January 17, 2015 at 06:24</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/python-internals.html">Python internals</a>
+        ,
+    <a href="../../tag/python.html">Python</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>I'll start with a quiz. What does this function do?</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">foo</span><span class="p">(</span><span class="n">lst</span><span class="p">):</span>
+    <span class="n">a</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">lst</span><span class="p">:</span>
+        <span class="n">a</span> <span class="o">+=</span> <span class="n">i</span>
+    <span class="n">b</span> <span class="o">=</span> <span class="mi">1</span>
+    <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="n">lst</span><span class="p">:</span>
+        <span class="n">b</span> <span class="o">*=</span> <span class="n">i</span>
+    <span class="k">return</span> <span class="n">a</span><span class="p">,</span> <span class="n">b</span>
+</pre></div>
+<p>If you think &quot;computes the sum and product of the items in <tt class="docutils literal">lst</tt>&quot;, don't feel
+too bad about yourself. The bug here is often tricky to spot. If you did see it,
+well done - but buried in mountains of real code, and when you don't <em>know</em> it's
+a quiz, discovering the bug is significantly more difficult.</p>
+<p>The bug here is due to using <tt class="docutils literal">i</tt> instead of <tt class="docutils literal">t</tt> in the body of the second
+<tt class="docutils literal">for</tt> loop. But wait, how does this even work? Shouldn't <tt class="docutils literal">i</tt> be invisible
+outside of the first loop? <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a> Well, no. In fact, Python formally acknowledges
+that the names defined as <tt class="docutils literal">for</tt> loop targets (a more formally rigorous name
+for &quot;index variables&quot;) leak into the enclosing function scope. So this:</p>
+<div class="highlight"><pre><span></span><span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">]:</span>
+    <span class="k">pass</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">i</span><span class="p">)</span>
+</pre></div>
+<p>Is valid and prints 3, by design. In this writeup I want to explore why this is
+so, why it's unlikely to change, and also use it as a tracer bullet to dig into
+some interesting parts of the CPython compiler.</p>
+<p>And by the way, if you're not convinced this behavior can cause real problems,
+consider this snippet:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">foo</span><span class="p">():</span>
+    <span class="n">lst</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">4</span><span class="p">):</span>
+        <span class="n">lst</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="k">lambda</span><span class="p">:</span> <span class="n">i</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">([</span><span class="n">f</span><span class="p">()</span> <span class="k">for</span> <span class="n">f</span> <span class="ow">in</span> <span class="n">lst</span><span class="p">])</span>
+</pre></div>
+<p>If you'd expect this to print <tt class="docutils literal">[0, 1, 2, 3]</tt>, no such luck. This code will,
+instead, emit <tt class="docutils literal">[3, 3, 3, 3]</tt>, because there's just a single <tt class="docutils literal">i</tt> in the scope
+of <tt class="docutils literal">foo</tt>, and this is what all the <tt class="docutils literal">lambda</tt>s capture.</p>
+<div class="section" id="the-official-word">
+<h2>The official word</h2>
+<p>The Python reference documentation explicitly documents this behavior in the
+<a class="reference external" href="https://docs.python.org/dev/reference/compound_stmts.html#for">section on for loops</a>:</p>
+<blockquote>
+The for-loop makes assignments to the variables(s) in the target list. [...]
+Names in the target list are not deleted when the loop is finished, but if
+the sequence is empty, they will not have been assigned to at all by the
+loop.</blockquote>
+<p>Note the last sentence - let's try it:</p>
+<div class="highlight"><pre><span></span><span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="p">[]:</span>
+    <span class="k">pass</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">i</span><span class="p">)</span>
+</pre></div>
+<p>Indeed, a <tt class="docutils literal">NameError</tt> is raised. Later on, we'll see that this is a natural
+outcome of the way the Python VM executes its bytecode.</p>
+</div>
+<div class="section" id="why-this-is-so">
+<h2>Why this is so</h2>
+<p>I actually asked Guido van Rossum about this behavior and he was gracious enough
+to reply with some historical background (thanks Guido!). The motivation is
+keeping Python's simple approach to names and scopes without resorting to hacks
+(such as deleting all the values defined in the loop after it's done - think
+about the complications with exceptions, etc.) or more complex scoping rules.</p>
+<p>In Python, the scoping rules are fairly simple and elegant: a block is either a
+module, a function body or a class body. Within a function body, names are
+visible from the point of their definition to the end of the block (including
+nested blocks such as nested functions). That's for local names, of course;
+global names (and other <em>nonlocal</em> names) have slightly different rules, but
+that's not pertinent to our discussion.</p>
+<p>The important point here is: the innermost possible scope is a function body.
+Not a <tt class="docutils literal">for</tt> loop body. Not a <tt class="docutils literal">with</tt> block body. Python does not have nested
+lexical scopes below the level of a function, unlike some other languages (C and
+its progeny, for example).</p>
+<p>So if you just go about implementing Python, this behavior is what you'll likely
+to end with. Here's another enlightening snippet:</p>
+<div class="highlight"><pre><span></span><span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">4</span><span class="p">):</span>
+    <span class="n">d</span> <span class="o">=</span> <span class="n">i</span> <span class="o">*</span> <span class="mi">2</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">d</span><span class="p">)</span>
+</pre></div>
+<p>Would it surprise you to find out that <tt class="docutils literal">d</tt> is visible and accessible after the
+<tt class="docutils literal">for</tt> loop is finished? No, this is just the way Python works. So why would
+the index variable be treated any differently?</p>
+<p>By the way, the index variables of list comprehensions are also leaked to the
+enclosing scope. Or, to be precise, <em>were</em> leaked, before Python 3 came along.</p>
+<p>Python 3 fixed the leakage from list comprehensions, along with other breaking
+changes. Make no mistake, changing such behavior is a major breakage in
+backwards compatibility. This is why I think the current behavior stuck and
+won't be changed.</p>
+<p>Moreover, many folks still find this a useful feature of Python. Consider:</p>
+<div class="highlight"><pre><span></span><span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">item</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">somegenerator</span><span class="p">()):</span>
+    <span class="n">dostuffwith</span><span class="p">(</span><span class="n">i</span><span class="p">,</span> <span class="n">item</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="s1">&#39;The loop executed </span><span class="si">{0}</span><span class="s1"> times!&#39;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">i</span><span class="o">+</span><span class="mi">1</span><span class="p">))</span>
+</pre></div>
+<p>If you have no idea how many items <tt class="docutils literal">somegenerator</tt> actually returned, this is
+a pretty succinct way to know. Otherwise you'd have to keep a separate counter.</p>
+<p>Here's another example:</p>
+<div class="highlight"><pre><span></span><span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">somegenerator</span><span class="p">():</span>
+    <span class="k">if</span> <span class="n">isinteresing</span><span class="p">(</span><span class="n">i</span><span class="p">):</span>
+        <span class="k">break</span>
+<span class="n">dostuffwith</span><span class="p">(</span><span class="n">i</span><span class="p">)</span>
+</pre></div>
+<p>Which is a useful pattern for finding things in a loop and using them afterwards
+<a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.</p>
+<p>There are other uses people came up with over the years that justify keeping
+this behavior in place. It's hard enough to instill breaking changes for
+features the core developers deem detrimental and harmful. When the feature is
+argued by many to be useful, and moreover is used in a huge bunch of code in the
+real world, the chances of removing it are zero.</p>
+</div>
+<div class="section" id="under-the-hood">
+<h2>Under the hood</h2>
+<p>Now the fun part. Let's see how the Python compiler and VM conspire to make this
+behavior possible. In this particular case, I think the most lucid way to
+present things is going backwards from the bytecode. I hope this may also serve
+as an interesting example on how to go about digging in Python's internals <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>
+in order to find stuff out (it's so much fun, seriously!)</p>
+<p>Let's take a part of the function presented at the start of this article and
+disassemble it:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">foo</span><span class="p">(</span><span class="n">lst</span><span class="p">):</span>
+    <span class="n">a</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">lst</span><span class="p">:</span>
+        <span class="n">a</span> <span class="o">+=</span> <span class="n">i</span>
+    <span class="k">return</span> <span class="n">a</span>
+</pre></div>
+<p>The resulting bytecode is:</p>
+<div class="highlight"><pre><span></span> 0 LOAD_CONST               1 (0)
+ 3 STORE_FAST               1 (a)
+
+ 6 SETUP_LOOP              24 (to 33)
+ 9 LOAD_FAST                0 (lst)
+12 GET_ITER
+13 FOR_ITER                16 (to 32)
+16 STORE_FAST               2 (i)
+
+19 LOAD_FAST                1 (a)
+22 LOAD_FAST                2 (i)
+25 INPLACE_ADD
+26 STORE_FAST               1 (a)
+29 JUMP_ABSOLUTE           13
+32 POP_BLOCK
+
+33 LOAD_FAST                1 (a)
+36 RETURN_VALUE
+</pre></div>
+<p>As a reminder, <tt class="docutils literal">LOAD_FAST</tt> and <tt class="docutils literal">STORE_FAST</tt> are the opcodes Python uses to
+access names that are only used within a function. Since the Python compiler
+knows statically (at compile-time) how many such names exist in each function,
+they can be accessed with static array offsets as opposed to a hash table, which
+makes access significanly faster (hence the <tt class="docutils literal">_FAST</tt> suffix). But I digress.
+What's really important here is that <tt class="docutils literal">a</tt> and <tt class="docutils literal">i</tt> are treated identically.
+They are both fetched with <tt class="docutils literal">LOAD_FAST</tt> and modified with <tt class="docutils literal">STORE_FAST</tt>.
+There is absolutely no reason to assume that their visibility is in any way
+different <a class="footnote-reference" href="index.html#footnote-4" id="footnote-reference-4">[4]</a>.</p>
+<p>So how did this come to be? Somehow, the compiler figured that <tt class="docutils literal">i</tt> is just
+another local name within <tt class="docutils literal">foo</tt>. This logic lives in the symbol table code,
+when the compiler walks over the AST to create a control-flow graph from which
+bytecode is later emitted; there are more details about this process in
+<a class="reference external" href="../../2010/09/18/python-internals-symbol-tables-part-1.html">my article about symbol tables</a>
+- so I'll just stick to the essentials here.</p>
+<p>The symtable code doesn't treat <tt class="docutils literal">for</tt> statements very specially. In
+<tt class="docutils literal">symtable_visit_stmt</tt> we have:</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="no">For_kind</span><span class="p">:</span><span class="w"></span>
+<span class="w">    </span><span class="n">VISIT</span><span class="p">(</span><span class="n">st</span><span class="p">,</span><span class="w"> </span><span class="n">expr</span><span class="p">,</span><span class="w"> </span><span class="n">s</span><span class="o">-&gt;</span><span class="n">v</span><span class="p">.</span><span class="n">For</span><span class="p">.</span><span class="n">target</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">VISIT</span><span class="p">(</span><span class="n">st</span><span class="p">,</span><span class="w"> </span><span class="n">expr</span><span class="p">,</span><span class="w"> </span><span class="n">s</span><span class="o">-&gt;</span><span class="n">v</span><span class="p">.</span><span class="n">For</span><span class="p">.</span><span class="n">iter</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">VISIT_SEQ</span><span class="p">(</span><span class="n">st</span><span class="p">,</span><span class="w"> </span><span class="n">stmt</span><span class="p">,</span><span class="w"> </span><span class="n">s</span><span class="o">-&gt;</span><span class="n">v</span><span class="p">.</span><span class="n">For</span><span class="p">.</span><span class="n">body</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">s</span><span class="o">-&gt;</span><span class="n">v</span><span class="p">.</span><span class="n">For</span><span class="p">.</span><span class="n">orelse</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="n">VISIT_SEQ</span><span class="p">(</span><span class="n">st</span><span class="p">,</span><span class="w"> </span><span class="n">stmt</span><span class="p">,</span><span class="w"> </span><span class="n">s</span><span class="o">-&gt;</span><span class="n">v</span><span class="p">.</span><span class="n">For</span><span class="p">.</span><span class="n">orelse</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+</pre></div>
+<p>The loop target is visited as any other expression. Since this code visits the
+AST, it's worthwhile to dump it to see how the node for the <tt class="docutils literal">for</tt> statement
+looks:</p>
+<div class="highlight"><pre><span></span>For(target=Name(id=&#39;i&#39;, ctx=Store()),
+    iter=Name(id=&#39;lst&#39;, ctx=Load()),
+    body=[AugAssign(target=Name(id=&#39;a&#39;, ctx=Store()),
+                    op=Add(),
+                    value=Name(id=&#39;i&#39;, ctx=Load()))],
+    orelse=[])
+</pre></div>
+<p>So <tt class="docutils literal">i</tt> lives in a <tt class="docutils literal">Name</tt> node. These are handled in the symbol table code by
+the following clause in <tt class="docutils literal">symtable_visit_expr</tt>:</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="no">Name_kind</span><span class="p">:</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">symtable_add_def</span><span class="p">(</span><span class="n">st</span><span class="p">,</span><span class="w"> </span><span class="n">e</span><span class="o">-&gt;</span><span class="n">v</span><span class="p">.</span><span class="n">Name</span><span class="p">.</span><span class="n">id</span><span class="p">,</span><span class="w"></span>
+<span class="w">                          </span><span class="n">e</span><span class="o">-&gt;</span><span class="n">v</span><span class="p">.</span><span class="n">Name</span><span class="p">.</span><span class="n">ctx</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">Load</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">USE</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">DEF_LOCAL</span><span class="p">))</span><span class="w"></span>
+<span class="w">        </span><span class="n">VISIT_QUIT</span><span class="p">(</span><span class="n">st</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="cm">/* ... */</span><span class="w"></span>
+</pre></div>
+<p>Since the name <tt class="docutils literal">i</tt> is clearly tagged with <tt class="docutils literal">DEF_LOCAL</tt> (because of the
+<tt class="docutils literal">*_FAST</tt> opcodes emitted to access it, but this is also easy to observe if the
+symbol table is dumped using the <tt class="docutils literal">symtable</tt> module), the code above evidently
+calls <tt class="docutils literal">symtable_add_def</tt> with <tt class="docutils literal">DEF_LOCAL</tt> as the third argument. This is
+the right time to glance at the AST above and notice the <tt class="docutils literal">ctx=Store</tt> part
+of the <tt class="docutils literal">Name</tt> node of <tt class="docutils literal">i</tt>. So it's the AST that already comes in carrying
+the information that <tt class="docutils literal">i</tt> is stored to in the <tt class="docutils literal">target</tt> part of the <tt class="docutils literal">For</tt>
+node. Let's see how that comes to be.</p>
+<p>The AST-building part of the compiler goes over the parse tree (which is a
+fairly low-level hierarchical representation of the source code - some
+background is available <a class="reference external" href="../../2009/02/16/abstract-vs-concrete-syntax-trees.html">here</a>)
+and, among other things, sets the <tt class="docutils literal">expr_context</tt> attributes on some nodes,
+most notably <tt class="docutils literal">Name</tt> nodes. Think about it this way, in the following
+statement:</p>
+<div class="highlight"><pre><span></span><span class="n">foo</span> <span class="o">=</span> <span class="n">bar</span> <span class="o">+</span> <span class="mi">1</span>
+</pre></div>
+<p>Both <tt class="docutils literal">foo</tt> and <tt class="docutils literal">bar</tt> are going to end up in <tt class="docutils literal">Name</tt> nodes. But while
+<tt class="docutils literal">bar</tt> is only being loaded from, <tt class="docutils literal">foo</tt> is actually being stored into in this
+code. The <tt class="docutils literal">expr_context</tt> attribute is used to distinguish between uses for
+later consumption by the symbol table code <a class="footnote-reference" href="index.html#footnote-5" id="footnote-reference-5">[5]</a>.</p>
+<p>Back to our <tt class="docutils literal">for</tt> loop targets, though. These are handled in the function that
+creates an AST for <tt class="docutils literal">for</tt> statements -  <tt class="docutils literal">ast_for_for_stmt</tt>. Here are the
+relevant parts of this function:</p>
+<div class="highlight"><pre><span></span><span class="k">static</span><span class="w"> </span><span class="n">stmt_ty</span><span class="w"></span>
+<span class="nf">ast_for_for_stmt</span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">compiling</span><span class="w"> </span><span class="o">*</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">node</span><span class="w"> </span><span class="o">*</span><span class="n">n</span><span class="p">)</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">asdl_seq</span><span class="w"> </span><span class="o">*</span><span class="n">_target</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">seq</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="n">suite_seq</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">expr_ty</span><span class="w"> </span><span class="n">expression</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">expr_ty</span><span class="w"> </span><span class="n">target</span><span class="p">,</span><span class="w"> </span><span class="n">first</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="cm">/* ... */</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">node_target</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">CHILD</span><span class="p">(</span><span class="n">n</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">_target</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ast_for_exprlist</span><span class="p">(</span><span class="n">c</span><span class="p">,</span><span class="w"> </span><span class="n">node_target</span><span class="p">,</span><span class="w"> </span><span class="n">Store</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">_target</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="cm">/* Check the # of children rather than the length of _target, since</span>
+<span class="cm">       for x, in ... has 1 element in _target, but still requires a Tuple. */</span><span class="w"></span>
+<span class="w">    </span><span class="n">first</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">expr_ty</span><span class="p">)</span><span class="n">asdl_seq_GET</span><span class="p">(</span><span class="n">_target</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">NCH</span><span class="p">(</span><span class="n">node_target</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="n">target</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">first</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">else</span><span class="w"></span>
+<span class="w">        </span><span class="n">target</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Tuple</span><span class="p">(</span><span class="n">_target</span><span class="p">,</span><span class="w"> </span><span class="n">Store</span><span class="p">,</span><span class="w"> </span><span class="n">first</span><span class="o">-&gt;</span><span class="n">lineno</span><span class="p">,</span><span class="w"> </span><span class="n">first</span><span class="o">-&gt;</span><span class="n">col_offset</span><span class="p">,</span><span class="w"> </span><span class="n">c</span><span class="o">-&gt;</span><span class="n">c_arena</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="cm">/* ... */</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">For</span><span class="p">(</span><span class="n">target</span><span class="p">,</span><span class="w"> </span><span class="n">expression</span><span class="p">,</span><span class="w"> </span><span class="n">suite_seq</span><span class="p">,</span><span class="w"> </span><span class="n">seq</span><span class="p">,</span><span class="w"> </span><span class="n">LINENO</span><span class="p">(</span><span class="n">n</span><span class="p">),</span><span class="w"> </span><span class="n">n</span><span class="o">-&gt;</span><span class="n">n_col_offset</span><span class="p">,</span><span class="w"></span>
+<span class="w">               </span><span class="n">c</span><span class="o">-&gt;</span><span class="n">c_arena</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The <tt class="docutils literal">Store</tt> context is created in the call to <tt class="docutils literal">ast_for_exprlist</tt>, which
+creates the node for the target (recall the the <tt class="docutils literal">for</tt> loop target may be a
+sequence of names for tuple unpacking, not just a single name).</p>
+<p>This function is probably the most important part in the process of explaining
+why <tt class="docutils literal">for</tt> loop targets are treated similarly to other names <em>within</em> the loop.
+After this tagging happens in the AST, the code for handling such names in the
+symbol table and VM is no different from other names.</p>
+</div>
+<div class="section" id="wrapping-up">
+<h2>Wrapping up</h2>
+<p>This article discusses a particular behavior of Python that may be considered a
+&quot;gotcha&quot; by some. I hope the article does a decent job of explaining how this
+behavior flows naturally from the naming and scoping semantics of Python, why
+it can be useful and hence is unlikely to ever change, and how the internals of
+the Python compiler make it work under the hood. Thanks for reading!</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>Here I'm tempted to make a Microsoft Visual C++ 6 joke, but the fact that
+most readers of this blog in 2015 won't get it is somewhat disturbing
+(because it reflects my age, not the abilities of my readers).</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>You could argue that <tt class="docutils literal">dowithstuff(i)</tt> could go into the <tt class="docutils literal">if</tt> right
+before the <tt class="docutils literal">break</tt> here. But this isn't always convenient. Besides,
+according to Guido there's a nice separation of concerns here - the loop
+is used for searching, and only that. What happens with the value after
+the search is done is not the loop's concern. I think this is a very good
+point.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>As usual for my articles on Python's internals, this is about Python 3.
+Specifically, I'm looking at the <tt class="docutils literal">default</tt> branch of the Python
+repository, where work on the next release (3.5) is being done. But for
+this particular topic, the source code of any release in the 3.x series
+should do.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-4">[4]</a></td><td>Another thing clear from the disassembly is why <tt class="docutils literal">i</tt> remains invisible
+if the loop doesn't execute. The <tt class="docutils literal">GET_ITER</tt> and <tt class="docutils literal">FOR_ITER</tt> pair of
+opcodes treat the thing we loop over as an iterator and then call its
+<tt class="docutils literal">__next__</tt> method. If that call ends up raising <tt class="docutils literal">StopIteration</tt>, the
+VM catches it and exits the loop. Only if an actual value is returned
+does the VM proceed to execute <tt class="docutils literal">STORE_FAST</tt> to <tt class="docutils literal">i</tt>, thus bringing it
+into existence for subsequent code to refer to.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-5">[5]</a></td><td>It's a curious design, which I suspect stems from the desire for
+relatively clean recursive visitation code in AST consumers such as the
+symbol table code and CFG generation.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

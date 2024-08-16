@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Go and Proxy Servers: Part 3 - SOCKS proxies - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Go and Proxy Servers: Part 3 - SOCKS proxies">
+                        Go and Proxy Servers: Part 3 - SOCKS proxies
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> December 14, 2022 at 20:10</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/network-programming.html">Network Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This is the third post in a series about proxy servers and Go. Here is a list of
+posts in the series:</p>
+<ul class="simple">
+<li><a class="reference external" href="../go-and-proxy-servers-part-1-http-proxies/index.html">Part 1 - HTTP Proxies</a></li>
+<li><a class="reference external" href="../go-and-proxy-servers-part-2-https-proxies/index.html">Part 2 - HTTPS Proxies</a></li>
+<li>Part 3 - SOCKS Proxies (this part)</li>
+</ul>
+<p>So far the series has covered HTTP and HTTPS proxies; this part is a brief
+discussion of SOCKS - an old and venerable proxy protocol designed to relay any
+kind of TCP or UDP traffic through forward proxies.</p>
+<div class="section" id="a-bit-of-history">
+<h2>A bit of history</h2>
+<p>The SOCKS protocol has been around for a while; the latest version and the one
+you care about in 2022 is SOCKS5, which was specified by <a class="reference external" href="https://datatracker.ietf.org/doc/html/rfc1928">RFC 1928</a> back in 1996. The motivation
+for its design back then wasn't too different from what we're using forward
+proxies for today - dialing through firewalls. It predates HTTP version 1.1 and
+the <tt class="docutils literal">CONNECT</tt> method, which is important context to keep in mind while reading
+this post. A brief comparison of SOCKS5 and <tt class="docutils literal">CONNECT</tt> proxies is included
+later in the post.</p>
+</div>
+<div class="section" id="dialing-through-a-socks5-server-in-go">
+<h2>Dialing through a SOCKS5 server in Go</h2>
+<p>This post won't explain the SOCKS5 protocol in detail; please read the RFC for
+that - it's short and quite readable. We'll move straight ahead to basic usage
+in Go - having clients dial through a SOCKS5 proxy. We'll focus on HTTP here,
+though SOCKS5 supports any TCP or UDP traffic.</p>
+<p>SOCKS5 is used for <em>forward</em> proxies (to recall what this means, check out <a class="reference external" href="../go-and-proxy-servers-part-1-http-proxies/index.html">part
+1</a>
+in this series), and the setup is similar to other proxies. There's a proxy
+server running on some host and port, and when accessing web pages we have to
+tell our client to use the proxy. The traditional port for SOCKS5 is 1080.</p>
+<p>To set up a demonstration, I'm using <a class="reference external" href="https://github.com/rofl0r/microsocks">microsocks</a> - a small SOCKS5 implementation (in C)
+I found on GitHub; it's pretty easy to clone and build locally. Once that's
+done, invoke it as follows:</p>
+<div class="highlight"><pre><span></span>$ ./microsocks
+</pre></div>
+<p>This runs the proxy service listening on port 1080 without authentication; I'll
+have more to say about authentication later.</p>
+<p>We can now <tt class="docutils literal">curl</tt> through this proxy:</p>
+<div class="highlight"><pre><span></span>$ http_proxy=socks5://localhost:1080 curl -v http://example.org
+* Uses proxy env variable http_proxy == &#39;socks5://localhost:1080&#39;
+*   Trying 127.0.0.1:1080...
+* SOCKS5 connect to IPv4 93.184.216.34:80 (locally resolved)
+* SOCKS5 request granted.
+* Connected to (nil) (127.0.0.1) port 1080 (#0)
+&gt; GET / HTTP/1.1
+&gt; Host: example.org
+&gt; User-Agent: curl/7.81.0
+&gt; Accept: */*
+&gt;
+* Mark bundle as not supporting multiuse
+&lt; HTTP/1.1 200 OK
+// ... rest of response
+</pre></div>
+<p>And if you look at the terminal where <tt class="docutils literal">microsocks</tt> is running you should see
+a logging message confirming that a client was connected.</p>
+<p>The &quot;magic&quot; here is done with the <tt class="docutils literal">http_proxy</tt> environment variable, using the
+<tt class="docutils literal"><span class="pre">socks5://</span></tt> protocol prefix for the proxy address. The same works by default
+for Go's <tt class="docutils literal">net/http</tt> - we can similarly run our our <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2022/go-and-proxies/http-get-basic.go">simple HTTP client</a>:</p>
+<div class="highlight"><pre><span></span>$ http_proxy=socks5://localhost:1080 go run http-get-basic.go http://example.org
+Response status: 200 OK
+&lt;!doctype html&gt;
+// ... rest of response
+</pre></div>
+<p>Naturally, the same approach works for HTTPS, using the <tt class="docutils literal">https_proxy</tt> env
+var:</p>
+<div class="highlight"><pre><span></span>$ https_proxy=socks5://localhost:1080 curl -v https://example.org
+* Uses proxy env variable https_proxy == &#39;socks5://localhost:1080&#39;
+*   Trying 127.0.0.1:1080...
+* SOCKS5 connect to IPv4 93.184.216.34:443 (locally resolved)
+* SOCKS5 request granted.
+* Connected to (nil) (127.0.0.1) port 1080 (#0)
+* ALPN, offering h2
+* ALPN, offering http/1.1
+*  CAfile: /etc/ssl/certs/ca-certificates.crt
+*  CApath: /etc/ssl/certs
+* TLSv1.0 (OUT), TLS header, Certificate Status (22):
+// ... rest of TLS handshake and response
+</pre></div>
+<p>Just like a <a class="reference external" href="../go-and-proxy-servers-part-2-https-proxies/index.html">CONNECT tunnel</a>,
+SOCKS5 is oblivious to the contents of the traffic flowing through it once the
+forwarding is set up, treating it as a stream of opaque bytes; it
+works well with any protocol streamed through it - including TLS.</p>
+</div>
+<div class="section" id="socks5-authentication">
+<h2>SOCKS5 authentication</h2>
+<p>The SOCKS5 proxy protocol supports <em>authentication</em> using several methods, to
+ensure that only authorized clients can access the proxy. The authentication
+part of the protocol was designed to be extensible, but we'll just focus on
+the basic method described in the original RFC: username/password.</p>
+<p>We can run our <tt class="docutils literal">microsocks</tt> proxy again, this time protected by a username
+and password:</p>
+<div class="highlight"><pre><span></span>$ ./microsocks -u myuser -P mypass
+</pre></div>
+<p>First, let's try to <tt class="docutils literal">curl</tt> through this proxy without setting authentication:</p>
+<div class="highlight"><pre><span></span>$ http_proxy=socks5://localhost:1080 curl -v http://example.org
+* Uses proxy env variable http_proxy == &#39;socks5://localhost:1080&#39;
+*   Trying 127.0.0.1:1080...
+* No authentication method was acceptable.
+* Closing connection 0
+curl: (97) No authentication method was acceptable.
+</pre></div>
+<p>Now let's actually set matching credentials in the proxy URL (note the username
+and password preceding the address):</p>
+<div class="highlight"><pre><span></span>$ http_proxy=socks5://myuser:mypass@localhost:1080 curl -v http://example.org
+* Uses proxy env variable http_proxy == &#39;socks5://myuser:mypass@localhost:1080&#39;
+*   Trying 127.0.0.1:1080...
+* SOCKS5 connect to IPv4 93.184.216.34:80 (locally resolved)
+* SOCKS5 request granted.
+* Connected to (nil) (127.0.0.1) port 1080 (#0)
+&gt; GET / HTTP/1.1
+&gt; Host: example.org
+&gt; User-Agent: curl/7.81.0
+&gt; Accept: */*
+&gt;
+* Mark bundle as not supporting multiuse
+&lt; HTTP/1.1 200 OK
+// ... rest of response
+</pre></div>
+<p>And the same setting will work with Go's HTTP client by default. If we don't
+want to require setting environment variables, we can also do this
+programmatically in Go as follows:</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span><span class="w"> </span><span class="nx">main</span><span class="w"></span>
+
+<span class="kn">import</span><span class="w"> </span><span class="p">(</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;flag&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;fmt&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;io/ioutil&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;log&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;net/http&quot;</span><span class="w"></span>
+
+<span class="w">  </span><span class="s">&quot;golang.org/x/net/proxy&quot;</span><span class="w"></span>
+<span class="p">)</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">target</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;target&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;http://example.org&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;URL to get&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">proxyAddr</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;proxy&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;localhost:1080&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;SOCKS5 proxy address to use&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">username</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;user&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;username for SOCKS5 proxy&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">password</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;pass&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;password for SOCKS5 proxy&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Parse</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">auth</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">proxy</span><span class="p">.</span><span class="nx">Auth</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">User</span><span class="p">:</span><span class="w">     </span><span class="o">*</span><span class="nx">username</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Password</span><span class="p">:</span><span class="w"> </span><span class="o">*</span><span class="nx">password</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">dialer</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">proxy</span><span class="p">.</span><span class="nx">SOCKS5</span><span class="p">(</span><span class="s">&quot;tcp&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">proxyAddr</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">auth</span><span class="p">,</span><span class="w"> </span><span class="kc">nil</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">client</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">http</span><span class="p">.</span><span class="nx">Client</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Transport</span><span class="p">:</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">http</span><span class="p">.</span><span class="nx">Transport</span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">Dial</span><span class="p">:</span><span class="w"> </span><span class="nx">dialer</span><span class="p">.</span><span class="nx">Dial</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="p">},</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">r</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">Get</span><span class="p">(</span><span class="o">*</span><span class="nx">target</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">Body</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">body</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">ioutil</span><span class="p">.</span><span class="nx">ReadAll</span><span class="p">(</span><span class="nx">r</span><span class="p">.</span><span class="nx">Body</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nb">string</span><span class="p">(</span><span class="nx">body</span><span class="p">))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The <tt class="docutils literal">golang.org/x/net/proxy</tt> package provides explicit tools for proxies,
+and here specifically we're using its <tt class="docutils literal">SOCKS5</tt> dialer as a custom <tt class="docutils literal">Dial</tt>
+in a <tt class="docutils literal">Transport</tt>. We can run this client as follows:</p>
+<div class="highlight"><pre><span></span>$ go run http-get-socks-transport.go -proxy localhost:1080 \
+    -user myuser -pass mypass \
+    http://example.org
+&lt;!doctype html&gt;
+&lt;html&gt;
+// ... rest of response
+</pre></div>
+</div>
+<div class="section" id="socks5-vs-connect-tunnels">
+<h2>SOCKS5 vs. CONNECT tunnels</h2>
+<p>In <a class="reference external" href="../go-and-proxy-servers-part-2-https-proxies/index.html">part 2 of this series</a>
+we've covered proxying arbitrary traffic via a standard HTTP server by means of
+the <tt class="docutils literal">CONNECT</tt> method. What is the difference between <tt class="docutils literal">CONNECT</tt>-based proxies
+and SOCKS5 proxies?</p>
+<p>First, to repeat a bit of historic context: the SOCKS protocol predates the
+<tt class="docutils literal">CONNECT</tt> method. It requires a dedicated service listening on a dedicated
+port, whereas handling <tt class="docutils literal">CONNECT</tt> tunnels can be included in an existing HTTP
+server and share the port.</p>
+<p>On the other hand, while SOCKS5 can handle any TCP or UDP traffic, <tt class="docutils literal">CONNECT</tt>
+handles only TCP <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>.</p>
+<p>Finally, note that the security aspects of SOCKS5 are rather primitive, whereas
+HTTP proxies can use TLS under the hood to handle both client-server
+authentication and traffic encryption. It is fair to mention, however, that it's
+not too hard to combine protocols and &quot;wrap&quot; SOCKS5 in TLS - in fact, this is
+what <tt class="docutils literal">ssh <span class="pre">-D</span></tt> does already. An alternative would be to run SOCKS5 via <a class="reference external" href="../ssh-port-forwarding-with-go/index.html">SSH
+port forwarding</a>.</p>
+</div>
+<div class="section" id="socks5-server-in-go">
+<h2>SOCKS5 server in Go</h2>
+<p>There are a number of open-source SOCKS5 written in Go; one I liked for its
+clarity and simplicity is <a class="reference external" href="https://github.com/armon/go-socks5">go-socks5</a>,
+a project from one of Hashicorp's co-founders. A basic sample of setting up
+a SOCKS5 server using this package is available in its README. I will show a
+slightly more advanced sample that uses basic authentication just like the
+microsocks example discussed earlier:</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span><span class="w"> </span><span class="nx">main</span><span class="w"></span>
+
+<span class="kn">import</span><span class="w"> </span><span class="p">(</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;flag&quot;</span><span class="w"></span>
+
+<span class="w">  </span><span class="s">&quot;github.com/armon/go-socks5&quot;</span><span class="w"></span>
+<span class="p">)</span><span class="w"></span>
+
+<span class="kd">type</span><span class="w"> </span><span class="nx">myCredentialStore</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">user</span><span class="w">     </span><span class="kt">string</span><span class="w"></span>
+<span class="w">  </span><span class="nx">password</span><span class="w"> </span><span class="kt">string</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">cs</span><span class="w"> </span><span class="o">*</span><span class="nx">myCredentialStore</span><span class="p">)</span><span class="w"> </span><span class="nx">Valid</span><span class="p">(</span><span class="nx">user</span><span class="p">,</span><span class="w"> </span><span class="nx">password</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nx">cs</span><span class="p">.</span><span class="nx">user</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">password</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nx">cs</span><span class="p">.</span><span class="nx">password</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">username</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;u&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;username for SOCKS5 proxy&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">password</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;P&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;password for SOCKS5 proxy&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Parse</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">auth</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">socks5</span><span class="p">.</span><span class="nx">UserPassAuthenticator</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Credentials</span><span class="p">:</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">myCredentialStore</span><span class="p">{</span><span class="nx">user</span><span class="p">:</span><span class="w"> </span><span class="o">*</span><span class="nx">username</span><span class="p">,</span><span class="w"> </span><span class="nx">password</span><span class="p">:</span><span class="w"> </span><span class="o">*</span><span class="nx">password</span><span class="p">},</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">conf</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">socks5</span><span class="p">.</span><span class="nx">Config</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">AuthMethods</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="nx">socks5</span><span class="p">.</span><span class="nx">Authenticator</span><span class="p">{</span><span class="nx">auth</span><span class="p">},</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">server</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">socks5</span><span class="p">.</span><span class="nx">New</span><span class="p">(</span><span class="nx">conf</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nb">panic</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">server</span><span class="p">.</span><span class="nx">ListenAndServe</span><span class="p">(</span><span class="s">&quot;tcp&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;127.0.0.1:1080&quot;</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nb">panic</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>We can run this server as follows:</p>
+<div class="highlight"><pre><span></span>$ go run . -u myuser -P mypass
+</pre></div>
+<p>And then <tt class="docutils literal">curl</tt> as before:</p>
+<div class="highlight"><pre><span></span>$ http_proxy=socks5://myuser:mypass@localhost:1080 curl -v http://example.org
+* Uses proxy env variable http_proxy == &#39;socks5://myuser:mypass@localhost:1080&#39;
+*   Trying 127.0.0.1:1080...
+* SOCKS5 connect to IPv4 93.184.216.34:80 (locally resolved)
+* SOCKS5 request granted.
+* Connected to (nil) (127.0.0.1) port 1080 (#0)
+&gt; GET / HTTP/1.1
+&gt; Host: example.org
+&gt; User-Agent: curl/7.81.0
+&gt; Accept: */*
+&gt;
+* Mark bundle as not supporting multiuse
+&lt; HTTP/1.1 200 OK
+// ... rest of response
+</pre></div>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>It should be noted that many open-source SOCKS5 servers do not, in fact,
+implement UDP since it's not used often. For example, the two servers
+discussed in this post - microsocks and go-socks5 - have no UDP support.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

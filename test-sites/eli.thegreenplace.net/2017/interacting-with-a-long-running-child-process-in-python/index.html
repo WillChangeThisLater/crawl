@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Interacting with a long-running child process in Python - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Interacting with a long-running child process in Python">
+                        Interacting with a long-running child process in Python
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> July 11, 2017 at 05:43</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/python.html">Python</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>The Python <tt class="docutils literal">subprocess</tt> module is a powerful swiss-army knife for launching
+and interacting with child processes. It comes with several high-level APIs like
+<tt class="docutils literal">call</tt>, <tt class="docutils literal">check_output</tt> and (starting with Python 3.5) <tt class="docutils literal">run</tt> that are
+focused at child processes our program runs and waits to complete.</p>
+<p>In this post I want to discuss a variation of this task that is less
+directly addressed - <em>long-running</em> child processes. Think about testing some
+server - for example an HTTP server. We launch it as a child process, then
+connect clients to it and run some testing sequence. When we're done we want to
+shut down the child process in an orderly way. This would be difficult to
+achieve with APIs that just run a child process to completion synchronously, so
+we'll have to look at some of the lower-level APIs.</p>
+<p>Sure, we could launch a child process with <tt class="docutils literal">subprocess.run</tt> in one thread and
+interact with it (via a known port, for example) in another thread. But this
+would make it tricky to cleanly terminate the child process when we're done with
+it. If the child process has an orderly termination sequence (such as sending
+some sort of &quot;quit&quot; command), this is doable. But most servers do not, and will
+just spin forever until killed. This is the use-case this post addresses.</p>
+<div class="section" id="launch-interact-terminate-and-get-all-output-when-done">
+<h2>Launch, interact, terminate and get all output when done</h2>
+<p>The first, simplest use case will be launching an HTTP server, interacting with
+it, terminating it cleanly and getting all the server's stdout and stderr when
+done. Here are the important bits of the code (all full code samples for this
+post are <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2017/python-interact-subprocess">available here</a>),
+tested with Python 3.6:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">main</span><span class="p">():</span>
+    <span class="n">proc</span> <span class="o">=</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">Popen</span><span class="p">([</span><span class="s1">&#39;python3&#39;</span><span class="p">,</span> <span class="s1">&#39;-u&#39;</span><span class="p">,</span> <span class="s1">&#39;-m&#39;</span><span class="p">,</span> <span class="s1">&#39;http.server&#39;</span><span class="p">,</span> <span class="s1">&#39;8070&#39;</span><span class="p">],</span>
+                            <span class="n">stdout</span><span class="o">=</span><span class="n">subprocess</span><span class="o">.</span><span class="n">PIPE</span><span class="p">,</span>
+                            <span class="n">stderr</span><span class="o">=</span><span class="n">subprocess</span><span class="o">.</span><span class="n">STDOUT</span><span class="p">)</span>
+
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mf">0.2</span><span class="p">)</span>
+        <span class="n">resp</span> <span class="o">=</span> <span class="n">urllib</span><span class="o">.</span><span class="n">request</span><span class="o">.</span><span class="n">urlopen</span><span class="p">(</span><span class="s1">&#39;http://localhost:8070&#39;</span><span class="p">)</span>
+        <span class="k">assert</span> <span class="sa">b</span><span class="s1">&#39;Directory listing&#39;</span> <span class="ow">in</span> <span class="n">resp</span><span class="o">.</span><span class="n">read</span><span class="p">()</span>
+    <span class="k">finally</span><span class="p">:</span>
+        <span class="n">proc</span><span class="o">.</span><span class="n">terminate</span><span class="p">()</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">outs</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">proc</span><span class="o">.</span><span class="n">communicate</span><span class="p">(</span><span class="n">timeout</span><span class="o">=</span><span class="mf">0.2</span><span class="p">)</span>
+            <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;== subprocess exited with rc =&#39;</span><span class="p">,</span> <span class="n">proc</span><span class="o">.</span><span class="n">returncode</span><span class="p">)</span>
+            <span class="nb">print</span><span class="p">(</span><span class="n">outs</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="s1">&#39;utf-8&#39;</span><span class="p">))</span>
+        <span class="k">except</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">TimeoutExpired</span><span class="p">:</span>
+            <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;subprocess did not terminate in time&#39;</span><span class="p">)</span>
+</pre></div>
+<p>The child process is an HTTP server using Python's own <tt class="docutils literal">http.server</tt> module,
+serving contents from the directory it was launched in. We use the low-level
+<tt class="docutils literal">Popen</tt> API to launch the process asynchronously (meaning that <tt class="docutils literal">Popen</tt>
+returns immediately and the child process runs in the background).</p>
+<p>Note the <tt class="docutils literal"><span class="pre">-u</span></tt> passed to Python on invocation: this is critical to avoid stdout
+buffering and seeing as much of stdout as possible when the process is killed.
+Buffering is a serious issue when interacting with child processes, and we'll
+see more examples of this later on.</p>
+<p>The meat of the sample happens in the <tt class="docutils literal">finally</tt> block. <tt class="docutils literal">proc.terminate()</tt>
+sends the child process a <tt class="docutils literal">SIGTERM</tt> signal. Then, <tt class="docutils literal">proc.communicate</tt> waits
+for the child to exit and captures all of its stdout. <tt class="docutils literal">communicate</tt> has a very
+convenient <tt class="docutils literal">timeout</tt> argument starting with Python 3.3 <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>, letting us know
+if the child does not exit for some reason. A more sophisticated technique could
+be to send the child a <tt class="docutils literal">SIGKILL</tt> (with <tt class="docutils literal">proc.kill</tt>) if it didn't exit due to
+<tt class="docutils literal">SIGTERM</tt>.</p>
+<p>If you run this script, you'll see the output:</p>
+<div class="highlight"><pre><span></span>$ python3.6 interact-http-server.py
+== subprocess exited with rc = -15
+Serving HTTP on 0.0.0.0 port 8070 (http://0.0.0.0:8070/) ...
+127.0.0.1 - - [05/Jul/2017 05:48:34] &quot;GET / HTTP/1.1&quot; 200 -
+</pre></div>
+<p>The return code of the child is -15 (negative means terminated by a signal, 15
+is the numeric code for <tt class="docutils literal">SIGTERM</tt>). The stdout was properly captured and
+printed out.</p>
+</div>
+<div class="section" id="launch-interact-get-output-in-real-time-terminate">
+<h2>Launch, interact, get output in real time, terminate</h2>
+<p>A related use case is getting the stdout of a child process in &quot;real-time&quot; and
+not everything together at the end. Here we have to be <em>really</em> careful about
+buffering, because it can easily bite and deadlock the program. Linux processes
+are usually line-buffered in interactive mode and fully buffered otherwise. Very
+few processes are fully unbuffered. Therefore, reading stdout in chunks of less
+than a line is not recommended, in my opinion. Really, just don't do it.
+Standard I/O is meant to be used in a line-wise way (think of how all the Unix
+command-line tools work); if you need sub-line granularity, stdout is not the
+way to go (use a socket or something).</p>
+<p>Anyway, to our example:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">output_reader</span><span class="p">(</span><span class="n">proc</span><span class="p">):</span>
+    <span class="k">for</span> <span class="n">line</span> <span class="ow">in</span> <span class="nb">iter</span><span class="p">(</span><span class="n">proc</span><span class="o">.</span><span class="n">stdout</span><span class="o">.</span><span class="n">readline</span><span class="p">,</span> <span class="sa">b</span><span class="s1">&#39;&#39;</span><span class="p">):</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;got line: </span><span class="si">{0}</span><span class="s1">&#39;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">line</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="s1">&#39;utf-8&#39;</span><span class="p">)),</span> <span class="n">end</span><span class="o">=</span><span class="s1">&#39;&#39;</span><span class="p">)</span>
+
+
+<span class="k">def</span> <span class="nf">main</span><span class="p">():</span>
+    <span class="n">proc</span> <span class="o">=</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">Popen</span><span class="p">([</span><span class="s1">&#39;python3&#39;</span><span class="p">,</span> <span class="s1">&#39;-u&#39;</span><span class="p">,</span> <span class="s1">&#39;-m&#39;</span><span class="p">,</span> <span class="s1">&#39;http.server&#39;</span><span class="p">,</span> <span class="s1">&#39;8070&#39;</span><span class="p">],</span>
+                            <span class="n">stdout</span><span class="o">=</span><span class="n">subprocess</span><span class="o">.</span><span class="n">PIPE</span><span class="p">,</span>
+                            <span class="n">stderr</span><span class="o">=</span><span class="n">subprocess</span><span class="o">.</span><span class="n">STDOUT</span><span class="p">)</span>
+
+    <span class="n">t</span> <span class="o">=</span> <span class="n">threading</span><span class="o">.</span><span class="n">Thread</span><span class="p">(</span><span class="n">target</span><span class="o">=</span><span class="n">output_reader</span><span class="p">,</span> <span class="n">args</span><span class="o">=</span><span class="p">(</span><span class="n">proc</span><span class="p">,))</span>
+    <span class="n">t</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
+
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mf">0.2</span><span class="p">)</span>
+        <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">4</span><span class="p">):</span>
+            <span class="n">resp</span> <span class="o">=</span> <span class="n">urllib</span><span class="o">.</span><span class="n">request</span><span class="o">.</span><span class="n">urlopen</span><span class="p">(</span><span class="s1">&#39;http://localhost:8070&#39;</span><span class="p">)</span>
+            <span class="k">assert</span> <span class="sa">b</span><span class="s1">&#39;Directory listing&#39;</span> <span class="ow">in</span> <span class="n">resp</span><span class="o">.</span><span class="n">read</span><span class="p">()</span>
+            <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mf">0.1</span><span class="p">)</span>
+    <span class="k">finally</span><span class="p">:</span>
+        <span class="n">proc</span><span class="o">.</span><span class="n">terminate</span><span class="p">()</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">proc</span><span class="o">.</span><span class="n">wait</span><span class="p">(</span><span class="n">timeout</span><span class="o">=</span><span class="mf">0.2</span><span class="p">)</span>
+            <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;== subprocess exited with rc =&#39;</span><span class="p">,</span> <span class="n">proc</span><span class="o">.</span><span class="n">returncode</span><span class="p">)</span>
+        <span class="k">except</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">TimeoutExpired</span><span class="p">:</span>
+            <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;subprocess did not terminate in time&#39;</span><span class="p">)</span>
+    <span class="n">t</span><span class="o">.</span><span class="n">join</span><span class="p">()</span>
+</pre></div>
+<p>The sample is similar except for how stdout is handled; there's no more calls to
+<tt class="docutils literal">communicate</tt>; instead, <tt class="docutils literal">proc.wait</tt> just waits for the child to exit (after
+<tt class="docutils literal">SIGTERM</tt> has been sent). A thread polls the child's <tt class="docutils literal">stdout</tt> attribute,
+looping as long as new lines are available and printing them immediately. If you
+run this sample, you'll notice that the child's stdout is reported in real-time,
+rather than as one lump at the end.</p>
+<p>The <tt class="docutils literal">iter(proc.stdout.readline, <span class="pre">b'')</span></tt> snippet is continously calling
+<tt class="docutils literal">proc.stdout.readline()</tt>, until this call returns an empty bytestring. This
+only happens when <tt class="docutils literal">proc.stdout</tt> is closed, which occurs when the child exits.
+Thus, while it may seem like the reader thread might never terminate - it always
+will! As long as the child process is running, the thread will dutifully block
+on that <tt class="docutils literal">readline</tt>; as soon as the child terminates, the <tt class="docutils literal">readline</tt> call
+returns <tt class="docutils literal">b''</tt> and the thread exits.</p>
+<p>If we don't want to just <tt class="docutils literal">print</tt> the captured stdout, but rather do something
+with it (such as look for expected patterns), this is easy to organize with
+Python's thread-safe queue. The reader thread becomes:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">output_reader</span><span class="p">(</span><span class="n">proc</span><span class="p">,</span> <span class="n">outq</span><span class="p">):</span>
+    <span class="k">for</span> <span class="n">line</span> <span class="ow">in</span> <span class="nb">iter</span><span class="p">(</span><span class="n">proc</span><span class="o">.</span><span class="n">stdout</span><span class="o">.</span><span class="n">readline</span><span class="p">,</span> <span class="sa">b</span><span class="s1">&#39;&#39;</span><span class="p">):</span>
+        <span class="n">outq</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="n">line</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="s1">&#39;utf-8&#39;</span><span class="p">))</span>
+</pre></div>
+<p>And we launch it with:</p>
+<div class="highlight"><pre><span></span><span class="n">outq</span> <span class="o">=</span> <span class="n">queue</span><span class="o">.</span><span class="n">Queue</span><span class="p">()</span>
+<span class="n">t</span> <span class="o">=</span> <span class="n">threading</span><span class="o">.</span><span class="n">Thread</span><span class="p">(</span><span class="n">target</span><span class="o">=</span><span class="n">output_reader</span><span class="p">,</span> <span class="n">args</span><span class="o">=</span><span class="p">(</span><span class="n">proc</span><span class="p">,</span> <span class="n">outq</span><span class="p">))</span>
+<span class="n">t</span><span class="o">.</span><span class="n">start</span><span class="p">()</span>
+</pre></div>
+<p>Then at any point we can check if there's stuff in the queue by using its
+non-blocking mode (the full code sample is <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/python-interact-subprocess/interact-server-with-thread-queue.py">here</a>):</p>
+<div class="highlight"><pre><span></span><span class="k">try</span><span class="p">:</span>
+    <span class="n">line</span> <span class="o">=</span> <span class="n">outq</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">block</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;got line from outq: </span><span class="si">{0}</span><span class="s1">&#39;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">line</span><span class="p">),</span> <span class="n">end</span><span class="o">=</span><span class="s1">&#39;&#39;</span><span class="p">)</span>
+<span class="k">except</span> <span class="n">queue</span><span class="o">.</span><span class="n">Empty</span><span class="p">:</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;could not get line from queue&#39;</span><span class="p">)</span>
+</pre></div>
+</div>
+<div class="section" id="direct-interaction-with-the-child-s-stdin-and-stdout">
+<h2>Direct interaction with the child's stdin and stdout</h2>
+<p>This sample is getting into dangerous waters; the <tt class="docutils literal">subprocess</tt> module
+documentation warns against doing the things described here due to possible
+deadlocks, but sometimes there's simply no choice! Some programs like using
+their stdin and stdout for interaction. Alternatively, you may have a program
+with an interactive (interpreter) mode you'd like to test - like the Python
+interepreter itself. Sometimes it's OK to feed this program all its input at
+once and then check its output; this can, and should be done with
+<tt class="docutils literal">communicate</tt> - the perfect API for this purpose. It properly feeds stdin,
+closes it when done (which signals many interactive programs that game's over),
+etc. But what if we really want to provide additional input based on some
+previous output of the child process. Here goes:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">main</span><span class="p">():</span>
+    <span class="n">proc</span> <span class="o">=</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">Popen</span><span class="p">([</span><span class="s1">&#39;python3&#39;</span><span class="p">,</span> <span class="s1">&#39;-i&#39;</span><span class="p">],</span>
+                            <span class="n">stdin</span><span class="o">=</span><span class="n">subprocess</span><span class="o">.</span><span class="n">PIPE</span><span class="p">,</span>
+                            <span class="n">stdout</span><span class="o">=</span><span class="n">subprocess</span><span class="o">.</span><span class="n">PIPE</span><span class="p">,</span>
+                            <span class="n">stderr</span><span class="o">=</span><span class="n">subprocess</span><span class="o">.</span><span class="n">PIPE</span><span class="p">)</span>
+
+    <span class="c1"># To avoid deadlocks: careful to: add \n to output, flush output, use</span>
+    <span class="c1"># readline() rather than read()</span>
+    <span class="n">proc</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="sa">b</span><span class="s1">&#39;2+2</span><span class="se">\n</span><span class="s1">&#39;</span><span class="p">)</span>
+    <span class="n">proc</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">flush</span><span class="p">()</span>
+    <span class="nb">print</span><span class="p">(</span><span class="n">proc</span><span class="o">.</span><span class="n">stdout</span><span class="o">.</span><span class="n">readline</span><span class="p">())</span>
+
+    <span class="n">proc</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="sa">b</span><span class="s1">&#39;len(&quot;foobar&quot;)</span><span class="se">\n</span><span class="s1">&#39;</span><span class="p">)</span>
+    <span class="n">proc</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">flush</span><span class="p">()</span>
+    <span class="nb">print</span><span class="p">(</span><span class="n">proc</span><span class="o">.</span><span class="n">stdout</span><span class="o">.</span><span class="n">readline</span><span class="p">())</span>
+
+    <span class="n">proc</span><span class="o">.</span><span class="n">stdin</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>
+    <span class="n">proc</span><span class="o">.</span><span class="n">terminate</span><span class="p">()</span>
+    <span class="n">proc</span><span class="o">.</span><span class="n">wait</span><span class="p">(</span><span class="n">timeout</span><span class="o">=</span><span class="mf">0.2</span><span class="p">)</span>
+</pre></div>
+<p>Let me reiterate what the comment in this code sample is saying:</p>
+<ul class="simple">
+<li>When sending input to a line interpreter, don't forget to send the actual
+newline.</li>
+<li>Always flush the stream after placing data into it, since it may be buffered.</li>
+<li>Use <tt class="docutils literal">readline</tt> to get input from the line interpreter.</li>
+</ul>
+<p>We have to be very careful to avoid the following situation:</p>
+<ol class="arabic simple">
+<li>We send data to the child's stdin, but it doesn't get the complete input for
+some reason (lack of newline, buffering etc.)</li>
+<li>We then invoke <tt class="docutils literal">readline</tt> to wait for the reply.</li>
+</ol>
+<p>Since the child is still waiting for input to complete (step 1), our step 2 may
+hang forever. This is a <em>classic deadlock</em>.</p>
+<p>In the end of the interaction, we close the child's <tt class="docutils literal">stdin</tt> (this is optional
+but useful for some kinds of child processes) call <tt class="docutils literal">terminate</tt> and then
+<tt class="docutils literal">wait</tt>. It would be better to send the child process some sort of &quot;exit&quot;
+command (<tt class="docutils literal">quit()</tt> in the case of the Python interpreter); the <tt class="docutils literal">terminate</tt>
+here is to demonstrate what we have to do if the other options are unavailable.
+Note that we could also use <tt class="docutils literal">communicate</tt> here instead of <tt class="docutils literal">wait</tt> to capture
+the stderr output.</p>
+</div>
+<div class="section" id="interact-using-non-blocking-reads-and-stoppable-threads">
+<h2>Interact using non-blocking reads and stoppable threads</h2>
+<p>The final sample demonstrates a slighly more advanced scenario. Suppose we're
+testing a long-lived socket server, and we're interested in orchestrating
+complex interactions with it, perhaps with multiple concurrent clients. We'll
+also want a clean shut-down of the whole setup of threads and child processes.
+<a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/python-interact-subprocess/socket-server.py">The full code sample is here</a>;
+what follows is a couple of representative snippets. The key ingredient is this
+socket reading function, meant to be run in its own thread:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">socket_reader</span><span class="p">(</span><span class="n">sockobj</span><span class="p">,</span> <span class="n">outq</span><span class="p">,</span> <span class="n">exit_event</span><span class="p">):</span>
+    <span class="k">while</span> <span class="ow">not</span> <span class="n">exit_event</span><span class="o">.</span><span class="n">is_set</span><span class="p">():</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">buf</span> <span class="o">=</span> <span class="n">sockobj</span><span class="o">.</span><span class="n">recv</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+            <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">buf</span><span class="p">)</span> <span class="o">&lt;</span> <span class="mi">1</span><span class="p">:</span>
+                <span class="k">break</span>
+            <span class="n">outq</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="n">buf</span><span class="p">)</span>
+        <span class="k">except</span> <span class="n">socket</span><span class="o">.</span><span class="n">timeout</span><span class="p">:</span>
+            <span class="k">continue</span>
+        <span class="k">except</span> <span class="ne">OSError</span> <span class="k">as</span> <span class="n">e</span><span class="p">:</span>
+            <span class="k">break</span>
+</pre></div>
+<p>Best used with a socket that has a timeout set on it, this function will
+repeatedly monitor the socket for new data and push everything it receives <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>
+into <tt class="docutils literal">outq</tt>, which is a <tt class="docutils literal">queue.Queue</tt>. The function exits when either the
+socket is closed (<tt class="docutils literal">recv</tt> returns an empty bytestring), or when
+<tt class="docutils literal">exit_event</tt> (a <tt class="docutils literal">threading.Event</tt>) is set by the caller.</p>
+<p>The caller can launch this function in a thread and occasionally try to read
+new items from the queue in a non-blocking way:</p>
+<div class="highlight"><pre><span></span><span class="k">try</span><span class="p">:</span>
+    <span class="n">v</span> <span class="o">=</span> <span class="n">outq</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">block</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="n">v</span><span class="p">)</span>
+<span class="k">except</span> <span class="n">queue</span><span class="o">.</span><span class="n">Empty</span><span class="p">:</span>
+    <span class="k">break</span>
+</pre></div>
+<p>When all is done, the caller can set the exit <tt class="docutils literal">Event</tt> to stop the thread (the
+thread will stop on its own if the socket it's reading from is closed, but the
+event lets us control this more directly).</p>
+</div>
+<div class="section" id="final-words">
+<h2>Final words</h2>
+<p>There's no single fits-all solution for the task described in this post; I
+presented a bunch of recipes to handle the more commonly occurring situations,
+but it may be the case that specific use cases may not be addressed by them.
+Please let me know if you run into an interesting use case these recipes helped
+(or did not help!) resolve. Any other feedback is also welcome, as usual.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>Earlier version of Python would have to emulate this with a thread.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>One byte at a time in this sample, but could be easily changed to
+receive larger chunks.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

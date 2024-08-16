@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Go HTTPS servers with TLS - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Go HTTPS servers with TLS">
+                        Go HTTPS servers with TLS
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> April 03, 2021 at 06:50</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/network-programming.html">Network Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This post is a basic introduction to running HTTPS servers and clients in Go
+using TLS. It assumes some familiarity with public-key crypto. Feel free to
+check out my earlier posts about <a class="reference external" href="../../2019/rsa-theory-and-implementation/index.html">RSA</a> and the
+<a class="reference external" href="../../2019/diffie-hellman-key-exchange/index.html">Diffie-Hellman Key Exchange</a>; TLS uses
+the elliptic-curve version of Diffie-Hellman. I won't be covering how the
+protocol itself works in detail here, but if you're interested I recommend to
+read up on the subject.</p>
+<p>All the code for this post is available <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2021/tls">in this repository</a>.</p>
+<div class="section" id="a-very-brief-intro-to-tls">
+<h2>A (very) brief intro to TLS</h2>
+<p>TLS (Transport Layer Security) is a protocol designed to enable client-server
+communication over the Internet in a way that prevents eavesdropping, tampering
+and message forgery. It's described in <a class="reference external" href="https://tools.ietf.org/html/rfc8446">RFC 8446</a>.</p>
+<p>TLS relies on state-of-the art cryptography; this is also why it's recommended
+using the newest version of TLS available, which is 1.3 (as of early 2021).
+Revisions of the TLS protocol clean up potentially unsafe corner cases, remove
+weak encryption algorithms and generally try to make the protocol more secure.</p>
+<p>When a client connects to a server with plain HTTP, it starts sending plaintext
+data wrapped in TCP packets right after completing the standard TCP handshake
+(SYN -&gt; SYN-ACK -&gt; ACK). Using TLS, the situation is somewhat more complicated
+<a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>:</p>
+<object class="align-center" data="../../images/2021/tlsdiagram.svg" style="width: 600px;" type="image/svg+xml">TLS diagram</object>
+<p>After completing the TCP handshake, the server and client perform a TLS
+handshake to agree on a shared secret that's unique only to them (and to this
+specific session). This shared secret is then used to securely encrypt all
+data being exchanged between them. While there's a lot going on here, it's
+something the TLS layer implements for us. We just have to set up the TLS server
+(or client) properly; the actual diff between an HTTP and an HTTPS server in Go
+is minimal.</p>
+</div>
+<div class="section" id="tls-certificates">
+<h2>TLS certificates</h2>
+<p>Before we jump to the code showing how to set up an HTTPS server in Go using
+TLS, let's talk about <em>certificates</em>. In the diagram above, you'll notice that
+the server sends a certificate to the client as part of its very first
+<em>ServerHello</em> message. Formally these are known as X.509 certificates,
+described by <a class="reference external" href="https://tools.ietf.org/html/rfc5280">RFC 5280</a>.</p>
+<p>Public key cryptography plays a major part in TLS. A certificate is a standard
+way to wrap the server's public key, along with its identity and a signature by
+a trusted authority (typically a <a class="reference external" href="https://en.wikipedia.org/wiki/Certificate_authority">Certificate Authority</a>). Suppose you want to
+talk to <a class="reference external" href="https://bigbank.com">https://bigbank.com</a>; how do you know it's really Big Bank there asking
+for your password? What if someone is sitting on your cable connection,
+intercepting all traffic and pretending to be Big Bank (classical MITM -
+man-in-the-middle attack).</p>
+<p>The certificate process is designed to prevent this scenario. When your client's
+underlying TLS implementation accesses <a class="reference external" href="https://bigbank.com">https://bigbank.com</a>, it expects Big
+Bank's certificate with a public key, signed by a trusted certificate authority
+(CA). Certificate signatures can form a tree (bank's key signed by A, which is
+signed by B, which is signed by C, etc.), but at the end of the chain it must
+have some certificate authority trusted by your client. Modern browsers have a
+list of pre-trusted CAs (along with their own certificates) built-in. Since your
+cable snooper cannot forge a trusted certificate's signature, they cannot
+impersonate Big Bank.</p>
+</div>
+<div class="section" id="generating-self-signed-certificates-in-go">
+<h2>Generating self-signed certificates in Go</h2>
+<p>For local testing, it's often very useful to be able to work with self-signed
+certificates. A self-signed certificate is a certificate for some entity E with
+a public key P, but the key is signed not by a known certificate authority, but
+rather by P itself. While self-signed certificates have some additional
+legitimate uses, we'll focus on their use for testing here.</p>
+<p>Go's standard library has excellent support for everything related to crypto,
+TLS and certificates. Let's see how to generate a self-signed certificate in Go!</p>
+<div class="highlight"><pre><span></span><span class="nx">privateKey</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">ecdsa</span><span class="p">.</span><span class="nx">GenerateKey</span><span class="p">(</span><span class="nx">elliptic</span><span class="p">.</span><span class="nx">P256</span><span class="p">(),</span><span class="w"> </span><span class="nx">rand</span><span class="p">.</span><span class="nx">Reader</span><span class="p">)</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatalf</span><span class="p">(</span><span class="s">&quot;Failed to generate private key: %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This code uses the <tt class="docutils literal">crypto/ecdsa</tt>, <tt class="docutils literal">crypto/elliptic</tt> and <tt class="docutils literal">crypto/rand</tt>
+packages to generate a new key pair <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>, using the P-256 elliptic curve,
+which is one of the allowed curves in TLS 1.3.</p>
+<p>Next, we'll create a <em>certificate template</em>:</p>
+<div class="highlight"><pre><span></span><span class="nx">serialNumberLimit</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">new</span><span class="p">(</span><span class="nx">big</span><span class="p">.</span><span class="nx">Int</span><span class="p">).</span><span class="nx">Lsh</span><span class="p">(</span><span class="nx">big</span><span class="p">.</span><span class="nx">NewInt</span><span class="p">(</span><span class="mi">1</span><span class="p">),</span><span class="w"> </span><span class="mi">128</span><span class="p">)</span><span class="w"></span>
+<span class="nx">serialNumber</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">rand</span><span class="p">.</span><span class="nx">Int</span><span class="p">(</span><span class="nx">rand</span><span class="p">.</span><span class="nx">Reader</span><span class="p">,</span><span class="w"> </span><span class="nx">serialNumberLimit</span><span class="p">)</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatalf</span><span class="p">(</span><span class="s">&quot;Failed to generate serial number: %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="nx">template</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">x509</span><span class="p">.</span><span class="nx">Certificate</span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">SerialNumber</span><span class="p">:</span><span class="w"> </span><span class="nx">serialNumber</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Subject</span><span class="p">:</span><span class="w"> </span><span class="nx">pkix</span><span class="p">.</span><span class="nx">Name</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Organization</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="kt">string</span><span class="p">{</span><span class="s">&quot;My Corp&quot;</span><span class="p">},</span><span class="w"></span>
+<span class="w">  </span><span class="p">},</span><span class="w"></span>
+<span class="w">  </span><span class="nx">DNSNames</span><span class="p">:</span><span class="w">  </span><span class="p">[]</span><span class="kt">string</span><span class="p">{</span><span class="s">&quot;localhost&quot;</span><span class="p">},</span><span class="w"></span>
+<span class="w">  </span><span class="nx">NotBefore</span><span class="p">:</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Now</span><span class="p">(),</span><span class="w"></span>
+<span class="w">  </span><span class="nx">NotAfter</span><span class="p">:</span><span class="w">  </span><span class="nx">time</span><span class="p">.</span><span class="nx">Now</span><span class="p">().</span><span class="nx">Add</span><span class="p">(</span><span class="mi">3</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Hour</span><span class="p">),</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">KeyUsage</span><span class="p">:</span><span class="w">              </span><span class="nx">x509</span><span class="p">.</span><span class="nx">KeyUsageDigitalSignature</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ExtKeyUsage</span><span class="p">:</span><span class="w">           </span><span class="p">[]</span><span class="nx">x509</span><span class="p">.</span><span class="nx">ExtKeyUsage</span><span class="p">{</span><span class="nx">x509</span><span class="p">.</span><span class="nx">ExtKeyUsageServerAuth</span><span class="p">},</span><span class="w"></span>
+<span class="w">  </span><span class="nx">BasicConstraintsValid</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Each certificate needs a unique serial number; typically, certificate
+authorities will have these stored in some database but for our local needs a
+random 128-bit number will do. This is what the first few lines of the snippet
+are doing.</p>
+<p>Next comes the <tt class="docutils literal">x509.Certificate</tt> template. For more information on what the
+fields mean, see the <a class="reference external" href="https://pkg.go.dev/crypto/x509">crypto/x509 package docs</a>, as well as <a class="reference external" href="https://tools.ietf.org/html/rfc5280">RFC 5280</a>. We'll just note that the certificate
+is valid for 3 hours, and is only valid for the <tt class="docutils literal">localhost</tt> domain.</p>
+<p>Next:</p>
+<div class="highlight"><pre><span></span><span class="nx">derBytes</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">x509</span><span class="p">.</span><span class="nx">CreateCertificate</span><span class="p">(</span><span class="nx">rand</span><span class="p">.</span><span class="nx">Reader</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">template</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">template</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">privateKey</span><span class="p">.</span><span class="nx">PublicKey</span><span class="p">,</span><span class="w"> </span><span class="nx">privateKey</span><span class="p">)</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatalf</span><span class="p">(</span><span class="s">&quot;Failed to create certificate: %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The certificate is created from the template, and is signed with the private key
+we've generated earlier. Note that <tt class="docutils literal">&amp;template</tt> is passed in both for the
+<tt class="docutils literal">template</tt> and <tt class="docutils literal">parent</tt> parameters of <tt class="docutils literal">CreateCertificate</tt>. The latter is
+what makes this certificate <em>self-signed</em>.</p>
+<p>This is it, we have the private key for our server and its certificate (which
+contains the public key, among other information). All that's left now is to
+serialize them into files. First, the certificate:</p>
+<div class="highlight"><pre><span></span><span class="nx">pemCert</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">pem</span><span class="p">.</span><span class="nx">EncodeToMemory</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">pem</span><span class="p">.</span><span class="nx">Block</span><span class="p">{</span><span class="nx">Type</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;CERTIFICATE&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">Bytes</span><span class="p">:</span><span class="w"> </span><span class="nx">derBytes</span><span class="p">})</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">pemCert</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;Failed to encode certificate to PEM&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">WriteFile</span><span class="p">(</span><span class="s">&quot;cert.pem&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">pemCert</span><span class="p">,</span><span class="w"> </span><span class="mo">0644</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="nx">log</span><span class="p">.</span><span class="nx">Print</span><span class="p">(</span><span class="s">&quot;wrote cert.pem\n&quot;</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>And then, the private key:</p>
+<div class="highlight"><pre><span></span><span class="nx">privBytes</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">x509</span><span class="p">.</span><span class="nx">MarshalPKCS8PrivateKey</span><span class="p">(</span><span class="nx">privateKey</span><span class="p">)</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatalf</span><span class="p">(</span><span class="s">&quot;Unable to marshal private key: %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="nx">pemKey</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">pem</span><span class="p">.</span><span class="nx">EncodeToMemory</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">pem</span><span class="p">.</span><span class="nx">Block</span><span class="p">{</span><span class="nx">Type</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;PRIVATE KEY&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">Bytes</span><span class="p">:</span><span class="w"> </span><span class="nx">privBytes</span><span class="p">})</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">pemKey</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;Failed to encode key to PEM&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">WriteFile</span><span class="p">(</span><span class="s">&quot;key.pem&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">pemKey</span><span class="p">,</span><span class="w"> </span><span class="mo">0600</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="nx">log</span><span class="p">.</span><span class="nx">Print</span><span class="p">(</span><span class="s">&quot;wrote key.pem\n&quot;</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>We serialize the certificate and the key into <a class="reference external" href="https://en.wikipedia.org/wiki/Privacy-Enhanced_Mail">PEM files</a>, which looks like this
+(for the certificate):</p>
+<div class="highlight"><pre><span></span><span class="o">-----</span><span class="nx">BEGIN</span><span class="w"> </span><span class="nx">CERTIFICATE</span><span class="o">-----</span><span class="w"></span>
+<span class="nx">MIIBbjCCARSgAwIBAgIRALBCBgLhD1I</span><span class="o">/</span><span class="mi">4</span><span class="nx">S0fRZv6yfcwCgYIKoZIzj0EAwIwEjEQ</span><span class="w"></span>
+<span class="nx">MA4GA1UEChMHTXkgQ29ycDAeFw0yMTAzMjcxNDI1NDlaFw0yMTAzMjcxNzI1NDla</span><span class="w"></span>
+<span class="nx">MBIxEDAOBgNVBAoTB015IENvcnAwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAASf</span><span class="w"></span>
+<span class="nx">wNSifB2LWDeb6xUAWbwnBQ2raSQTqqpaR1C1eEiy6cgqUiiOlr4jUDDiFCly</span><span class="o">+</span><span class="nx">AS9</span><span class="w"></span>
+<span class="nx">pNNe8o63</span><span class="o">/</span><span class="nx">Gab</span><span class="o">/</span><span class="mi">98</span><span class="nx">dwFNQo0swSTAOBgNVHQ8BAf8EBAMCB4AwEwYDVR0lBAwwCgYI</span><span class="w"></span>
+<span class="nx">KwYBBQUHAwEwDAYDVR0TAQH</span><span class="o">/</span><span class="nx">BAIwADAUBgNVHREEDTALgglsb2NhbGhvc3QwCgYI</span><span class="w"></span>
+<span class="nx">KoZIzj0EAwIDSAAwRQIgYlJYGIwSvA</span><span class="o">+</span><span class="nx">AmsHe8P34B5</span><span class="o">+</span><span class="nx">hlfWEK4</span><span class="o">+</span><span class="nx">kBmydJ65XJZMC</span><span class="w"></span>
+<span class="nx">IQCzg5aihUXh7Rm0L1K3JrG7eRuTuFSkHoAhzk4cy6FqfQ</span><span class="o">==</span><span class="w"></span>
+<span class="o">-----</span><span class="nx">END</span><span class="w"> </span><span class="nx">CERTIFICATE</span><span class="o">-----</span><span class="w"></span>
+</pre></div>
+<p>If you've ever set up SSH keys, the format should look familiar. We can use
+the <tt class="docutils literal">openssl</tt> command-line tool to show its contents:</p>
+<div class="highlight"><pre><span></span>$ openssl x509 -in cert.pem -text
+Certificate:
+    Data:
+        Version: 3 (0x2)
+        Serial Number:
+            b0:42:06:02:e1:0f:52:3f:e1:2d:1f:45:9b:fa:c9:f7
+        Signature Algorithm: ecdsa-with-SHA256
+        Issuer: O = My Corp
+        Validity
+            Not Before: Mar 27 14:25:49 2021 GMT
+            Not After : Mar 27 17:25:49 2021 GMT
+        Subject: O = My Corp
+        Subject Public Key Info:
+            Public Key Algorithm: id-ecPublicKey
+                Public-Key: (256 bit)
+                pub:
+                    04:9f:c0:d4:a2:7c:1d:8b:58:37:9b:eb:15:00:59:
+                    bc:27:05:0d:ab:69:24:13:aa:aa:5a:47:50:b5:78:
+                    48:b2:e9:c8:2a:52:28:8e:96:be:23:50:30:e2:14:
+                    29:72:f8:04:bd:a4:d3:5e:f2:8e:b7:fc:66:9b:ff:
+                    df:1d:c0:53:50
+                ASN1 OID: prime256v1
+                NIST CURVE: P-256
+        X509v3 extensions:
+            X509v3 Key Usage: critical
+                Digital Signature
+            X509v3 Extended Key Usage:
+                TLS Web Server Authentication
+            X509v3 Basic Constraints: critical
+                CA:FALSE
+            X509v3 Subject Alternative Name:
+                DNS:localhost
+    Signature Algorithm: ecdsa-with-SHA256
+         30:45:02:20:62:52:58:18:8c:12:bc:0f:80:9a:c1:de:f0:fd:
+         f8:07:9f:a1:95:f5:84:2b:8f:a4:06:6c:9d:27:ae:57:25:93:
+         02:21:00:b3:83:96:a2:85:45:e1:ed:19:b4:2f:52:b7:26:b1:
+         bb:79:1b:93:b8:54:a4:1e:80:21:ce:4e:1c:cb:a1:6a:7d
+</pre></div>
+</div>
+<div class="section" id="https-server-in-go">
+<h2>HTTPS server in Go</h2>
+<p>Now that we have the certificate and private key in hand, we are ready to run an
+HTTPS server! Once again, the standard library makes it very easy, though it's
+important to mention that security is a very tricky issue. Before exposing your
+server to the public Internet, consider consulting with a security engineer
+about best practices and what configuration options to be aware of <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>.</p>
+<p>Here's a basic HTTPS server in Go:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">addr</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;addr&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;:4000&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;HTTPS network address&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">certFile</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;certfile&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;cert.pem&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;certificate PEM file&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">keyFile</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;keyfile&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;key.pem&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;key PEM file&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Parse</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">mux</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">NewServeMux</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">mux</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/&quot;</span><span class="p">,</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Path</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="s">&quot;/&quot;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">http</span><span class="p">.</span><span class="nx">NotFound</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Proudly served with Go and HTTPS!&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">})</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">srv</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">http</span><span class="p">.</span><span class="nx">Server</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Addr</span><span class="p">:</span><span class="w">    </span><span class="o">*</span><span class="nx">addr</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Handler</span><span class="p">:</span><span class="w"> </span><span class="nx">mux</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">TLSConfig</span><span class="p">:</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">tls</span><span class="p">.</span><span class="nx">Config</span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">MinVersion</span><span class="p">:</span><span class="w">               </span><span class="nx">tls</span><span class="p">.</span><span class="nx">VersionTLS13</span><span class="p">,</span><span class="w"></span>
+<span class="w">      </span><span class="nx">PreferServerCipherSuites</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="p">},</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;Starting server on %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">addr</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">srv</span><span class="p">.</span><span class="nx">ListenAndServeTLS</span><span class="p">(</span><span class="o">*</span><span class="nx">certFile</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">keyFile</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It serves a single handler on the root path. The interesting part is the
+TLS configuration, as well as the <tt class="docutils literal">ListenAndServeTLS</tt> call, which takes the
+paths to a certificate file and a private key file (in PEM format, just as
+we generated them earlier). The TLS configuration has many possible fields;
+here, I opted for a relatively strict protocol of forcing TLS 1.3 at minimum.
+TLS 1.3 comes with strong security out of the box, so this is a good option if
+you can ensure all your clients understand this version (and in 2021, they
+should!)</p>
+<p>The diff from a plain HTTP server is fewer than 10 lines of code! The bulk of
+the server's code (handlers for specific routes) is completely oblivious to the
+underlying protocol and won't change.</p>
+<p>With this server running locally (and serving on port 4000 by default), Chrome
+will initially balk when accessing it:</p>
+<img alt="Chrome complains about our HTTPS server" class="align-center" src="../../images/2021/chrome-complain-https.png" style="width: 600px;" />
+<p>That's because a web browser will not, by default, accept a self-signed
+certificate. As mentioned above, browsers come with a hard-coded list of CAs
+they trust, and our self-signed certificate is obviously not one of them. We
+can still proceed to the server by clicking Advanced and then allowing Chrome
+to go on, accepting the risk explicitly. It will then show us the website,
+albeit grudgingly (with a red &quot;Not secure&quot; sign in the address bar).</p>
+<p>If we try to <tt class="docutils literal">curl</tt> to the server, we'll also get an error <a class="footnote-reference" href="index.html#footnote-4" id="footnote-reference-4">[4]</a>:</p>
+<div class="highlight"><pre><span></span>$ curl -Lv  https://localhost:4000
+
+*   Trying 127.0.0.1:4000...
+* TCP_NODELAY set
+* Connected to localhost (127.0.0.1) port 4000 (#0)
+* ALPN, offering h2
+* ALPN, offering http/1.1
+* successfully set certificate verify locations:
+*   CAfile: /etc/ssl/certs/ca-certificates.crt
+  CApath: /etc/ssl/certs
+* TLSv1.3 (OUT), TLS handshake, Client hello (1):
+* TLSv1.3 (IN), TLS handshake, Server hello (2):
+* TLSv1.3 (IN), TLS handshake, Encrypted Extensions (8):
+* TLSv1.3 (IN), TLS handshake, Certificate (11):
+* TLSv1.3 (OUT), TLS alert, unknown CA (560):
+* SSL certificate problem: unable to get local issuer certificate
+* Closing connection 0
+curl: (60) SSL certificate problem: unable to get local issuer certificate
+More details here: https://curl.haxx.se/docs/sslcerts.html
+
+curl failed to verify the legitimacy of the server and therefore could not
+establish a secure connection to it. To learn more about this situation and
+how to fix it, please visit the web page mentioned above.
+</pre></div>
+<p>By reading the docs, we can find that <tt class="docutils literal">curl</tt> can be made to trust our server
+by providing it with the server's certificate into the <tt class="docutils literal"><span class="pre">--cacert</span></tt> flag. If
+we try that:</p>
+<div class="highlight"><pre><span></span>$ curl -Lv --cacert &lt;path/to/cert.pem&gt;  https://localhost:4000
+
+*   Trying 127.0.0.1:4000...
+* TCP_NODELAY set
+* Connected to localhost (127.0.0.1) port 4000 (#0)
+* ALPN, offering h2
+* ALPN, offering http/1.1
+* successfully set certificate verify locations:
+*   CAfile: /home/eliben/eli/private-code-for-blog/2021/tls/cert.pem
+  CApath: /etc/ssl/certs
+* TLSv1.3 (OUT), TLS handshake, Client hello (1):
+* TLSv1.3 (IN), TLS handshake, Server hello (2):
+* TLSv1.3 (IN), TLS handshake, Encrypted Extensions (8):
+* TLSv1.3 (IN), TLS handshake, Certificate (11):
+* TLSv1.3 (IN), TLS handshake, CERT verify (15):
+* TLSv1.3 (IN), TLS handshake, Finished (20):
+* TLSv1.3 (OUT), TLS change cipher, Change cipher spec (1):
+* TLSv1.3 (OUT), TLS handshake, Finished (20):
+* SSL connection using TLSv1.3 / TLS_AES_128_GCM_SHA256
+* ALPN, server accepted to use h2
+* Server certificate:
+*  subject: O=My Corp
+*  start date: Mar 29 13:30:25 2021 GMT
+*  expire date: Mar 29 16:30:25 2021 GMT
+*  subjectAltName: host &quot;localhost&quot; matched cert&#39;s &quot;localhost&quot;
+*  issuer: O=My Corp
+*  SSL certificate verify ok.
+* Using HTTP2, server supports multi-use
+* Connection state changed (HTTP/2 confirmed)
+* Copying HTTP/2 data in stream buffer to connection buffer after upgrade: len=0
+* Using Stream ID: 1 (easy handle 0x557103006e10)
+&gt; GET / HTTP/2
+&gt; Host: localhost:4000
+&gt; user-agent: curl/7.68.0
+&gt; accept: */*
+&gt;
+* TLSv1.3 (IN), TLS handshake, Newsession Ticket (4):
+* Connection state changed (MAX_CONCURRENT_STREAMS == 250)!
+&lt; HTTP/2 200
+&lt; content-type: text/plain; charset=utf-8
+&lt; content-length: 33
+&lt; date: Mon, 29 Mar 2021 13:31:34 GMT
+&lt;
+* Connection #0 to host localhost left intact
+Proudly served with Go and HTTPS!
+</pre></div>
+<p>Success!</p>
+<p>We can also talk to our server using a custom HTTPS client written in Go. Here's
+the code:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">addr</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;addr&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;localhost:4000&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;HTTPS server address&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">certFile</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;certfile&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;cert.pem&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;trusted CA certificate&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Parse</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">cert</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">ReadFile</span><span class="p">(</span><span class="o">*</span><span class="nx">certFile</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">certPool</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">x509</span><span class="p">.</span><span class="nx">NewCertPool</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">certPool</span><span class="p">.</span><span class="nx">AppendCertsFromPEM</span><span class="p">(</span><span class="nx">cert</span><span class="p">);</span><span class="w"> </span><span class="p">!</span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatalf</span><span class="p">(</span><span class="s">&quot;unable to parse cert from %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">certFile</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">client</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">http</span><span class="p">.</span><span class="nx">Client</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Transport</span><span class="p">:</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">http</span><span class="p">.</span><span class="nx">Transport</span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">TLSClientConfig</span><span class="p">:</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">tls</span><span class="p">.</span><span class="nx">Config</span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">RootCAs</span><span class="p">:</span><span class="w"> </span><span class="nx">certPool</span><span class="p">,</span><span class="w"></span>
+<span class="w">      </span><span class="p">},</span><span class="w"></span>
+<span class="w">    </span><span class="p">},</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">r</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;https://&quot;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="o">*</span><span class="nx">addr</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">Body</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">html</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">io</span><span class="p">.</span><span class="nx">ReadAll</span><span class="p">(</span><span class="nx">r</span><span class="p">.</span><span class="nx">Body</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;%v\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">Status</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="nb">string</span><span class="p">(</span><span class="nx">html</span><span class="p">))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The only part making this different from a standard HTTP client is the TLS
+setup. The important bit is setting up the <tt class="docutils literal">RootCAs</tt> field of the
+<tt class="docutils literal">tls.Config</tt> struct. This is telling Go which certificates the client can
+trust.</p>
+</div>
+<div class="section" id="other-options-for-generating-certificates">
+<h2>Other options for generating certificates</h2>
+<p>You may not know that Go comes with a tool to generate self-signed
+TLS certificates, right in the standard installation. If you have Go installed
+at <tt class="docutils literal">/usr/local/go</tt>, you can run this tool with:</p>
+<div class="highlight"><pre><span></span>$ go run /usr/local/go/src/crypto/tls/generate_cert.go -help
+</pre></div>
+<p>In general, it accomplishes the same goal as the first code snippet in this
+post, but whereas my snippet makes some opinionated decisions about what to
+generate, <tt class="docutils literal">generate_cert</tt> is configurable with flags and supports several
+different options.</p>
+<p>As we've seen, while self-signed certificates can work for testing, they're not
+ideal for all scenarios. For example, it's difficult to make browsers trust
+them, and even then the user experience doesn't fully replicate the &quot;real world&quot;
+one.</p>
+<p>Another option for generating local certificates for testing is the
+<a class="reference external" href="https://github.com/FiloSottile/mkcert">mkcert tool</a>. It creates a local
+certificate authority (CA), and adds it to your system's trusted list of CAs.
+It then generates certificates signed by this authority for you, so as far as
+the browser is concerned, they're fully trusted.</p>
+<p>If we run our simple HTTPS server with a certificate/key generated by
+<tt class="docutils literal">mkcert</tt>, Chrome will happily access it without warnings; we can also see
+the details in the Security tab of developer tools:</p>
+<img alt="Chrome happy with HTTPS server" class="align-center" src="../../images/2021/chrome-happy-https.png" style="width: 600px;" />
+<p><tt class="docutils literal">curl</tt> will also successfully contact the server without requiring a
+<tt class="docutils literal">cacert</tt> flag, because it checks the system's trusted CAs already.</p>
+<p>If you're looking for <em>real</em> certificates, Let's Encrypt is of course a natural
+option, using the <a class="reference external" href="https://certbot.eff.org/">certbot</a> client or something
+similar. In Go, libraries like <a class="reference external" href="https://github.com/caddyserver/certmagic">certmagic</a> can automate the interaction with
+Let's Encrypt for servers.</p>
+</div>
+<div class="section" id="client-authentication-mtls">
+<h2>Client authentication (mTLS)</h2>
+<p>So far the examples we've seen have the server providing its (CA-signed)
+certificate to the client to prove that the server is legitimately who it claims
+to be (e.g. your bank's website, before you agree to provide your password).</p>
+<p>This idea is easy to extend to <a class="reference external" href="https://en.wikipedia.org/wiki/Mutual_authentication">mutual authentication</a>, where the client also
+has a signed certificate to prove its identity. In the world of TLS, this is
+called <em>mTLS</em> (for <em>mutual</em> TLS), and could be useful in many settings where
+internal services have to communicate with each other securely. Public-key
+crypto is generally considered more secure than passwords.</p>
+<p>Here's a simple HTTPS server with client authentication. The lines that changed
+from the earlier HTTPS server are highlighted:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">addr</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;addr&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;:4000&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;HTTPS network address&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">certFile</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;certfile&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;cert.pem&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;certificate PEM file&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">keyFile</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;keyfile&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;key.pem&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;key PEM file&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="hll"><span class="w">  </span><span class="nx">clientCertFile</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;clientcert&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;clientcert.pem&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;certificate PEM for client authentication&quot;</span><span class="p">)</span><span class="w"></span>
+</span><span class="w">  </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Parse</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">mux</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">NewServeMux</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">mux</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/&quot;</span><span class="p">,</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Path</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="s">&quot;/&quot;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">http</span><span class="p">.</span><span class="nx">NotFound</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Proudly served with Go and HTTPS!&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">})</span><span class="w"></span>
+
+<span class="hll"><span class="w">  </span><span class="c1">// Trusted client certificate.</span><span class="w"></span>
+</span><span class="hll"><span class="w">  </span><span class="nx">clientCert</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">ReadFile</span><span class="p">(</span><span class="o">*</span><span class="nx">clientCertFile</span><span class="p">)</span><span class="w"></span>
+</span><span class="hll"><span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+</span><span class="hll"><span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+</span><span class="hll"><span class="w">  </span><span class="p">}</span><span class="w"></span>
+</span><span class="hll"><span class="w">  </span><span class="nx">clientCertPool</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">x509</span><span class="p">.</span><span class="nx">NewCertPool</span><span class="p">()</span><span class="w"></span>
+</span><span class="hll"><span class="w">  </span><span class="nx">clientCertPool</span><span class="p">.</span><span class="nx">AppendCertsFromPEM</span><span class="p">(</span><span class="nx">clientCert</span><span class="p">)</span><span class="w"></span>
+</span>
+<span class="w">  </span><span class="nx">srv</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">http</span><span class="p">.</span><span class="nx">Server</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Addr</span><span class="p">:</span><span class="w">    </span><span class="o">*</span><span class="nx">addr</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Handler</span><span class="p">:</span><span class="w"> </span><span class="nx">mux</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">TLSConfig</span><span class="p">:</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">tls</span><span class="p">.</span><span class="nx">Config</span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">MinVersion</span><span class="p">:</span><span class="w">               </span><span class="nx">tls</span><span class="p">.</span><span class="nx">VersionTLS13</span><span class="p">,</span><span class="w"></span>
+<span class="w">      </span><span class="nx">PreferServerCipherSuites</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"></span>
+<span class="hll"><span class="w">      </span><span class="nx">ClientCAs</span><span class="p">:</span><span class="w">                </span><span class="nx">clientCertPool</span><span class="p">,</span><span class="w"></span>
+</span><span class="hll"><span class="w">      </span><span class="nx">ClientAuth</span><span class="p">:</span><span class="w">               </span><span class="nx">tls</span><span class="p">.</span><span class="nx">RequireAndVerifyClientCert</span><span class="p">,</span><span class="w"></span>
+</span><span class="w">    </span><span class="p">},</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;Starting server on %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">addr</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">err</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">srv</span><span class="p">.</span><span class="nx">ListenAndServeTLS</span><span class="p">(</span><span class="o">*</span><span class="nx">certFile</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">keyFile</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The changes are pretty much what you'd expect; in addition to setting up its
+own certificate, key and TLS config, the server loads a client certificate and
+sets <tt class="docutils literal">TLSConfig</tt> to trust it. Naturally, this could also be the certificate
+of a locally trusted CA which signs client certificates.</p>
+<p>And this is an HTTPS client which authenticates itself when connecting to a
+server; again, the lines that changed from the earlier (non-mTLS) client are
+highlighted:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">addr</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;addr&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;localhost:4000&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;HTTPS server address&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">certFile</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;certfile&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;cert.pem&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;trusted CA certificate&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="hll"><span class="w">  </span><span class="nx">clientCertFile</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;clientcert&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;clientcert.pem&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;certificate PEM for client&quot;</span><span class="p">)</span><span class="w"></span>
+</span><span class="hll"><span class="w">  </span><span class="nx">clientKeyFile</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;clientkey&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;clientkey.pem&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;key PEM for client&quot;</span><span class="p">)</span><span class="w"></span>
+</span><span class="w">  </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Parse</span><span class="p">()</span><span class="w"></span>
+
+<span class="hll"><span class="w">  </span><span class="c1">// Load our client certificate and key.</span><span class="w"></span>
+</span><span class="hll"><span class="w">  </span><span class="nx">clientCert</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">tls</span><span class="p">.</span><span class="nx">LoadX509KeyPair</span><span class="p">(</span><span class="o">*</span><span class="nx">clientCertFile</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">clientKeyFile</span><span class="p">)</span><span class="w"></span>
+</span><span class="hll"><span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+</span><span class="hll"><span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+</span><span class="hll"><span class="w">  </span><span class="p">}</span><span class="w"></span>
+</span>
+<span class="w">  </span><span class="c1">// Trusted server certificate.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cert</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">ReadFile</span><span class="p">(</span><span class="o">*</span><span class="nx">certFile</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">certPool</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">x509</span><span class="p">.</span><span class="nx">NewCertPool</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">certPool</span><span class="p">.</span><span class="nx">AppendCertsFromPEM</span><span class="p">(</span><span class="nx">cert</span><span class="p">);</span><span class="w"> </span><span class="p">!</span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatalf</span><span class="p">(</span><span class="s">&quot;unable to parse cert from %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">certFile</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">client</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">http</span><span class="p">.</span><span class="nx">Client</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Transport</span><span class="p">:</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">http</span><span class="p">.</span><span class="nx">Transport</span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">TLSClientConfig</span><span class="p">:</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">tls</span><span class="p">.</span><span class="nx">Config</span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">RootCAs</span><span class="p">:</span><span class="w">      </span><span class="nx">certPool</span><span class="p">,</span><span class="w"></span>
+<span class="hll"><span class="w">        </span><span class="nx">Certificates</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="nx">tls</span><span class="p">.</span><span class="nx">Certificate</span><span class="p">{</span><span class="nx">clientCert</span><span class="p">},</span><span class="w"></span>
+</span><span class="w">      </span><span class="p">},</span><span class="w"></span>
+<span class="w">    </span><span class="p">},</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">r</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;https://&quot;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="o">*</span><span class="nx">addr</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">Body</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">html</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">io</span><span class="p">.</span><span class="nx">ReadAll</span><span class="p">(</span><span class="nx">r</span><span class="p">.</span><span class="nx">Body</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;%v\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">Status</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="nb">string</span><span class="p">(</span><span class="nx">html</span><span class="p">))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Before we try it, we'll need to change our certificate generating script to
+generate certificates suitable for clients as well. The change is in this line:</p>
+<div class="highlight"><pre><span></span><span class="nx">ExtKeyUsage</span><span class="p">:</span><span class="w">           </span><span class="p">[]</span><span class="nx">x509</span><span class="p">.</span><span class="nx">ExtKeyUsage</span><span class="p">{</span><span class="nx">x509</span><span class="p">.</span><span class="nx">ExtKeyUsageServerAuth</span><span class="p">},</span><span class="w"></span>
+</pre></div>
+<p>Which changes to:</p>
+<div class="highlight"><pre><span></span><span class="nx">ExtKeyUsage</span><span class="p">:</span><span class="w">           </span><span class="p">[]</span><span class="nx">x509</span><span class="p">.</span><span class="nx">ExtKeyUsage</span><span class="p">{</span><span class="nx">x509</span><span class="p">.</span><span class="nx">ExtKeyUsageServerAuth</span><span class="p">,</span><span class="w"> </span><span class="nx">x509</span><span class="p">.</span><span class="nx">ExtKeyUsageClientAuth</span><span class="p">},</span><span class="w"></span>
+</pre></div>
+<p>Now let's do a trial run. Start by generating separate certificates/keys for
+client and server:</p>
+<div class="highlight"><pre><span></span><span class="c1"># client cert</span>
+
+$ go run tls-self-signed-cert.go
+<span class="m">2021</span>/04/03 <span class="m">05</span>:51:25 wrote cert.pem
+<span class="m">2021</span>/04/03 <span class="m">05</span>:51:25 wrote key.pem
+$ mv cert.pem clientcert.pem
+$ mv key.pem clientkey.pem
+
+<span class="c1"># server cert</span>
+
+$ go run tls-self-signed-cert.go
+<span class="m">2021</span>/04/03 <span class="m">05</span>:51:42 wrote cert.pem
+<span class="m">2021</span>/04/03 <span class="m">05</span>:51:42 wrote key.pem
+</pre></div>
+<p>Running the mTLS server, it should pick up the right files based on flag
+defaults:</p>
+<div class="highlight"><pre><span></span>$ go run https-server-mtls.go
+2021/04/03 05:54:51 Starting server on :4000
+</pre></div>
+<p>In a separate window, if we run the older (non-mTLS) client, we get an error:</p>
+<div class="highlight"><pre><span></span>$ go run https-client.go
+2021/04/03 05:55:24 Get &quot;https://localhost:4000&quot;: remote error: tls: bad certificate
+exit status 1
+</pre></div>
+<p>And the server log will show that &quot;client didn't provide a certificate&quot;.
+However, if we run the new mTLS client, it works:</p>
+<div class="highlight"><pre><span></span>$ go run https-client-mtls.go
+200 OK
+Proudly served with Go and HTTPS!
+</pre></div>
+<p>While this demonstrates the mechanics of running mTLS servers and clients, in
+reality there'd be a lot more to do, especially to manage certificates,
+certificate renewal and revocation, and trusted CAs. This is called Public Key
+Infrastructure (PKI), and it's a large topic outside the scope of this modest
+post.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>This image is taken from <a class="reference external" href="https://hpbn.co/transport-layer-security-tls/">hpbn.co</a>,
+licensed under CC BY-NC-ND 4.0.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>The value returned by <tt class="docutils literal">GenerateKey</tt> has type <tt class="docutils literal">ecdsa.PrivateKey</tt>,
+which also embeds an <tt class="docutils literal">ecdsa.PublicKey</tt>, so it's actually a key pair.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>Another option to consider is setting up a reverse proxy between your
+service and the outside world. Reverse proxies like <a class="reference external" href="https://www.nginx.com/">Nginx</a> or <a class="reference external" href="https://github.com/caddyserver/caddy">Caddy</a> (which itself is written in Go)
+are battle-tested and have clear instructions for secure setup. An
+additional benefit of reverse proxies is that they can provide simple
+load-balancing for heavily loaded services.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-4">[4]</a></td><td>curl's verbose log here is an interesting description of the process of
+a TLS handshake!</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

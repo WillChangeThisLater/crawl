@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Rewriting the lexer benchmark in Rust - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Rewriting the lexer benchmark in Rust">
+                        Rewriting the lexer benchmark in Rust
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> May 30, 2022 at 05:53</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/rust.html">Rust</a>
+        ,
+    <a href="../../tag/lexer.html">Lexer</a>
+        ,
+    <a href="../../tag/compilation.html">Compilation</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>I've reimplemented my lexical analyzer (lexer) for the the <a class="reference external" href="https://llvm.org/docs/TableGen/">TableGen language</a> in Python, JS and Go so far. The <a class="reference external" href="../a-faster-lexer-in-go/index.html">latest
+post in the series</a>
+discussed how several years of new Go versions improved my lexer's performance
+by roughly 2x, and how several additional optimizations won another 37%; the
+final result is a lexer that churns through 1 MiB of source code in just 5.6
+milliseconds.</p>
+<p>Since <a class="reference external" href="../../tag/rust.html">I've also been playing with Rust recently</a>, I thought it would be interesting
+to re-implement this lexer once again, this time in Rust. Rust is certainly the
+lowest-level language among those I've used so far for this task, so I expect to
+see some top-notch performance.</p>
+<p>The full code for this post is <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2022/rust-tablegen-lexer">available on GitHub</a>.</p>
+<div class="section" id="designing-an-api">
+<h2>Designing an API</h2>
+<p>I find that Rust's strict ownership rules makes one think carefully about API
+design from very early on. If we want to create a lexer and pass it a string
+as input - who owns the string? In Rust, the answer to this question is not
+an implicit contract (like it always is in C and sometimes in C++), and it
+cannot be deferred to the runtime either (like one would do in Python, JS or
+Go). The answer has to be explicitly encoded into the types of the program.</p>
+<p>Since one of the goals of this series of posts is performance, I decided to
+go with a zero-copy API at first, where the user of the lexer owns the input
+string; the lexer, in turn, returns tokens that contain references into this
+input string - so the user ends up owning these too. Rust's lifetime specifiers
+make this fairly natural; here's the type:</p>
+<div class="highlight"><pre><span></span><span class="k">pub</span><span class="w"> </span><span class="k">struct</span> <span class="nc">Lexer</span><span class="o">&lt;&#39;</span><span class="na">source</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">input</span>: <span class="kp">&amp;</span><span class="o">&#39;</span><span class="na">source</span> <span class="kt">str</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">iter</span>: <span class="nc">Peekable</span><span class="o">&lt;</span><span class="n">CharIndices</span><span class="o">&lt;&#39;</span><span class="na">source</span><span class="o">&gt;&gt;</span><span class="p">,</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// c is the last char taken from iter, and ci is its offset in the input.</span>
+<span class="w">  </span><span class="n">c</span>: <span class="kt">char</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">ci</span>: <span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// error is true iff the lexer encountered and error.</span>
+<span class="w">  </span><span class="n">error</span>: <span class="kt">bool</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Ignore the fields for now, focusing just on the struct definition. This is
+the constructor:</p>
+<div class="highlight"><pre><span></span><span class="k">impl</span><span class="o">&lt;&#39;</span><span class="na">source</span><span class="o">&gt;</span><span class="w"> </span><span class="n">Lexer</span><span class="o">&lt;&#39;</span><span class="na">source</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">new</span><span class="p">(</span><span class="n">input</span>: <span class="kp">&amp;</span><span class="o">&#39;</span><span class="na">source</span> <span class="kt">str</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">Self</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="c1">// ...</span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The <tt class="docutils literal">'source</tt> lifetime specifier is used to explicitly annotate the lifetime
+of the input string slice, since we want to store it in our <tt class="docutils literal">Lexer</tt> and refer
+to it later. Once a <tt class="docutils literal">Lexer</tt> is created, the user obtains new tokens by calling
+<tt class="docutils literal">next_token</tt>:</p>
+<div class="highlight"><pre><span></span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">next_token</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">Token</span><span class="o">&lt;&#39;</span><span class="na">source</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// ...</span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Note that the returned <tt class="docutils literal">Token</tt> also has the same lifetime annotation. Here's
+how the type is defined:</p>
+<div class="highlight"><pre><span></span><span class="cp">#[derive(Debug, PartialEq, Clone, Copy)]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span> <span class="nc">Token</span><span class="o">&lt;&#39;</span><span class="na">source</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">value</span>: <span class="nc">TokenValue</span><span class="o">&lt;&#39;</span><span class="na">source</span><span class="o">&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">pos</span>: <span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="cp">#[derive(Debug, PartialEq, Clone, Copy)]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">enum</span> <span class="nc">TokenValue</span><span class="o">&lt;&#39;</span><span class="na">source</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">EOF</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Error</span><span class="p">,</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">Plus</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Minus</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Multiply</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Divide</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Period</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Backslash</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Colon</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Percent</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Pipe</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Exclamation</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Question</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Pound</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Ampersand</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Semi</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Comma</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">LeftParen</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">RightParen</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">LeftAng</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">RightAng</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">LeftBrace</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">RightBrace</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">LeftBracket</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">RightBracket</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Equals</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">Comment</span><span class="p">(</span><span class="o">&amp;&#39;</span><span class="na">source</span><span class="w"> </span><span class="kt">str</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="n">Identifier</span><span class="p">(</span><span class="o">&amp;&#39;</span><span class="na">source</span><span class="w"> </span><span class="kt">str</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="n">Number</span><span class="p">(</span><span class="o">&amp;&#39;</span><span class="na">source</span><span class="w"> </span><span class="kt">str</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="n">Quote</span><span class="p">(</span><span class="o">&amp;&#39;</span><span class="na">source</span><span class="w"> </span><span class="kt">str</span><span class="p">),</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Now it should be clear how these lifetimes are tied together. Some tokens hold
+slices into the user's input, and this is encoded in the explicit lifetimes. The
+signature of the <tt class="docutils literal">next_token</tt> method says &quot;we return tokens with a lifetime
+that's tied to the lifetime of the input passed into the constructor&quot;.</p>
+<p>We can also provide a more natural iteration API for the Lexer by
+implementing the <tt class="docutils literal">Iterator</tt> trait:</p>
+<div class="highlight"><pre><span></span><span class="c1">// Lexer is an Iterator; it returns tokens until EOF is encountered, when it</span>
+<span class="c1">// returns None (the EOF token itself is not returned). Note that errors are</span>
+<span class="c1">// still returned as tokens with TokenValue::Error.</span>
+<span class="k">impl</span><span class="o">&lt;&#39;</span><span class="na">source</span><span class="o">&gt;</span><span class="w"> </span><span class="nb">Iterator</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Lexer</span><span class="o">&lt;&#39;</span><span class="na">source</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">type</span> <span class="nc">Item</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Token</span><span class="o">&lt;&#39;</span><span class="na">source</span><span class="o">&gt;</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">next</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nb">Option</span><span class="o">&lt;</span><span class="bp">Self</span>::<span class="n">Item</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">error</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="c1">// If an error has already been set before we invoke next_token,</span>
+<span class="w">            </span><span class="c1">// it means we&#39;ve already returned TokenValue::Error once and now</span>
+<span class="w">            </span><span class="c1">// we should terminate the iteration.</span>
+<span class="w">            </span><span class="k">return</span><span class="w"> </span><span class="nb">None</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">tok</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">next_token</span><span class="p">();</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="n">tok</span><span class="p">.</span><span class="n">value</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">TokenValue</span>::<span class="n">EOF</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="nb">None</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="nb">Some</span><span class="p">(</span><span class="n">tok</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The iterator implementation makes it possible to integrate the lexer with the
+rest of Rust very elegantly; for example, to obtain all the tokens in a given
+input as a vector:</p>
+<div class="highlight"><pre><span></span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">tokenize_all_collect</span><span class="o">&lt;&#39;</span><span class="na">source</span><span class="o">&gt;</span><span class="p">(</span><span class="n">data</span>: <span class="kp">&amp;</span><span class="o">&#39;</span><span class="na">source</span> <span class="kt">str</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nb">Vec</span><span class="o">&lt;</span><span class="n">Token</span><span class="o">&lt;&#39;</span><span class="na">source</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">lex</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Lexer</span>::<span class="n">new</span><span class="p">(</span><span class="o">&amp;</span><span class="n">data</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">lex</span><span class="p">.</span><span class="n">collect</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+</div>
+<div class="section" id="implementation">
+<h2>Implementation</h2>
+<p>Generally, the implementation of the lexer in Rust follows the same approach
+used by my previous hand-written lexers in this series. I'd like to highlight
+a couple of Rust-specific aspects here.</p>
+<p>Our lexer fully supports Unicode, so I decided to use Rust's string iterator
+support to obtain <tt class="docutils literal">char</tt>s from <tt class="docutils literal">&amp;str</tt>. Rust provides a helpful iterator
+called <tt class="docutils literal">CharIndices</tt>, which yields <tt class="docutils literal">char</tt>s along with their position in the
+input - we need the position to report token locations. Furthermore, since our
+lexer requires a bit of look-ahead <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>, the iterator is wrapped in <a class="reference external" href="https://doc.rust-lang.org/std/iter/struct.Peekable.html">Peekable</a>, which provides the
+<tt class="docutils literal">peek</tt> method. As we've seen above already, the final definition is:</p>
+<div class="highlight"><pre><span></span><span class="n">iter</span>: <span class="nc">Peekable</span><span class="o">&lt;</span><span class="n">CharIndices</span><span class="o">&lt;&#39;</span><span class="na">source</span><span class="o">&gt;&gt;</span><span class="p">,</span><span class="w"></span>
+</pre></div>
+<p>With this in mind, the code of the lexer should be very readable, even for
+someone not too familiar with Rust.</p>
+<p>Another note is how sub-string extraction happens when tokens are returned.
+As an example, let's look at the <tt class="docutils literal">scan_number</tt> method which is invoked when
+the lexer's current character is a digit:</p>
+<div class="highlight"><pre><span></span><span class="k">fn</span> <span class="nf">scan_number</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">Token</span><span class="o">&lt;&#39;</span><span class="na">source</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">startpos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">ci</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">c</span><span class="p">.</span><span class="n">is_digit</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="n">scan_char</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="n">Token</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">value</span>: <span class="nc">TokenValue</span>::<span class="n">Number</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">.</span><span class="n">input</span><span class="p">[</span><span class="n">startpos</span><span class="o">..</span><span class="bp">self</span><span class="p">.</span><span class="n">ci</span><span class="p">]),</span><span class="w"></span>
+<span class="w">        </span><span class="n">pos</span>: <span class="nc">startpos</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Recall that the <tt class="docutils literal">Number</tt> variant of the <tt class="docutils literal">TokenValue</tt> enum is defined as
+<tt class="docutils literal"><span class="pre">Number(&amp;'source</span> str)</tt> - it contains a reference to the input source string.
+In the code for <tt class="docutils literal">scan_number</tt>, we see how this is actually implemented, by
+sub-slicing the input slice. This creates a slice with the same lifetime as the
+input slice (which is encoded in the lifetimes of the types). As in Go,
+sub-slicing is a very cheap operation in Rust (no heap allocation).</p>
+</div>
+<div class="section" id="performance">
+<h2>Performance</h2>
+<p>The performance of this Rust-implemented lexer is <em>very</em> good! I ran it on the
+same large TableGen file I've used for all the benchmarking, and it finishes
+tokenizing it in just 3.7 ms; this is about 33% faster than my fastest Go
+version from the <a class="reference external" href="../a-faster-lexer-in-go/index.html">previous post</a>.</p>
+<p>Profiling Rust is quite a bit trickier than Go, but I managed to cobble together
+enough magic flags and <tt class="docutils literal">perf</tt> invocations to ascertain that <tt class="docutils literal">next_token</tt>
+indeed takes the bulk of the time; this is good - the time is being spent where
+it's supposed to be spent.</p>
+</div>
+<div class="section" id="trying-a-variant-with-allocations">
+<h2>Trying a variant with allocations</h2>
+<p>As described above, the API for this Rust lexer was designed to be zero-copy.
+Since my Go lexers experimented with different approaches, I've decided to see
+how a different API in Rust would look.</p>
+<p>There are two aspects to ownership we can change: taking ownership of the input
+string, and/or returning owned <tt class="docutils literal">String</tt>s in the tokens.</p>
+<p>For taking ownership of the input string, our constructor would have to look
+like:</p>
+<div class="highlight"><pre><span></span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">new</span><span class="p">(</span><span class="n">input</span>: <span class="nb">String</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">Self</span><span class="w"></span>
+</pre></div>
+<p>Does it make sense for a lexer to own its input? This isn't clear, and in
+reality it turned out to be tricky to implement due to lifetime issues. Rust
+is very unhappy when a struct field is a reference to another field of the same
+struct, because there is no safe way to move instances of such structs.
+In our case, the iterator (a struct field) needs a reference to the string
+(another field in the same struct), and this is doesn't pass the Rust compiler's
+scrutiny. I wanted to be able to implement this without actively <a class="reference external" href="../../2021/rust-data-structures-with-circular-references/index.html">fooling the
+compiler</a>
+by using opaque indices or <tt class="docutils literal">unsafe</tt>.</p>
+<p>When the language fights you this hard, it may be a good sign that the
+design is wrong - it's better to leave the ownership to the code that creates a
+<tt class="docutils literal">Lexer</tt>.</p>
+<p>Ownership of returned tokens was easier to set up. The code for this is
+available in the <tt class="docutils literal">owning.rs</tt> file of the <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2022/rust-tablegen-lexer">repository</a>.
+In this variant, the constructor doesn't change, but tokens are defined
+differently:</p>
+<div class="highlight"><pre><span></span><span class="cp">#[derive(Debug, PartialEq, Clone)]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span> <span class="nc">Token</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">value</span>: <span class="nc">TokenValue</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">pos</span>: <span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="cp">#[derive(Debug, PartialEq, Clone)]</span><span class="w"></span>
+<span class="k">pub</span><span class="w"> </span><span class="k">enum</span> <span class="nc">TokenValue</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// .. types</span>
+<span class="w">    </span><span class="n">Comment</span><span class="p">(</span><span class="nb">String</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="n">Identifier</span><span class="p">(</span><span class="nb">String</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="n">Number</span><span class="p">(</span><span class="nb">String</span><span class="p">),</span><span class="w"></span>
+<span class="w">    </span><span class="n">Quote</span><span class="p">(</span><span class="nb">String</span><span class="p">),</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Note that variants like <tt class="docutils literal">Identifier</tt> now hold an owning <tt class="docutils literal">String</tt> instead
+of a string reference. Therefore, lifetime annotations are no longer necessary
+on <tt class="docutils literal">Token</tt>.</p>
+<p>The scanning code now allocates a new <tt class="docutils literal">String</tt> and reads characters into it
+from the iterator. We've seen previously how <tt class="docutils literal">scan_number</tt> looks; here it
+is again, for the owning token variant (with some helper methods):</p>
+<div class="highlight"><pre><span></span><span class="k">fn</span> <span class="nf">scan_number</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">Token</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">startpos</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">ci</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">Token</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">value</span>: <span class="nc">TokenValue</span>::<span class="n">Number</span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="n">scan_while_true</span><span class="p">(</span><span class="o">|</span><span class="n">c</span><span class="o">|</span><span class="w"> </span><span class="n">c</span><span class="p">.</span><span class="n">is_digit</span><span class="p">(</span><span class="mi">10</span><span class="p">))),</span><span class="w"></span>
+<span class="w">        </span><span class="n">pos</span>: <span class="nc">startpos</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="c1">// Helper to scan chars while `pred(c)` returns true, into the given `s`.</span>
+<span class="k">fn</span> <span class="nf">scan_while_true_into</span><span class="o">&lt;</span><span class="n">F</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">s</span>: <span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="nb">String</span><span class="p">,</span><span class="w"> </span><span class="n">pred</span>: <span class="nc">F</span><span class="p">)</span><span class="w"></span>
+<span class="k">where</span><span class="w"></span>
+<span class="w">    </span><span class="n">F</span>: <span class="nb">Fn</span><span class="p">(</span><span class="kt">char</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">bool</span><span class="p">,</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="n">pred</span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="n">c</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">s</span><span class="p">.</span><span class="n">push</span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="n">c</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="n">scan_char</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="c1">// Helper to scan chars while `pred(c)` returns true and return all scanned</span>
+<span class="c1">// chars in a new String.</span>
+<span class="k">fn</span> <span class="nf">scan_while_true</span><span class="o">&lt;</span><span class="n">F</span><span class="o">&gt;</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">pred</span>: <span class="nc">F</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nb">String</span>
+<span class="nc">where</span><span class="w"></span>
+<span class="w">    </span><span class="n">F</span>: <span class="nb">Fn</span><span class="p">(</span><span class="kt">char</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">bool</span><span class="p">,</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">s</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">String</span>::<span class="n">with_capacity</span><span class="p">(</span><span class="mi">8</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="bp">self</span><span class="p">.</span><span class="n">scan_while_true_into</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">s</span><span class="p">,</span><span class="w"> </span><span class="n">pred</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">s</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+</div>
+<div class="section" id="performance-of-this-variant">
+<h2>Performance of this variant</h2>
+<p>When I first tried this variant, its performance wasn't great at all! It was
+about 30% <em>slower</em> than the string-copying version in Go. I think this has to
+do with the slight difference in approach - in Go, my lexer figures out the
+token boundaries using numerical indices and then converts a <tt class="docutils literal">[]byte</tt> into
+<tt class="docutils literal">string</tt> in one fell swoop. The Rust version fetches <tt class="docutils literal">char</tt>s one by one
+from an iterator and writes them into a <tt class="docutils literal">String</tt>.</p>
+<p>In particular, since Rust's <tt class="docutils literal">String</tt> is dynamically allocated, this may incur
+reallocations (depending on how much is allocated initially).</p>
+<p>So my solution was to create these strings <tt class="docutils literal">with_capacity</tt> - as you can see
+in the previous code sample. This cut down the execution time to be roughly
+equal to Go's version where strings are copied.</p>
+</div>
+<div class="section" id="which-api-is-better">
+<h2>Which API is better?</h2>
+<p>IMHO there's little doubt that the original &quot;slice&quot; API is better, for multiple
+reasons:</p>
+<ol class="arabic simple">
+<li>Performance: the results speak for themselves - the slice API is zero-copy
+and incurs no additional heap allocations. Like in Go, it deals in slice
+headers, which are just pointers to parts of a string.</li>
+<li>The ownership story is very clear, symmetrical and explicitly documented with
+lifetime annotations. The <tt class="docutils literal">'source</tt> lifetime controls everything: it's the
+lifetime of the <tt class="docutils literal">&amp;str</tt> passed into the lexer's constructor, and it's the
+lifetime of the tokens. The symmetry feels important - the code that creates
+a lexer controls the lifetime of the input, as well as the output.</li>
+<li>In general, there's a known good practice in API design which is not to force
+allocations on users, if possible. This is well articulated in this <a class="reference external" href="https://dave.cheney.net/2019/09/05/dont-force-allocations-on-the-callers-of-your-api">blog
+post for Go</a>,
+but it applies equally well in Rust. In our slice API, the user can always
+call <tt class="docutils literal">to_owned</tt> on the returned slice, if they so wish. But why do it for
+them? Why should we assume the users want us to return them an owned string?
+Returning a slice provides more flexibility in using the API.</li>
+</ol>
+</div>
+<div class="section" id="performance-improvement-avoiding-peekable">
+<h2>Performance improvement: avoiding <tt class="docutils literal">Peekable</tt></h2>
+<p>After this post was published, the reader Utkarsh Kukreti mentioned that
+using <tt class="docutils literal">Peekable</tt> is not the most optimal approach, since its <tt class="docutils literal">next</tt> is
+slower than the underlying iterator's <tt class="docutils literal">next</tt>, and calling it is on the hot
+path. Instead of using <tt class="docutils literal">Peekable</tt>, we could just clone the iterator when we
+see a <tt class="docutils literal">/</tt> and invoke <tt class="docutils literal">next</tt> on the clone; iterators are small so cloning
+them is cheap.</p>
+<p><a class="reference external" href="https://gist.github.com/eliben/a6a2a55a33e733e3104827ab03ebc720">Here's a patch</a> with this
+change. Applying it to my lexer makes it ~11% faster on my machine, finishing
+the benchmark in about 3.4 ms!</p>
+<p>To be honest, this is a little bit surprising and disappointing to me, since I
+was hoping that <tt class="docutils literal">Peekable</tt> would fall into the zero abstraction promise of
+Rust. Perhaps this is something that can fixed in the future.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>For properly tokenizing comments; when the lexer sees <tt class="docutils literal">/</tt>, it needs
+to peek forward to see if this is the beginning of a <tt class="docutils literal">//</tt>, or else
+the division operator. This is a common use case in lexers, especially
+when tokenizing multi-character operators (like <tt class="docutils literal">&gt;=</tt>).</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

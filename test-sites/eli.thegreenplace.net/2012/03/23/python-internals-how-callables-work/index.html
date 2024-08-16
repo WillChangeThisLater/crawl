@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Python internals: how callables work - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../../index.html" class="navbar-brand">
+                <img src="../../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="../python-internals-how-callables-work.html"
+                       rel="bookmark"
+                       title="Permalink to Python internals: how callables work">
+                        Python internals: how callables work
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> March 23, 2012 at 10:53</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../../tag/python-internals.html">Python internals</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p><em>[The Python version described in this article is 3.x, more specifically - the  3.3 alpha release of CPython.]</em></p>
+<p>The concept of a <em>callable</em> is fundamental in Python. When thinking about what can be &quot;called&quot;, the immediately obvious answer is functions. Whether it's user defined functions (written by you), or builtin functions (most probably implemented in C inside the CPython interpreter), functions were meant to be called, right?</p>
+<p>Well, there are also methods, but they're not very interesting because they're just special functions that are bound to objects. What else can be called? You may, or may not be familiar with the ability to call <em>objects</em>, as long as they belong to classes that define the <tt class="docutils literal">__call__</tt> magic method. So objects can act as functions. And thinking about this a bit further, classes are callable too. After all, here's how we create new objects:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">Joe</span>:
+  ... [contents of class]
+
+joe = Joe()
+</pre></div>
+<p>Here we &quot;call&quot; <tt class="docutils literal">Joe</tt> to create a new instance. So classes can act as functions as well!</p>
+<p>It turns out that all these concepts are nicely united in the CPython implementation. Everything in Python is an object, and that includes every entity described in the previous paragraphs (user &amp; builtin functions, methods, objects, classes). All these calls are served by a single mechanism. This mechanism is elegant and not that difficult to understand, so it's worth knowing about. But let's start at the beginning.</p>
+<div class="section" id="compiling-calls">
+<h3>Compiling calls</h3>
+<p>CPython executes our program in two major steps:</p>
+<ol class="arabic simple">
+<li>The Python source code is compiled to bytecode.</li>
+<li>A VM executes that bytecode, using a toolbox of built-in objects and modules to help it do its job.</li>
+</ol>
+<p>In this section I'll provide a quick overview of how the first step applies to making calls. I won't get too deep since these details are not the really interesting part I want to focus on in the article. If you want to learn more about the flow Python source undergoes in the compiler, read <a class="reference external" href="../../../../2010/06/30/python-internals-adding-a-new-statement-to-python/index.html">this</a>.</p>
+<p>Briefly, the Python compiler identifies everything followed by <tt class="docutils literal"><span class="pre">(arguments...)</span></tt> inside an expression as a call <a class="footnote-reference" href="index.html#id7" id="id1">[1]</a>. The AST node for this is <tt class="docutils literal">Call</tt>. The compiler emits code for <tt class="docutils literal">Call</tt> in the <tt class="docutils literal">compiler_call</tt> function in <tt class="docutils literal">Python/compile.c</tt>. In most cases, the <tt class="docutils literal">CALL_FUNCTION</tt> bytecode instruction is going to be emitted. There are some variations I'm going to ignore for the purpose of the article. For example, if the call has &quot;star args&quot; - <tt class="docutils literal">func(a, b, *args)</tt>, there's a special instruction for handling that - <tt class="docutils literal">CALL_FUNCTION_VAR</tt>. It and other special instructions are just variations on the same theme.</p>
+</div>
+<div class="section" id="call-function">
+<h3>CALL_FUNCTION</h3>
+<p>So <tt class="docutils literal">CALL_FUNCTION</tt> is the instruction we're going to focus on here. This is <a class="reference external" href="http://docs.python.org/dev/library/dis.html">what it does</a>:</p>
+<blockquote>
+<p><strong>CALL_FUNCTION(argc)</strong></p>
+<p>Calls a function. The low byte of <em>argc</em> indicates the number of positional parameters, the high byte the number of keyword parameters. On the stack, the opcode finds the keyword parameters first. For each keyword argument, the value is on top of the key. Below the keyword parameters, the positional parameters are on the stack, with the right-most parameter on top. Below the parameters, the function object to call is on the stack. Pops all function arguments, and the function itself off the stack, and pushes the return value.</p>
+</blockquote>
+<p>CPython bytecode is evaluated by the the mammoth function <tt class="docutils literal">PyEval_EvalFrameEx</tt> in <tt class="docutils literal">Python/ceval.c</tt>. The function is scary but it's nothing more than a fancy dispatcher of opcodes. It reads instructions from the code object of the given frame and executes them. Here, for example, is the handler for <tt class="docutils literal">CALL_FUNCTION</tt> (cleaned up a bit to remove tracing and timing macros):</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">TARGET(CALL_FUNCTION)
+{
+    PyObject **sp;
+    sp = stack_pointer;
+    x = call_function(&amp;sp, oparg);
+    stack_pointer = sp;
+    PUSH(x);
+    <span style="color: #00007f; font-weight: bold">if</span> (x != <span style="color: #00007f">NULL</span>)
+        DISPATCH();
+    <span style="color: #00007f; font-weight: bold">break</span>;
+}
+</pre></div>
+<p>Not too bad - it's actually very readable. <tt class="docutils literal">call_function</tt> does the actual call (we'll examine it in a bit), <tt class="docutils literal">oparg</tt> is the numeric argument of the instruction, and <tt class="docutils literal">stack_pointer</tt> points to the top of the stack <a class="footnote-reference" href="index.html#id8" id="id2">[2]</a>. The value returned by <tt class="docutils literal">call_function</tt> is pushed back to the stack, and <tt class="docutils literal">DISPATCH</tt> is just some macro magic to invoke the next instruction.</p>
+<p><tt class="docutils literal">call_function</tt> is also in <tt class="docutils literal">Python/ceval.c</tt>. It implements the actual functionality of the instruction. At 80 lines it's not very long, but long enough so I won't paste it wholly here. Instead I'll explain the flow in general and paste small snippets where relevant; you're welcome to follow along with the code open in your favorite editor.</p>
+</div>
+<div class="section" id="any-call-is-just-an-object-call">
+<h3>Any call is just an object call</h3>
+<p>The most important first step in understanding how calls work in Python is to ignore most of what <tt class="docutils literal">call_function</tt> does. Yes, I mean it. The vast majority of the code in this function deals with optimizations for various common cases. It can be removed without hurting the correctness of the interpreter, only its performance. If we ignore all optimizations for the time being, all <tt class="docutils literal">call_function</tt> does is decode the amount of arguments and amount of keyword arguments from the single argument of <tt class="docutils literal">CALL_FUNCTION</tt> and forwards it to <tt class="docutils literal">do_call</tt>. We'll get back to the optimizations later since they are interesting, but for the time being, let's see what the core flow is.</p>
+<p><tt class="docutils literal">do_call</tt> loads the arguments from the stack into <tt class="docutils literal">PyObject</tt> objects (a tuple for the positional arguments, a dict for the keyword arguments), does a bit of tracing and optimization of its own, but eventually calls <tt class="docutils literal">PyObject_Call</tt>.</p>
+<p><tt class="docutils literal">PyObject_Call</tt> is a super-important function. It's also available to extensions in the Python C API. Here it is, in all its glory:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">PyObject *
+<span style="color: #00007f">PyObject_Call</span>(PyObject *func, PyObject *arg, PyObject *kw)
+{
+    ternaryfunc call;
+
+    <span style="color: #00007f; font-weight: bold">if</span> ((call = func-&gt;ob_type-&gt;tp_call) != <span style="color: #00007f">NULL</span>) {
+        PyObject *result;
+        <span style="color: #00007f; font-weight: bold">if</span> (Py_EnterRecursiveCall(<span style="color: #7f007f">&quot; while calling a Python object&quot;</span>))
+            <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">NULL</span>;
+        result = (*call)(func, arg, kw);
+        Py_LeaveRecursiveCall();
+        <span style="color: #00007f; font-weight: bold">if</span> (result == <span style="color: #00007f">NULL</span> &amp;&amp; !PyErr_Occurred())
+            PyErr_SetString(
+                PyExc_SystemError,
+                <span style="color: #7f007f">&quot;NULL result without error in PyObject_Call&quot;</span>);
+        <span style="color: #00007f; font-weight: bold">return</span> result;
+    }
+    PyErr_Format(PyExc_TypeError, <span style="color: #7f007f">&quot;&#39;%.200s&#39; object is not callable&quot;</span>,
+                 func-&gt;ob_type-&gt;tp_name);
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">NULL</span>;
+}
+</pre></div>
+<p>Deep recursion protection and error handling aside <a class="footnote-reference" href="index.html#id9" id="id3">[3]</a>, <tt class="docutils literal">PyObject_Call</tt>  extracts the <tt class="docutils literal">tp_call</tt> attribute <a class="footnote-reference" href="index.html#id10" id="id4">[4]</a> of the object's type and calls it. This is possible since <tt class="docutils literal">tp_call</tt> holds a function pointer.</p>
+<p>Let it sink for a moment. <em>This is it</em>. Ignoring all kinds of wonderful optimizations, this is what <em>all calls in Python</em> boil down to:</p>
+<ul class="simple">
+<li>Everything in Python is an object <a class="footnote-reference" href="index.html#id11" id="id5">[5]</a>.</li>
+<li>Every object has a type; the type of an object dictates the stuff that can be done to/with the object.</li>
+<li>When an object is called, its type's <tt class="docutils literal">tp_call</tt> attribute is called.</li>
+</ul>
+<p>As a user of Python, your only direct interaction with <tt class="docutils literal">tp_call</tt> is when you want your objects to be callable. If you define your class in Python, you have to implement the <tt class="docutils literal">__call__</tt> method for this purpose. This method gets directly mapped to <tt class="docutils literal">tp_call</tt> by CPython. If you define your class as a C extension, you have to assign <tt class="docutils literal">tp_call</tt> in the type object of your class manually.</p>
+<p>But recall that classes themselves are &quot;called&quot; to create new objects, so <tt class="docutils literal">tp_call</tt> plays a role here as well. Even more fundamentally, when you define a class there is also a call involved - on the class's metaclass. This is an interesting topic and I'll cover it in a future article.</p>
+</div>
+<div class="section" id="extra-credit-optimizations-in-call-function">
+<h3>Extra credit: Optimizations in CALL_FUNCTION</h3>
+<p>This part is optional, since the main point of the article was delivered in the previous section. That said, I think this material is interesting, since it provides examples of how some things you wouldn't usually think of as objects, actually <em>are</em> objects in Python.</p>
+<p>As I mentioned earlier, we could just use <tt class="docutils literal">PyObject_Call</tt> for every <tt class="docutils literal">CALL_FUNCTION</tt> and be done with it. In reality, it makes sense to do some optimizations to cover common cases where that may be an overkill. <tt class="docutils literal">PyObject_Call</tt> is a very generic function that needs all its arguments in special tuple and dictionary objects (for positional and keyword arguments, respectively). These arguments need to be taken from the stack and arranged in the containers <tt class="docutils literal">PyObject_Call</tt> expects. In some common cases we can avoid a lot of this overhead, and this is what the optimizations in <tt class="docutils literal">call_function</tt> are about.</p>
+<p>The first special case <tt class="docutils literal">call_function</tt> addresses is:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">/* Always dispatch PyCFunction first, because these are</span>
+<span style="color: #007f00">   presumed to be the most frequent callable object.</span>
+<span style="color: #007f00">*/</span>
+<span style="color: #00007f; font-weight: bold">if</span> (PyCFunction_Check(func) &amp;&amp; nk == <span style="color: #007f7f">0</span>) {
+</pre></div>
+<p>This handles objects of type <tt class="docutils literal">builtin_function_or_method</tt> (represented by the <tt class="docutils literal">PyCFunction</tt> type in the C implementation). There are a lot of those in Python, as the comment above notes. All functions and methods implemented in C, whether in the CPython interpreter, or in C extensions, fall into this category. For example:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">&gt;&gt;&gt; type(chr)
+&lt;class &#39;builtin_function_or_method&#39;&gt;
+&gt;&gt;&gt; type(&quot;&quot;.split)
+&lt;class &#39;builtin_function_or_method&#39;&gt;
+&gt;&gt;&gt; from pickle import dump
+&gt;&gt;&gt; type(dump)
+&lt;class &#39;builtin_function_or_method&#39;&gt;
+</pre></div>
+<p>There's an additional condition in that <tt class="docutils literal">if</tt> - that the amount of keyword arguments passed to the function is zero. This allows some important optimizations. If the function in question accepts no arguments (marked by the <tt class="docutils literal">METH_NOARGS</tt> flag when the function is created) or just a single object argument (<tt class="docutils literal">METH_0</tt> flag), <tt class="docutils literal">call_function</tt> doesn't go through the usual argument packing and can call the underlying function pointer directly. To understand how this is possible, reading about <tt class="docutils literal">PyCFunction</tt> and the <tt class="docutils literal">METH_</tt> flags in <a class="reference external" href="http://docs.python.org/dev/c-api/structures.html">this part of the documentation</a> is highly recommended.</p>
+<p>Next, there's some special handling for methods of classes written in Python:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">else</span> {
+  <span style="color: #00007f; font-weight: bold">if</span> (PyMethod_Check(func) &amp;&amp; PyMethod_GET_SELF(func) != <span style="color: #00007f">NULL</span>) {
+</pre></div>
+<p><tt class="docutils literal">PyMethod</tt> is the internal object used to represent <a class="reference external" href="http://docs.python.org/dev/c-api/method.html">bound methods</a>. The special thing about methods is that they carry around a reference to the object they're bound to. <tt class="docutils literal">call_function</tt> extracts this object and places it on the stack, in preparation for what comes next.</p>
+<p>Here's the rest of the call code (after it in <tt class="docutils literal">call_object</tt> there's only some stack cleanup):</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">if</span> (PyFunction_Check(func))
+    x = fast_function(func, pp_stack, n, na, nk);
+<span style="color: #00007f; font-weight: bold">else</span>
+    x = do_call(func, pp_stack, na, nk);
+</pre></div>
+<p><tt class="docutils literal">do_call</tt> we've already met - it implements the most generic form of calling. However, there's one more optimization - if <tt class="docutils literal">func</tt> is a <tt class="docutils literal">PyFunction</tt> (an object used <a class="reference external" href="http://docs.python.org/dev/c-api/function.html">internally</a> to represent functions defined in Python code), a separate path is taken - <tt class="docutils literal">fast_function</tt>.</p>
+<p>To understand what <tt class="docutils literal">fast_function</tt> does, it's important to first consider what happens when a Python function is executed. Simply put, its code object is evaluated (with <tt class="docutils literal">PyEval_EvalCodeEx</tt> itself). This code expects its arguments to be on the stack. Therefore, in most cases there's no point packing the arguments into containers and unpacking them again. With some care, they can just be left on the stack and a lot of precious CPU cycles can be spared.</p>
+<p>Everything else falls back to <tt class="docutils literal">do_call</tt>. This, by the way, includes <tt class="docutils literal">PyCFunction</tt> objects that <em>do</em> have keyword arguments. A curious aspect of this fact is that it's somewhat more efficient to not pass keyword arguments to C functions that either accept them or are fine with just positional arguments. For example <a class="footnote-reference" href="index.html#id12" id="id6">[6]</a>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ ~/test/python_src/33/python -m timeit -s&#39;s=&quot;a;b;c;d;e&quot;&#39; &#39;s.split(&quot;;&quot;)&#39;
+1000000 loops, best of 3: 0.3 usec per loop
+$ ~/test/python_src/33/python -m timeit -s&#39;s=&quot;a;b;c;d;e&quot;&#39; &#39;s.split(sep=&quot;;&quot;)&#39;
+1000000 loops, best of 3: 0.469 usec per loop
+</pre></div>
+<p>This is a big difference, but the input is very small. For larger strings the difference is almost invisible:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ ~/test/python_src/33/python -m timeit -s&#39;s=&quot;a;b;c;d;e&quot;*1000&#39; &#39;s.split(&quot;;&quot;)&#39;
+10000 loops, best of 3: 98.4 usec per loop
+$ ~/test/python_src/33/python -m timeit -s&#39;s=&quot;a;b;c;d;e&quot;*1000&#39; &#39;s.split(sep=&quot;;&quot;)&#39;
+10000 loops, best of 3: 98.7 usec per loop
+</pre></div>
+</div>
+<div class="section" id="summary">
+<h3>Summary</h3>
+<p>The aim of this article was to discuss what it means to be callable in Python, approaching this concept from the lowest possible level - the implementation details of the CPython virtual machine. Personally, I find this implementation very elegant, since it unifies several concepts into a single one. As the extra credit section showed, Python entities we don't usually think of as objects - functions and methods - actually are objects and can also be handled in the same uniform manner. As I promised, future article(s) will dive deeper into the meaning of <tt class="docutils literal">tp_call</tt> for creating new Python objects and classes.</p>
+<img class="align-center" src="../../../../images/hline.jpg" style="width: 320px; height: 5px;" />
+<table class="docutils footnote" frame="void" id="id7" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id1">[1]</a></td><td>This is an intentional simplification - <tt class="docutils literal">()</tt> serve other roles like class definitions (for listing base classes), function definitions (for listing arguments), decorators, etc - these are not in expressions. I'm also ignoring generator expressions on purpose.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id8" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id2">[2]</a></td><td>The CPython VM is a <a class="reference external" href="http://en.wikipedia.org/wiki/Stack_machine">stack machine</a>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id9" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id3">[3]</a></td><td><tt class="docutils literal">Py_EnterRecursiveCall</tt> is needed where C code may end up calling Python code, to allow CPython keep track of its recursion level and bail out when it's too deep.  Note that functions written in C don't have to abide by this recursion limit. This is why <tt class="docutils literal">do_call</tt> special-cases <tt class="docutils literal">PyCFunction</tt> before calling <tt class="docutils literal">PyObject_Call</tt>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id10" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id4">[4]</a></td><td>By &quot;attribute&quot; here I mean a structure field (sometimes also called &quot;slot&quot; in the documentation). If you're completely unfamiliar with the way Python C extensions are defined, go over <a class="reference external" href="http://docs.python.org/dev/extending/newtypes.html">this page</a>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id11" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id5">[5]</a></td><td>When I say that <em>everything</em> is an object - I mean it. You may think of objects as instances of classes you defined. However, deep down on the C level, CPython creates and juggles a lot of objects on your behalf. Types (classes), builtins, functions, modules - all these are represented by objects.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id12" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id6">[6]</a></td><td>This example will only run on Python 3.3, since the <tt class="docutils literal">sep</tt> keyword argument to <tt class="docutils literal">split</tt> is new in this version. In prior versions of Python <tt class="docutils literal">split</tt> only accepted positional arguments.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../../theme/js/count.js"></script>
+</body>
+</html>

@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Plugins in C - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="plugins-in-c.html"
+                       rel="bookmark"
+                       title="Permalink to Plugins in C">
+                        Plugins in C
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> August 24, 2012 at 04:43</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../../tag/plugins.html">Plugins</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>This is the second article in the series about plugin infrastructures.</p>
+<p>In the <a class="reference external" href="../07/fundamental-concepts-of-plugin-infrastructures/index.html">kickoff article</a> of this series, I defined some fundamental concepts we can use when talking about plugins. I also showed an example of a simple but complete plugin system for an application, all written in Python. But see, Python has the unfortunate (?) habit of making everything look too easy. To really show the guts of a plugin infrastructure, we'll switch to C.</p>
+<p>C is the perfect &quot;other extreme&quot; to Python. It's the most low level of the mainstream programming languages, and almost universally serves as glue between other languages and systems. Understanding how plugins may work in C will help us understand how to implement cross-language plugins in the future.</p>
+<div class="section" id="getting-started-the-task">
+<h3>Getting started - the task</h3>
+<p>I've re-implemented the <tt class="docutils literal">htmlize</tt> program from the <a class="reference external" href="../07/fundamental-concepts-of-plugin-infrastructures/index.html">previous article</a> entirely in C, including a plugin mechanism and the same two sample plugins. The full code is far too large to fit in an article; you can download it along with a <tt class="docutils literal">Makefile</tt> for Linux <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2012/plugins_c_samples">from here</a> <a class="footnote-reference" href="plugins-in-c.html#id5" id="id1">[1]</a>.</p>
+</div>
+<div class="section" id="basics-of-plugins-in-c">
+<h3>Basics of plugins in C</h3>
+<p>Plugins in C are almost always implemented as DSOs (Dynamic Shared Objects, aka. shared libraries, or DLLs on Windows). While C itself is a relatively rigid language, DSOs provide it with a degree of dynamism that helps a lot for developing plugins <a class="footnote-reference" href="plugins-in-c.html#id6" id="id2">[2]</a>. Namely, the dynamic loading mechanism provided by the OS allows us to add new code to our programs to execute at runtime. The basic idea is:</p>
+<ul class="simple">
+<li>The main application can load additional DSOs which represent plugins.</li>
+<li>Each plugin has a well-known symbol (function and/or global variable) the application knows about and thus can load it dynamically from the DSO.</li>
+<li>From here on, it's like any shared libary - the plugin can call into application code, and the application can call into plugin code.</li>
+</ul>
+<p>The rest of the article will explain these topics in detail.</p>
+</div>
+<div class="section" id="the-fundamental-concepts">
+<h3>The fundamental concepts</h3>
+<p>The <a class="reference external" href="../07/fundamental-concepts-of-plugin-infrastructures/index.html">fundamental concepts of plugin infrastructures</a> will help me explain how the C implementation of <tt class="docutils literal">htmlize</tt> works. A quick reminder of the concepts:</p>
+<ol class="arabic simple">
+<li>Discovery</li>
+<li>Registration</li>
+<li>Application hooks to which plugins attach</li>
+<li>Exposing application capabilities back to plugins</li>
+</ol>
+<p>What follows is a detailed examination of how each concept is implemented in this example.</p>
+<div class="section" id="discovery-registration">
+<h4>Discovery &amp; registration</h4>
+<p>The main application has a known directory in which it looks for plugin DSOs. In my implementation this directory's location is relative to the working directory, but it could be anywhere, really. It can also be specified in some kind of configuration file - many applications follow this route.</p>
+<p>Once it knows the directory, the application goes over all files in it and looks for files that appear to be plugins - files ending with the <tt class="docutils literal">.so</tt> extension, the convention for DSOs on Linux. It then tries to load these files with <tt class="docutils literal">dlopen</tt>. Here's the relevant portion of the code <a class="footnote-reference" href="plugins-in-c.html#id7" id="id3">[3]</a>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">// Make sure the path to dlopen has a slash, for it to consider it</span>
+<span style="color: #007f00">// an actual filesystem path and not just a lookup name.</span>
+dstring slashedpath = dstring_format(<span style="color: #7f007f">&quot;./%s&quot;</span>, dstring_cstr(fullpath));
+
+<span style="color: #007f00">// Attempt to open the plugin DSO</span>
+<span style="color: #00007f; font-weight: bold">void</span>* libhandle = dlopen(dstring_cstr(slashedpath), RTLD_NOW);
+dstring_free(slashedpath);
+<span style="color: #00007f; font-weight: bold">if</span> (!libhandle) {
+    printf(<span style="color: #7f007f">&quot;Error loading DSO: %s\n&quot;</span>, dlerror());
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">NULL</span>;
+}
+</pre></div>
+<p>The story doesn't end here, however. To register itself with the application, a valid plugin is expected to have an initialization function which the application will call. The function's name must be <tt class="docutils literal">init_&lt;pluginname&gt;</tt> where <tt class="docutils literal">pluginname</tt> is the name of the plugin file without the <tt class="docutils literal">.so</tt> extension. Take the <tt class="docutils literal">tt.so</tt> plugin, for example. Its (non-static) initialization function must be named <tt class="docutils literal">init_tt</tt>. This is the code that looks for the init function in the DSO:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">// Attempt to find the init function and then call it</span>
+dstring initfunc_name = dstring_format(<span style="color: #7f007f">&quot;init_%s&quot;</span>, dstring_cstr(name));
+<span style="color: #007f00">// dlsym returns void*, but we obviously need to cast it to a function</span>
+<span style="color: #007f00">// pointer to be able to call it. Since void* and function pointers are</span>
+<span style="color: #007f00">// mutually inconvertible in the eyes of C99, and -pedantic complains about</span>
+<span style="color: #007f00">// a plain cast, we cast through a pointer-sized integer.</span>
+PluginInitFunc initfunc = (PluginInitFunc)
+    (<span style="color: #00007f; font-weight: bold">intptr_t</span>) dlsym(libhandle, dstring_cstr(initfunc_name));
+dstring_free(initfunc_name);
+<span style="color: #00007f; font-weight: bold">if</span> (!initfunc) {
+    printf(<span style="color: #7f007f">&quot;Error loading init function: %s\n&quot;</span>, dlerror());
+    dlclose(libhandle);
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">NULL</span>;
+}
+</pre></div>
+<p>The type <tt class="docutils literal">PluginInitFunc</tt> is:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">typedef</span> <span style="color: #00007f; font-weight: bold">int</span> (*PluginInitFunc)(PluginManager*);
+</pre></div>
+<p><tt class="docutils literal">PluginManager</tt> is a central piece of the infrastructure; I will discuss it in more detail later. For now, it suffices to say that it is the interface between the application and plugins.</p>
+<p>Anyhow, once the init function is successfully found in the plugin DSO, the application calls it, passing it a pointer to <tt class="docutils literal">PluginManager</tt>. The init function is expected to return a non-negative value if everything is OK:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">int</span> rc = initfunc(pm);
+<span style="color: #00007f; font-weight: bold">if</span> (rc &lt; <span style="color: #007f7f">0</span>) {
+    printf(<span style="color: #7f007f">&quot;Error: Plugin init function returned %d\n&quot;</span>, rc);
+    dlclose(libhandle);
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">NULL</span>;
+}
+</pre></div>
+<p>At this point, the plugin was discovered and has registered itself with the application - it was loaded from a shared library, and the initialization function was found and executed successfully.</p>
+<p>All of the above is implemented in the <tt class="docutils literal">plugin_discovery</tt> module (a pair of <tt class="docutils literal">.h</tt> and <tt class="docutils literal">.c</tt> files).</p>
+</div>
+<div class="section" id="application-hooks">
+<h4>Application hooks</h4>
+<p>This is the place to discuss <tt class="docutils literal">PluginManager</tt>. It's an object in the C sense of the word - the interface exposes an opaque data type and some functions that operate on it (it's all in <tt class="docutils literal">plugin_manager.h/c</tt>).</p>
+<p><tt class="docutils literal">PluginManager</tt> is used both by the application and by plugins. Plugins use it to register hooks. The application uses it to find all registered hooks and execute them. Similarly to the Python version of <tt class="docutils literal">htmlize</tt>, there are two kinds of hooks - a hook for specific roles, and a hook for the whole contents. Here are the relevant callback function prototypes:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">// Role hook. Will be called with: the role contents, DB and Post objects.</span>
+<span style="color: #007f00">//</span>
+<span style="color: #00007f; font-weight: bold">typedef</span> dstring (*PluginRoleHook)(dstring, DB*, Post*);
+
+<span style="color: #007f00">// Contents hook. Will be called with: post contents, DB and Post objects.</span>
+<span style="color: #007f00">//</span>
+<span style="color: #00007f; font-weight: bold">typedef</span> dstring (*PluginContentsHook)(dstring, DB*, Post*);
+</pre></div>
+<p>Note the <tt class="docutils literal">DB</tt> and <tt class="docutils literal">Post</tt> arguments - we'll discuss them later. These are the registration functions plugins can use to add hooks:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">// Register a hook for a specific role.</span>
+<span style="color: #007f00">// Note: rolename is copied to an internal data structure.</span>
+<span style="color: #007f00">//</span>
+<span style="color: #00007f; font-weight: bold">void</span> PluginManager_register_role_hook(PluginManager* pm, dstring rolename,
+                                      PluginRoleHook hook);
+
+<span style="color: #007f00">// Register a hook for contents.</span>
+<span style="color: #007f00">//</span>
+<span style="color: #00007f; font-weight: bold">void</span> PluginManager_register_contents_hook(PluginManager* pm,
+                                          PluginContentsHook hook);
+</pre></div>
+<p>This is the right time to show the full code of the <tt class="docutils literal">tt.so</tt> plugin, which registers itself for the <tt class="docutils literal">tt</tt> role, wrapping its contents in <tt class="docutils literal"><span class="pre">&lt;tt&gt;...&lt;/tt&gt;</span></tt> tags:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">static</span> dstring <span style="color: #00007f">tt_role_hook</span>(dstring str, DB* db, Post* post) {
+    <span style="color: #00007f; font-weight: bold">return</span> dstring_format(<span style="color: #7f007f">&quot;&lt;tt&gt;%s&lt;/tt&gt;&quot;</span>, dstring_cstr(str));
+}
+
+
+<span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">init_tt</span>(PluginManager* pm) {
+    dstring rolename = dstring_new(<span style="color: #7f007f">&quot;tt&quot;</span>);
+    PluginManager_register_role_hook(pm, rolename, tt_role_hook);
+    dstring_free(rolename);
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">1</span>;
+}
+</pre></div>
+<p>The initialization function of the plugin (which, recall, must be called <tt class="docutils literal">init_tt</tt> to be found) registers a role hook for the <tt class="docutils literal">tt</tt> role with the plugin manager, and returns 1 for success. The hook itself is a simple function that performs the required transformation <a class="footnote-reference" href="plugins-in-c.html#id8" id="id4">[4]</a>.</p>
+<p>For completeness, this is the &quot;application side&quot; of the plugin manager API:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">// Apply the registered role hooks to the given rolename/rolecontents,</span>
+<span style="color: #007f00">// returning the string that should replace the role.</span>
+<span style="color: #007f00">// The first plugin that agrees to handle this role is used. If no such plugin</span>
+<span style="color: #007f00">// is found, NULL is returned.</span>
+<span style="color: #007f00">//</span>
+dstring PluginManager_apply_role_hooks(PluginManager* pm,
+                                       dstring rolename, dstring rolecontents,
+                                       DB* db, Post* post);
+
+<span style="color: #007f00">// Apply the registered contents hooks to the given contents, returning</span>
+<span style="color: #007f00">// the transformed contents.</span>
+<span style="color: #007f00">// All registered hooks are composed:</span>
+<span style="color: #007f00">//</span>
+<span style="color: #007f00">//  while (has_plugins)</span>
+<span style="color: #007f00">//      contents = apply_next_plugin(contents)</span>
+<span style="color: #007f00">//</span>
+<span style="color: #007f00">// If no contents plugin exists, NULL is returned.</span>
+<span style="color: #007f00">//</span>
+dstring PluginManager_apply_contents_hooks(PluginManager* pm, dstring contents,
+                                           DB* db, Post* post);
+</pre></div>
+<p>If you look into <tt class="docutils literal">plugin_manager.c</tt>, you'll see that the implementation of these functions is pretty simple. <tt class="docutils literal">PluginManager</tt> holds lists of registered hooks, and the <tt class="docutils literal">PluginManager_apply_*</tt> functions simply walk these lists applying the hooks, when the application requests it.</p>
+</div>
+<div class="section" id="exposing-application-capabilities-back-to-plugins">
+<h4>Exposing application capabilities back to plugins</h4>
+<p>We've already seen an example of this above. The <tt class="docutils literal">PluginManager</tt> API has a plugin-facing component for registering hooks, which technically is an application capability exposed to plugins. But there's more; I want to reimplement the same mock &quot;database&quot; API I used in the Python example, since it provides a very realistic example and is applicable in many situations.</p>
+<p>At this point it's interesting to highlight an important difference between Python and C. In Python, due to duck typing, one module can just pass an object to another and the other module doesn't have to have any type information about this object - it can just call its methods. In C, things are not that easy. Therefore, to use the <tt class="docutils literal">DB</tt> and <tt class="docutils literal">Post</tt> objects, plugins need to include the application header file defining them (<tt class="docutils literal">db.h</tt>). Note that due to the nature of dynamic linking on Linux, plugins don't have to actually link with the <tt class="docutils literal">db.o</tt> object. More on this later.</p>
+<p>To demonstrate this in code, here's a part of the <tt class="docutils literal">narcissist.so</tt> plugin which turns all occurrences of &quot;I&quot; to &quot;&lt;b&gt;I (username)&lt;/b&gt;&quot;:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">#include &quot;db.h&quot;</span>
+
+<span style="color: #00007f; font-weight: bold">static</span> dstring <span style="color: #00007f">narcissist_contents_hook</span>(dstring str, DB* db, Post* post) {
+    dstring replacement = dstring_format(<span style="color: #7f007f">&quot;&lt;b&gt;I (%s)&lt;/b&gt;&quot;</span>,
+                            dstring_cstr(Post_get_author(post)));
+    ...
+    ...
+}
+
+<span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">init_narcissist</span>(PluginManager* pm) {
+    PluginManager_register_contents_hook(pm, narcissist_contents_hook);
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">1</span>;
+}
+</pre></div>
+<p>All hooks get passed pointers to <tt class="docutils literal">DB</tt> and <tt class="docutils literal">Post</tt> objects. The plugin then uses the <tt class="docutils literal">db.h</tt> API to access the <tt class="docutils literal">Post</tt> object - in this case the <tt class="docutils literal">Post_get_author</tt> function, which extracts the username from the post.</p>
+</div>
+</div>
+<div class="section" id="some-details-of-plugin-implementation-in-c">
+<h3>Some details of plugin implementation in C</h3>
+<p>The above concludes the description of how the <tt class="docutils literal">htmlize</tt> application with its plugins is implemented in C. Here, I want to complete a few low-level implementation details that may be interesting to readers. These are things that make plugin implementation in C trickier than in Python, since in C you have to manually deal with much more details.</p>
+<div class="section" id="exporting-symbols-from-the-application-to-plugins">
+<h4>Exporting symbols from the application to plugins</h4>
+<p>Here are the compiler invocations required to build the <tt class="docutils literal">tt.so</tt> plugin:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">gcc -c plugins/tt.c -o plugins/tt.o -pedantic -g -Wall -std=c99 -fpic -I.
+gcc -o plugins/tt.so plugins/tt.o -shared
+</pre></div>
+<p>This is a standard Linux DSO build: the sources are compiled with <tt class="docutils literal"><span class="pre">-fpic</span></tt> to generate <a class="reference external" href="../../../2011/11/03/position-independent-code-pic-in-shared-libraries/index.html">position-independent code</a>, and the DSO itself is built with <tt class="docutils literal"><span class="pre">-shared</span></tt>  which tells the linker to create a shared library.</p>
+<p>When creating a DSO with <tt class="docutils literal"><span class="pre">-shared</span></tt>, we don't have to link in object files that will be found in the application that loads the DSO. The plugin uses symbols from a number of object files - <tt class="docutils literal">dstring.o</tt>, <tt class="docutils literal">db.o</tt>, <tt class="docutils literal">plugin_manager.o</tt>. Let's see how this looks in the symbol table:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ readelf --dyn-syms plugins/narcissist.so
+
+Symbol table &#39;.dynsym&#39; contains 23 entries:
+   Num:    Value          Size Type    Bind   Vis      Ndx Name
+     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND
+     1: 0000000000000798     0 SECTION LOCAL  DEFAULT    9
+     2: 0000000000000000     0 NOTYPE  GLOBAL DEFAULT  UND dstring_len
+     3: 0000000000000000     0 NOTYPE  GLOBAL DEFAULT  UND dstring_new_len
+    &lt;snip&gt;
+     8: 0000000000000000     0 NOTYPE  GLOBAL DEFAULT  UND Post_get_author
+    &lt;snip&gt;
+</pre></div>
+<p>This is the <em>dynamic symbol table</em>, a section used by the dynamic linker on Linux for symbol management. Here it says that the symbols <tt class="docutils literal">dstring_len</tt>, <tt class="docutils literal">Post_get_author</tt> and others and undefined. The dynamic linker will expect to find them in the application loading the DSO. Otherwise, we'll get a symbol resolution error at runtime.</p>
+<p>There's an important gotcha here. The linker will not export symbols from an application to plugins by default. It has to be explicitly told to do so by means of the <tt class="docutils literal"><span class="pre">--export-dynamic</span></tt> linker flag. Here's a portion of the <tt class="docutils literal">ld</tt> manual page that describes this flag very well:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">--export-dynamic
+--no-export-dynamic
+    When creating a dynamically linked executable, using the -E
+    option or the --export-dynamic option causes the linker to add
+    all symbols to the dynamic symbol table.  The dynamic symbol
+    table is the set of symbols which are visible from dynamic
+    objects at run time.
+
+    If you do not use either of these options (or use the
+    --no-export-dynamic option to restore the default behavior),
+    the dynamic symbol table will normally contain only those
+    symbols which are referenced by some dynamic object mentioned
+    in the link.
+
+    If you use &quot;dlopen&quot; to load a dynamic object which needs to
+    refer back to the symbols defined by the program, rather
+    than some other dynamic object, then you will probably need
+    to use this option when linking the program itself.
+
+    You can also use the dynamic list to control what symbols
+    should be added to the dynamic symbol table if the output
+    format supports it. See the description of --dynamic-list.
+</pre></div>
+<p>This behavior is easy to observe in our example, if you're interested. The main application <tt class="docutils literal">htmlize_main</tt> is currently compiled with the <tt class="docutils literal"><span class="pre">--export-dynamic</span></tt> flag. If you look at its dynamic symbol table (<tt class="docutils literal">readelf <span class="pre">--dyn-syms</span></tt>), you'll see all global symbols exported. Recompile it without the flag, and you can check that the dynamic symbol table won't contain these symbols, and the <tt class="docutils literal">dlopen</tt> call in <tt class="docutils literal">plugin_discovery.c</tt> will fail with &quot;undefined symbol&quot; errors.</p>
+</div>
+<div class="section" id="symbol-visibility-between-plugins">
+<h4>Symbol visibility between plugins</h4>
+<p>We've seen that special provision is required for the application's symbols to be visible inside pligins. The same is true about symbol visibility between plugins, though here the mechanism is different.</p>
+<p>When the application loads a plugin with <tt class="docutils literal">dlopen</tt>, the plugin's symbols can be found by calling <tt class="docutils literal">dlsym</tt> in the application. However, what if other plugins need to use these symbols as well? By default, that won't work. To make it work, it's possible to pass the <tt class="docutils literal">RTLD_GLOBAL</tt> flag to <tt class="docutils literal">dlopen</tt> when opening the plugin we want to expose the symbols from. Symbols in this plugin DSO will be made available to resolve references in subsequently loaded DSOs.</p>
+</div>
+<div class="section" id="cross-dso-memory-allocation">
+<h4>Cross-DSO memory allocation</h4>
+<p>It's not hard to see in the <tt class="docutils literal">htmlize</tt> example that some memory allocated in one DSO (or the main application), is released in another. Especially if you come from a Windows background, this may raise an eyebrow.</p>
+<p>Cross-DSO memory allocation is most likely wrong when the C library is linked statically. This is because each DSO gets its own version of the C library, with its own book-keeping for <tt class="docutils literal">malloc</tt> et al, so memory allocated in one DSO can't be released in another.</p>
+<p>However, on Linux it's customary to link the C library dynamically. This is what happens by default, unless you <a class="reference external" href="../13/how-statically-linked-programs-run-on-linux/index.html">explicitly request static linking</a>. When linked dynamically, only a single version of the C library symbols exists in the process's address space during execution, and cross-DSO memory allocations and releases are safe.</p>
+<img class="align-center" src="../../../images/hline.jpg" style="width: 320px; height: 5px;" />
+<table class="docutils footnote" frame="void" id="id5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="plugins-in-c.html#id1">[1]</a></td><td>The code was developed with gcc version 4.6 and binutils 2.22 on Ubuntu 12.04, although it should be easily adaptable to other Linux and Unix flavors. For Windows the porting would be more challenging. That said, while the details differ, the concepts on Windows would be pretty much the same.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id6" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="plugins-in-c.html#id2">[2]</a></td><td>This article assumes a basic level of familiarity with developing shared libraries for Linux in C. If you're not familiar with the topic, google for some resources.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id7" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="plugins-in-c.html#id3">[3]</a></td><td>Note the usage of <tt class="docutils literal">dstring</tt> - it's a simple dynamic string implementation in C which I'm using as part of the application. It's bundled with the code of this example. In general, the code in this example does not attempt to be efficient - a lot of string copying and reallocation is being done. For a more efficient representation of this task, I would probably use a rope data structure.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id8" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="plugins-in-c.html#id4">[4]</a></td><td>Note that the hook itself is a static function - it is not exported from the DSO by the linker. However, its address can still be given to the application by <tt class="docutils literal">init_tt</tt>. This is good programming practice - hide as much as possible.</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="plugins-in-c.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Writing multi-package analysis tools for Go - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Writing multi-package analysis tools for Go">
+                        Writing multi-package analysis tools for Go
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> September 12, 2020 at 06:37</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/go-tooling.html">Go tooling</a>
+        ,
+    <a href="../../tag/compilation.html">Compilation</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>In my <a class="reference external" href="../embedding-in-go-part-1-structs-in-structs/index.html">posts about embedding in Go</a>
+last month, I provided multiple examples of different kinds of embeddings from
+the Go standard library. How did I find these examples?</p>
+<p>I wish I could say it all comes from a deep familiarity with the breadth and
+depth of the standard library; instead, I combined the programming virtues of
+<a class="reference external" href="https://wiki.c2.com/?LazinessImpatienceHubris">laziness and impatience</a>
+and wrote a tool that found these examples for me.</p>
+<p>In this post, I'm going to describe this tool and how you may go about writing
+such tools of your own to analyze real-world Go codebases to glean any insights
+you may be interested in.</p>
+<div class="section" id="the-task">
+<h2>The task</h2>
+<p>Let's start by describing the requirement: we're interested in finding all
+instances of embeddings in Go code, and moreover - we'd like to know what kinds
+of embeddings they are and call it out in some way; i.e. distinguish
+interface-in-interface embeddings from struct-in-struct embeddings, and so on.</p>
+<p>I wrote earlier about <a class="reference external" href="../../2019/go-compiler-internals-adding-a-new-statement-to-go-part-1/index.html">the various compilation steps Go source code goes through</a>.
+Many of these are available for Go tool writers as well, and it's worth spending
+a bit of time thinking about the level of information we need for our tool. For
+a deeper exploration of what it takes to analyze Go source code, I highly
+recommend reading <a class="reference external" href="https://github.com/golang/example/tree/master/gotypes">this document</a>.</p>
+<p>Just parsing the Go source code of a project won't do, because we'll need type
+information. Take this example <tt class="docutils literal">struct</tt> from <a class="reference external" href="../embedding-in-go-part-3-interfaces-in-structs/index.html">part 3</a>
+of the embedding post:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">StatsConn</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">net</span><span class="p">.</span><span class="nx">Conn</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">BytesRead</span><span class="w"> </span><span class="kt">uint64</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>We can figure out that <tt class="docutils literal">net.Conn</tt> is an embedding from parsing this code and
+looking at the AST. But what <em>kind</em> of embedding is it? Is <tt class="docutils literal">net.Conn</tt> an
+interface or a struct? For this, we'll have to run the AST through Go type
+checking; moreover, in the general case this ought to be cross-package, or
+even cross-module type checking because the embedded type <tt class="docutils literal">net.Conn</tt> could
+be defined in a different package or module. Therefore, our tool should
+be able to perform cross-module type checking. If this sounds tricky, that's
+because it is! But worry not, Go has just the package to help us.</p>
+</div>
+<div class="section" id="x-tools-go-packages">
+<h2>x/tools/go/packages</h2>
+<p>Enter <a class="reference external" href="https://pkg.go.dev/golang.org/x/tools/go/packages?tab=doc">x/tools/go/packages</a>, which I'll refer
+to as XTGP from this point on. This package is a one-stop-shop for loading
+Go packages for analysis. It does all the heavy lifting for tool writers,
+leaving us with just the &quot;business logic&quot; of the tool to write - the analysis
+itself. For a given package, XTGP will:</p>
+<ul class="simple">
+<li>Parse and type check the package, providing access to the AST and full type
+information.</li>
+<li>Optionally load all of the package's dependencies, type checking them as
+well.</li>
+</ul>
+<p>XTGP is the newest (2018) in a sequence of similar packages, and
+has by now replaced the other approaches as the &quot;one true recommended way&quot;
+for multi-package analysis. It's also used as the basis for <a class="reference external" href="https://pkg.go.dev/golang.org/x/tools/go/analysis?tab=doc">x/tools/go/analysis</a>, upon which tools
+like <tt class="docutils literal">go vet</tt> are now built. In this post I'll show how to write my tool using
+both &quot;vanilla&quot; XTGP and the <tt class="docutils literal">go/analysis</tt> framework.</p>
+</div>
+<div class="section" id="finding-embeddings">
+<h2>Finding embeddings</h2>
+<p>It's time to show the code of the &quot;find embeddings&quot; tool. The full source code
+is <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2020/embedding-analysis">available on GitHub</a>.
+We'll start with the setup for configuring XTGP:</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="s">&quot;golang.org/x/tools/go/packages&quot;</span><span class="w"></span>
+
+<span class="kd">const</span><span class="w"> </span><span class="nx">mode</span><span class="w"> </span><span class="nx">packages</span><span class="p">.</span><span class="nx">LoadMode</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">packages</span><span class="p">.</span><span class="nx">NeedName</span><span class="w"> </span><span class="o">|</span><span class="w"></span>
+<span class="w">  </span><span class="nx">packages</span><span class="p">.</span><span class="nx">NeedTypes</span><span class="w"> </span><span class="o">|</span><span class="w"></span>
+<span class="w">  </span><span class="nx">packages</span><span class="p">.</span><span class="nx">NeedSyntax</span><span class="w"> </span><span class="o">|</span><span class="w"></span>
+<span class="w">  </span><span class="nx">packages</span><span class="p">.</span><span class="nx">NeedTypesInfo</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Usage</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kd">func</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">out</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">CommandLine</span><span class="p">.</span><span class="nx">Output</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintln</span><span class="p">(</span><span class="nx">out</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;usage: find-embeddings [options] &lt;module dir&gt;\n&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintln</span><span class="p">(</span><span class="nx">out</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Options:&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">flag</span><span class="p">.</span><span class="nx">PrintDefaults</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">pattern</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;pattern&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;./...&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Go package pattern&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Parse</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">NArg</span><span class="p">()</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;Expecting a single argument: directory of module&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">fset</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">token</span><span class="p">.</span><span class="nx">NewFileSet</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cfg</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">packages</span><span class="p">.</span><span class="nx">Config</span><span class="p">{</span><span class="nx">Fset</span><span class="p">:</span><span class="w"> </span><span class="nx">fset</span><span class="p">,</span><span class="w"> </span><span class="nx">Mode</span><span class="p">:</span><span class="w"> </span><span class="nx">mode</span><span class="p">,</span><span class="w"> </span><span class="nx">Dir</span><span class="p">:</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Args</span><span class="p">()[</span><span class="mi">0</span><span class="p">]}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">pkgs</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">packages</span><span class="p">.</span><span class="nx">Load</span><span class="p">(</span><span class="nx">cfg</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">pattern</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">pkg</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">pkgs</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">findInPackage</span><span class="p">(</span><span class="nx">pkg</span><span class="p">,</span><span class="w"> </span><span class="nx">fset</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The main entry point to XTGP is <tt class="docutils literal">packages.Load</tt>, which takes a
+<tt class="docutils literal">packages.Config</tt> object for configuration. The most important field to pay
+attention to is <a class="reference external" href="https://pkg.go.dev/golang.org/x/tools/go/packages?tab=doc#LoadMode">Mode</a>, which
+specifies what XTGP should load. It's tempting to just ask for &quot;everything&quot;,
+but this isn't necessarily the best approach in the general case, as it may take
+quite a while for large projects. For example, in our case we don't need
+<tt class="docutils literal">NeetImports | NeedDeps</tt>, which would bring in the type-checked ASTs of all
+the transitive dependencies of our code. This is an expensive operation, as you
+can imagine! All we need for our tool is to look at dependencies sufficiently
+to glean the type information of their exported types; luckily, in Go this
+information is available cheaply (to support Go's famously fast parallel
+compilation process).</p>
+<p>Once we have the packages loaded, we get a slice of <tt class="docutils literal">packages.Package</tt> values,
+through which we can perform our analysis. We invoke <tt class="docutils literal">findInPackage</tt> for
+each such package.</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">findInPackage</span><span class="p">(</span><span class="nx">pkg</span><span class="w"> </span><span class="o">*</span><span class="nx">packages</span><span class="p">.</span><span class="nx">Package</span><span class="p">,</span><span class="w"> </span><span class="nx">fset</span><span class="w"> </span><span class="o">*</span><span class="nx">token</span><span class="p">.</span><span class="nx">FileSet</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">fileAst</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">pkg</span><span class="p">.</span><span class="nx">Syntax</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Inspect</span><span class="p">(</span><span class="nx">fileAst</span><span class="p">,</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">n</span><span class="w"> </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Node</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">structTy</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">n</span><span class="p">.(</span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">StructType</span><span class="p">);</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">findInFields</span><span class="p">(</span><span class="nx">structTy</span><span class="p">.</span><span class="nx">Fields</span><span class="p">,</span><span class="w"> </span><span class="nx">n</span><span class="p">,</span><span class="w"> </span><span class="nx">pkg</span><span class="p">.</span><span class="nx">TypesInfo</span><span class="p">,</span><span class="w"> </span><span class="nx">fset</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="nx">interfaceTy</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">n</span><span class="p">.(</span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">InterfaceType</span><span class="p">);</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">findInFields</span><span class="p">(</span><span class="nx">interfaceTy</span><span class="p">.</span><span class="nx">Methods</span><span class="p">,</span><span class="w"> </span><span class="nx">n</span><span class="p">,</span><span class="w"> </span><span class="nx">pkg</span><span class="p">.</span><span class="nx">TypesInfo</span><span class="p">,</span><span class="w"> </span><span class="nx">fset</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+<span class="w">    </span><span class="p">})</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This function has two important tasks:</p>
+<ol class="arabic simple">
+<li>Invoke <tt class="docutils literal">ast.Inspect</tt> to run a visitor function on every AST node in the
+package. Our visitor focuses on either an <tt class="docutils literal">*ast.StructType</tt> or
+<tt class="docutils literal">*ast.InterfaceType</tt> to look deeper into struct/interface declarations.</li>
+<li>Deal with a difference in how struct vs. interface fields are
+accessed (<tt class="docutils literal">Fields</tt> field for <tt class="docutils literal">*ast.StructType</tt>, <tt class="docutils literal">Methods</tt> field
+for <tt class="docutils literal">*ast.InterfaceType</tt>).</li>
+</ol>
+<p>Let's move on to <tt class="docutils literal">findInFields</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">findInFields</span><span class="p">(</span><span class="nx">fl</span><span class="w"> </span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">FieldList</span><span class="p">,</span><span class="w"> </span><span class="nx">n</span><span class="w"> </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Node</span><span class="p">,</span><span class="w"> </span><span class="nx">tinfo</span><span class="w"> </span><span class="o">*</span><span class="nx">types</span><span class="p">.</span><span class="nx">Info</span><span class="p">,</span><span class="w"> </span><span class="nx">fset</span><span class="w"> </span><span class="o">*</span><span class="nx">token</span><span class="p">.</span><span class="nx">FileSet</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">type</span><span class="w"> </span><span class="nx">FieldReport</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Name</span><span class="w"> </span><span class="kt">string</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Kind</span><span class="w"> </span><span class="kt">string</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Type</span><span class="w"> </span><span class="nx">types</span><span class="p">.</span><span class="nx">Type</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">reps</span><span class="w"> </span><span class="p">[]</span><span class="nx">FieldReport</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">field</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">fl</span><span class="p">.</span><span class="nx">List</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">field</span><span class="p">.</span><span class="nx">Names</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">tv</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">tinfo</span><span class="p">.</span><span class="nx">Types</span><span class="p">[</span><span class="nx">field</span><span class="p">.</span><span class="nx">Type</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">!</span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;not found&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">field</span><span class="p">.</span><span class="nx">Type</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">      </span><span class="nx">embName</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Sprintf</span><span class="p">(</span><span class="s">&quot;%v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">field</span><span class="p">.</span><span class="nx">Type</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">      </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">hostIsStruct</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">n</span><span class="p">.(</span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">StructType</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="kd">var</span><span class="w"> </span><span class="nx">kind</span><span class="w"> </span><span class="kt">string</span><span class="w"></span>
+
+<span class="w">      </span><span class="k">switch</span><span class="w"> </span><span class="nx">typ</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">tv</span><span class="p">.</span><span class="nx">Type</span><span class="p">.</span><span class="nx">Underlying</span><span class="p">().(</span><span class="kd">type</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="o">*</span><span class="nx">types</span><span class="p">.</span><span class="nx">Struct</span><span class="p">:</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="nx">hostIsStruct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="nx">kind</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s">&quot;struct (s@s)&quot;</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="nx">kind</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s">&quot;struct (s@i)&quot;</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="nx">reps</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nb">append</span><span class="p">(</span><span class="nx">reps</span><span class="p">,</span><span class="w"> </span><span class="nx">FieldReport</span><span class="p">{</span><span class="nx">embName</span><span class="p">,</span><span class="w"> </span><span class="nx">kind</span><span class="p">,</span><span class="w"> </span><span class="nx">typ</span><span class="p">})</span><span class="w"></span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="o">*</span><span class="nx">types</span><span class="p">.</span><span class="nx">Interface</span><span class="p">:</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="nx">hostIsStruct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="nx">kind</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s">&quot;interface (i@s)&quot;</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="nx">kind</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s">&quot;interface (i@i)&quot;</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="nx">reps</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nb">append</span><span class="p">(</span><span class="nx">reps</span><span class="p">,</span><span class="w"> </span><span class="nx">FieldReport</span><span class="p">{</span><span class="nx">embName</span><span class="p">,</span><span class="w"> </span><span class="nx">kind</span><span class="p">,</span><span class="w"> </span><span class="nx">typ</span><span class="p">})</span><span class="w"></span>
+<span class="w">      </span><span class="k">default</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">reps</span><span class="p">)</span><span class="w"> </span><span class="p">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;Found at %v\n%v\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">fset</span><span class="p">.</span><span class="nx">Position</span><span class="p">(</span><span class="nx">n</span><span class="p">.</span><span class="nx">Pos</span><span class="p">()),</span><span class="w"> </span><span class="nx">nodeString</span><span class="p">(</span><span class="nx">n</span><span class="p">,</span><span class="w"> </span><span class="nx">fset</span><span class="p">))</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">report</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">reps</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;--&gt; field &#39;%s&#39; is embedded %s: %s\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">report</span><span class="p">.</span><span class="nx">Name</span><span class="p">,</span><span class="w"> </span><span class="nx">report</span><span class="p">.</span><span class="nx">Kind</span><span class="p">,</span><span class="w"> </span><span class="nx">report</span><span class="p">.</span><span class="nx">Type</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This function is conceptually simple; it iterates over a slice of fields,
+focusing only on fields that are unnamed (i.e. embedded). For each field, it
+looks at its underlying type <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a> and its kind - is it a struct type, or an
+interface type? This is where inter-package type analysis is critical, because
+in the general case we have no way of knowing the type of fields without
+understanding the types imported from other packages.</p>
+<p>This is it! There's a bit of extra logic in <tt class="docutils literal">findInFields</tt> to collect all
+embedded fields of a given struct/interface into a single place, but otherwise
+it does what we need - including distinguishing between the kinds of embedding.
+This simple tool can now be run on the Go standard library or real-world large
+projects (like <tt class="docutils literal">k8s</tt> or <tt class="docutils literal">hugo</tt>) and report all the embeddings found therein.</p>
+</div>
+<div class="section" id="finding-embeddings-using-go-analysis">
+<h2>Finding embeddings using <tt class="docutils literal">go/analysis</tt></h2>
+<p>The example shown above uses the &quot;raw&quot; XTGP API to load packages. An alternative
+approach is to use the <tt class="docutils literal">go/analysis</tt> framework, which saves us from some of
+the boilerplate:</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="s">&quot;golang.org/x/tools/go/analysis&quot;</span><span class="w"></span>
+<span class="kn">import</span><span class="w"> </span><span class="s">&quot;golang.org/x/tools/go/analysis/singlechecker&quot;</span><span class="w"></span>
+
+<span class="kd">var</span><span class="w"> </span><span class="nx">EmbedAnalysis</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">analysis</span><span class="p">.</span><span class="nx">Analyzer</span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Name</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;embedanalysis&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Doc</span><span class="p">:</span><span class="w">  </span><span class="s">&quot;reports embeddings&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Run</span><span class="p">:</span><span class="w">  </span><span class="nx">run</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">singlechecker</span><span class="p">.</span><span class="nx">Main</span><span class="p">(</span><span class="nx">EmbedAnalysis</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">run</span><span class="p">(</span><span class="nx">pass</span><span class="w"> </span><span class="o">*</span><span class="nx">analysis</span><span class="p">.</span><span class="nx">Pass</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="kd">interface</span><span class="p">{},</span><span class="w"> </span><span class="kt">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">file</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">pass</span><span class="p">.</span><span class="nx">Files</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Inspect</span><span class="p">(</span><span class="nx">file</span><span class="p">,</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">n</span><span class="w"> </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Node</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">structTy</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">n</span><span class="p">.(</span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">StructType</span><span class="p">);</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">findInFields</span><span class="p">(</span><span class="nx">structTy</span><span class="p">.</span><span class="nx">Fields</span><span class="p">,</span><span class="w"> </span><span class="nx">n</span><span class="p">,</span><span class="w"> </span><span class="nx">pass</span><span class="p">.</span><span class="nx">TypesInfo</span><span class="p">,</span><span class="w"> </span><span class="nx">pass</span><span class="p">.</span><span class="nx">Fset</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="nx">interfaceTy</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">n</span><span class="p">.(</span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">InterfaceType</span><span class="p">);</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">findInFields</span><span class="p">(</span><span class="nx">interfaceTy</span><span class="p">.</span><span class="nx">Methods</span><span class="p">,</span><span class="w"> </span><span class="nx">n</span><span class="p">,</span><span class="w"> </span><span class="nx">pass</span><span class="p">.</span><span class="nx">TypesInfo</span><span class="p">,</span><span class="w"> </span><span class="nx">pass</span><span class="p">.</span><span class="nx">Fset</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+<span class="w">    </span><span class="p">})</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Note how short the <tt class="docutils literal">main</tt> function becomes; by delegating to the
+<tt class="docutils literal">go/analysis</tt> framework, we no longer need to explicitly initialize
+<tt class="docutils literal">go/packages</tt> or handle command-line flags. The <tt class="docutils literal">singlechecker</tt> helper
+from <tt class="docutils literal">go/analysis</tt> does this for us.</p>
+<p>The rest of the code is very similar to the previous sample. <tt class="docutils literal">run</tt> is the
+moral equivalent of <tt class="docutils literal">findInPackage</tt> and does pretty much the same work, except
+that it has to operate on <tt class="docutils literal">pass.Files</tt> instead of <tt class="docutils literal">pkg.Syntax</tt>. It invokes
+<tt class="docutils literal">findInFields</tt> for every struct or interface, and this function is exactly
+the same as shown above.</p>
+</div>
+<div class="section" id="conclusion">
+<h2>Conclusion</h2>
+<p>Given the two slightly different approaches to achieve the same goal, which one
+should you choose?</p>
+<p>Pros of using XTGP directly:</p>
+<ul class="simple">
+<li>More flexibility in how <tt class="docutils literal">go/packages</tt> is configured and how the command-line
+interface (flags, etc.) for the tool is defined.</li>
+<li>Less magic and fewer black boxes in the process.</li>
+</ul>
+<p>Pros of using <tt class="docutils literal">go/analysis</tt>:</p>
+<ul class="simple">
+<li>Slightly less code to write; if you're writing many different analyses, this
+may add up.</li>
+<li>Interoperability with other analyses; there's a rich set of
+<a class="reference external" href="https://pkg.go.dev/golang.org/x/tools/go/analysis/passes">analysis passes</a>
+available for use, and <tt class="docutils literal">go/analysis</tt> makes it easy to chain passes and
+pass information between them.</li>
+</ul>
+<p>Whichever way you choose, it's comforting to know that Go has powerful tooling
+support that makes it relatively easy to write tools to analyze whole codebases.
+This tooling framework handles to most tedious part of tool-writing: figuring
+out how the project is assembled from multiple modules and packages <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>. It
+does the heavy lifting, leaving the tool writer with only the &quot;business logic&quot;
+of the analysis to implement.</p>
+<p>For writing the business logic, we have a fully type-checked AST at our
+disposal. ASTs are the starting point for most real-world compilers, and if you
+need some specialized IR - this can typically be constructed from a type-checked
+AST. For example, if your analysis needs the program in SSA form you can use
+<tt class="docutils literal">x/tools/go/ssa</tt> to create SSA straight from the type-checked packages XTGP
+returns. But... I'm getting carried away here, as this is a topic for another
+time.</p>
+<p>Happy tool-writing!</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>The concept of <em>underlying</em> types help us see through named types or
+aliases. For example if we have <tt class="docutils literal">var k Foo</tt> and elsewhere
+<tt class="docutils literal">type Foo int</tt>, then we know that the underlying type of <tt class="docutils literal">k</tt> is
+<tt class="docutils literal">int</tt>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>In the C++ world this is similar to <a class="reference external" href="../../2014/05/21/compilation-databases-for-clang-based-tools.html">compilation databases</a>.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

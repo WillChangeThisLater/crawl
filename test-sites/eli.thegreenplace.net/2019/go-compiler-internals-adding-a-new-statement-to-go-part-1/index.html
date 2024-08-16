@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Go compiler internals: adding a new statement to Go - Part 1 - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Go compiler internals: adding a new statement to Go - Part 1">
+                        Go compiler internals: adding a new statement to Go - Part 1
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> July 03, 2019 at 05:43</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/compilation.html">Compilation</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p><strong>Updated (2023-05-08):</strong> the Go compiler keeps evolving and it takes time to
+keep up with changes. While the general gist of this post remains true and it's
+worth reading to understand how the compiler works on a high level, the details
+of the modifications are slightly different now.</p>
+<p>To see up-do-date changes that work with the latest Go (in-development version
+1.21 at the time of this update), check out the <a class="reference external" href="https://github.com/eliben/go/tree/adduntil-121-part1">adduntil-121-part1 branch</a> from my GitHub fork of
+the Go repository. Diff it vs. the <tt class="docutils literal">master</tt> branch to see the full list of
+changes.</p>
+<hr class="docutils" />
+<p>the compilation flow has changed somewhat since this
+post was originally written. It has now been updated to Go 1.19.</p>
+<p>This is the first post in a two-part series that takes a tutorial-based approach
+to exploring the Go compiler. The compiler is large and would require a
+small book to describe properly, so the idea of these posts is to provide a
+quick depth-first dive instead. I plan to write more descriptive posts on
+specific areas of the compiler in the future.</p>
+<p>We're going to change the Go compiler to add a new (toy) language feature, and
+build a modified compiler to play with.</p>
+<div class="section" id="the-task-adding-a-new-statement">
+<h2>The task - adding a new statement</h2>
+<p>Many languages have a <tt class="docutils literal">while</tt> statement, which in Go is expressed with
+<tt class="docutils literal">for</tt>:</p>
+<div class="highlight"><pre><span></span>for &lt;some-condition&gt; {
+  &lt;loop body&gt;
+}
+</pre></div>
+<p>Adding a <tt class="docutils literal">while</tt> statement to Go would therefore be trivial - just treat it
+the same as <tt class="docutils literal">for</tt> (perhaps limiting the options of what the statement could
+do). So I chose a slightly more challenging task, adding <tt class="docutils literal">until</tt>. <tt class="docutils literal">until</tt> is
+the same as <tt class="docutils literal">while</tt> except that the condition is negated. For example, this
+code:</p>
+<div class="highlight"><pre><span></span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">4</span><span class="w"></span>
+<span class="nx">until</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">i</span><span class="o">--</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;Hello, until!&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Is equivalent to:</p>
+<div class="highlight"><pre><span></span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">4</span><span class="w"></span>
+<span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">i</span><span class="o">--</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;Hello, until!&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>In fact, we could even use an initializer in the loop declaration as follows:</p>
+<div class="highlight"><pre><span></span><span class="nx">until</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">i</span><span class="o">--</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;Hello, until!&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Our implementation will support this.</p>
+<p>A mandatory disclaimer - this is just a toy exercise. I don't think adding
+<tt class="docutils literal">until</tt> to Go is a good idea at all; Go's minimalism is an advantage.</p>
+</div>
+<div class="section" id="high-level-structure-of-the-go-compiler">
+<h2>High-level structure of the Go compiler</h2>
+<p>The default Go compiler (<tt class="docutils literal">gc</tt>) has a fairly traditional structure that should
+be immediately familiar if you worked on other compilers before:</p>
+<img alt="Go gc compiler flow" class="align-center" src="../../images/2019/go-compiler-flow.png" />
+<p>Relative to the Go repository root, the compiler implementation lives in
+<tt class="docutils literal">src/cmd/compile/internal</tt>; all the code paths mentioned later in the post are
+going to be relative to this directory. It's all written in Go and the code is
+fairly readable. Throughout this post we're going to examine these stages one by
+one, as we add the required code to support an <tt class="docutils literal">until</tt> statement.</p>
+<p>Check out the <tt class="docutils literal">README</tt> file in <tt class="docutils literal">src/cmd/compile</tt> for a nice step-by-step
+description of the compilation steps. That file is a good companion to this
+blog post.</p>
+</div>
+<div class="section" id="scan">
+<h2>Scan</h2>
+<p>The scanner (also known as <em>lexer</em>) breaks up source code text into discrete
+entities for the compiler. For example, the word <tt class="docutils literal">for</tt> becomes the constant
+<tt class="docutils literal">_For</tt>; the characters <tt class="docutils literal">...</tt> become <tt class="docutils literal">_DotDotDot</tt>, while <tt class="docutils literal">.</tt> on its own
+becomes <tt class="docutils literal">_Dot</tt>, and so on.</p>
+<p>The scanner is implemented in the <tt class="docutils literal">syntax</tt> package. All we need from it here
+is to understand a new keyword - <tt class="docutils literal">until</tt>. The file <tt class="docutils literal">syntax/tokens.go</tt> has
+a list of all tokens understood by the compiler, and we'll add a new one:</p>
+<div class="highlight"><pre><span></span><span class="nx">_Fallthrough</span><span class="w"> </span><span class="c1">// fallthrough</span><span class="w"></span>
+<span class="nx">_For</span><span class="w">         </span><span class="c1">// for</span><span class="w"></span>
+<span class="hll"><span class="nx">_Until</span><span class="w">       </span><span class="c1">// until</span><span class="w"></span>
+</span><span class="nx">_Func</span><span class="w">        </span><span class="c1">// func</span><span class="w"></span>
+</pre></div>
+<p>The comment on the right-hand side of the token constant is important, as it's
+used to identify the token in text. This is done by means of code
+generation from <tt class="docutils literal">syntax/tokens.go</tt>, which has this line above the list of
+tokens:</p>
+<div class="highlight"><pre><span></span><span class="c1">//go:generate stringer -type token -linecomment</span><span class="w"></span>
+</pre></div>
+<p><tt class="docutils literal">go generate</tt> has to be run manually and the output file
+(<tt class="docutils literal">syntax/token_string.go</tt>) is checked into the Go source repository. To
+regenerate it I ran the following command from the <tt class="docutils literal">syntax</tt> directory:</p>
+<div class="highlight"><pre><span></span>GOROOT=&lt;src checkout&gt; go generate tokens.go
+</pre></div>
+<p>The <tt class="docutils literal">GOROOT</tt> setting is <a class="reference external" href="https://github.com/golang/go/issues/32724">essential as of Go 1.12</a>, and has to point to the root of
+the source checkout where we're modifying the compiler.</p>
+<p>Having run the code generator and verified that <tt class="docutils literal">syntax/token_string.go</tt> now
+has the new token, I tried rebuilding the compiler and ran into a panic:</p>
+<div class="highlight"><pre><span></span>panic: imperfect hash
+</pre></div>
+<p>It comes from this code in <tt class="docutils literal">syntax/scanner.go</tt>:</p>
+<div class="highlight"><pre><span></span><span class="c1">// hash is a perfect hash function for keywords.</span><span class="w"></span>
+<span class="c1">// It assumes that s has at least length 2.</span><span class="w"></span>
+<span class="kd">func</span><span class="w"> </span><span class="nx">hash</span><span class="p">(</span><span class="nx">s</span><span class="w"> </span><span class="p">[]</span><span class="kt">byte</span><span class="p">)</span><span class="w"> </span><span class="kt">uint</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="nb">uint</span><span class="p">(</span><span class="nx">s</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span><span class="o">&lt;&lt;</span><span class="mi">4</span><span class="w"> </span><span class="p">^</span><span class="w"> </span><span class="nb">uint</span><span class="p">(</span><span class="nx">s</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">uint</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="nx">s</span><span class="p">)))</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="nb">uint</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="nx">keywordMap</span><span class="p">)</span><span class="o">-</span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">var</span><span class="w"> </span><span class="nx">keywordMap</span><span class="w"> </span><span class="p">[</span><span class="mi">1</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="mi">6</span><span class="p">]</span><span class="nx">token</span><span class="w"> </span><span class="c1">// size must be power of two</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">init</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// populate keywordMap</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">tok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">_Break</span><span class="p">;</span><span class="w"> </span><span class="nx">tok</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="nx">_Var</span><span class="p">;</span><span class="w"> </span><span class="nx">tok</span><span class="o">++</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">h</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">hash</span><span class="p">([]</span><span class="nb">byte</span><span class="p">(</span><span class="nx">tok</span><span class="p">.</span><span class="nx">String</span><span class="p">()))</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">keywordMap</span><span class="p">[</span><span class="nx">h</span><span class="p">]</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nb">panic</span><span class="p">(</span><span class="s">&quot;imperfect hash&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">keywordMap</span><span class="p">[</span><span class="nx">h</span><span class="p">]</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">tok</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The compiler tries to build a &quot;perfect&quot; hash table
+to perform keyword string to token lookups. By &quot;perfect&quot; it means it wants no
+collisions, just a linear array where every keyword maps to a single index.
+The hash function is rather ad-hoc (it only looks at the contents of the first
+characters of the string token, for example) and it's not easy to debug why
+a new token creates collisions. To work around it, I increased the lookup table
+size by changing it to <tt class="docutils literal">[1 &lt;&lt; 7]token</tt>, thus changing the size of the lookup
+array from 64 to 128. This gives the hash function much more space to distribute
+its keys, and the collision went away.</p>
+</div>
+<div class="section" id="parse">
+<h2>Parse</h2>
+<p>Go has a fairly standard recursive-descent parser, which converts a stream of
+tokens produced by the scanner into a <em>concrete syntax tree</em>. We'll start by
+adding a new node type for <tt class="docutils literal">until</tt> in <tt class="docutils literal">syntax/nodes.go</tt>:</p>
+<div class="highlight"><pre><span></span><span class="nx">UntilStmt</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Init</span><span class="w"> </span><span class="nx">SimpleStmt</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Cond</span><span class="w"> </span><span class="nx">Expr</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Body</span><span class="w"> </span><span class="o">*</span><span class="nx">BlockStmt</span><span class="w"></span>
+<span class="w">  </span><span class="nx">stmt</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>I borrowed the overall structure from <tt class="docutils literal">ForStmt</tt>, which is used for <tt class="docutils literal">for</tt>
+loops. Similarly to <tt class="docutils literal">for</tt>, our <tt class="docutils literal">until</tt> statement has several optional
+sub-statements:</p>
+<div class="highlight"><pre><span></span>until &lt;init&gt;; &lt;cond&gt; {
+  &lt;body&gt;
+}
+</pre></div>
+<p>Both <tt class="docutils literal">&lt;init&gt;</tt> and <tt class="docutils literal">&lt;cond&gt;</tt> are optional, though it's not common to omit
+<tt class="docutils literal">&lt;cond&gt;</tt>. The <tt class="docutils literal">UntilStmt.stmt</tt> embedded field is used for all syntax tree
+statements and contains position information.</p>
+<p>The parsing itself is done in <tt class="docutils literal">syntax/parser.go</tt>. The <tt class="docutils literal">parser.stmtOrNil</tt>
+method parses a statement in the current position. It looks at the current
+token and makes a decision of which statement to parse. Here's an excerpt
+with the code we're adding:</p>
+<div class="highlight"><pre><span></span><span class="k">switch</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">tok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">case</span><span class="w"> </span><span class="nx">_Lbrace</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">blockStmt</span><span class="p">(</span><span class="s">&quot;&quot;</span><span class="p">)</span><span class="w"></span>
+
+<span class="c1">// ...</span><span class="w"></span>
+
+<span class="k">case</span><span class="w"> </span><span class="nx">_For</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">forStmt</span><span class="p">()</span><span class="w"></span>
+
+<span class="hll"><span class="k">case</span><span class="w"> </span><span class="nx">_Until</span><span class="p">:</span><span class="w"></span>
+</span><span class="hll"><span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">untilStmt</span><span class="p">()</span><span class="w"></span>
+</span></pre></div>
+<p>And this is <tt class="docutils literal">untilStmt</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">p</span><span class="w"> </span><span class="o">*</span><span class="nx">parser</span><span class="p">)</span><span class="w"> </span><span class="nx">untilStmt</span><span class="p">()</span><span class="w"> </span><span class="nx">Stmt</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">trace</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">trace</span><span class="p">(</span><span class="s">&quot;untilStmt&quot;</span><span class="p">)()</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">s</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">new</span><span class="p">(</span><span class="nx">UntilStmt</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">s</span><span class="p">.</span><span class="nx">pos</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">pos</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">s</span><span class="p">.</span><span class="nx">Init</span><span class="p">,</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">Cond</span><span class="p">,</span><span class="w"> </span><span class="nx">_</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">header</span><span class="p">(</span><span class="nx">_Until</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">s</span><span class="p">.</span><span class="nx">Body</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">blockStmt</span><span class="p">(</span><span class="s">&quot;until clause&quot;</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">s</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>We reuse the existing <tt class="docutils literal">parser.header</tt> method which parses a header for <tt class="docutils literal">if</tt>
+and <tt class="docutils literal">for</tt> statements. In its most general form, it supports three parts
+(separated by semicolons). In <tt class="docutils literal">for</tt> statements the third part can be used for
+the <a class="reference external" href="https://golang.org/ref/spec#PostStmt">&quot;post&quot; statement</a>, but we're not
+going to support this for <tt class="docutils literal">until</tt> so we're only interested in the first two.
+Note that <tt class="docutils literal">header</tt> accepts the source token to be able to differentiate
+between the kinds of statements it's serving; for example it would reject a
+&quot;post&quot; statement for <tt class="docutils literal">if</tt>. We should explicitly reject it for <tt class="docutils literal">until</tt> too,
+though I haven't bothered to implement this right now.</p>
+<p>These are all the changes we need for the parser. Since <tt class="docutils literal">until</tt> is so similar
+structurally to existing statements, we could reuse much of the functionality.</p>
+<p>If we instrument the compiler to dump out the syntax tree (using
+<tt class="docutils literal">syntax.Fdump</tt>) after parsing and run it on:</p>
+<div class="highlight"><pre><span></span><span class="nx">i</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">4</span><span class="w"></span>
+<span class="nx">until</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">i</span><span class="o">--</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;Hello, until!&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>We'll get this fragment for the <tt class="docutils literal">until</tt> statement:</p>
+<div class="highlight"><pre><span></span> 84  .  .  .  .  .  3: *syntax.UntilStmt {
+ 85  .  .  .  .  .  .  Init: nil
+ 86  .  .  .  .  .  .  Cond: *syntax.Operation {
+ 87  .  .  .  .  .  .  .  Op: ==
+ 88  .  .  .  .  .  .  .  X: i @ ./useuntil.go:13:8
+ 89  .  .  .  .  .  .  .  Y: *syntax.BasicLit {
+ 90  .  .  .  .  .  .  .  .  Value: &quot;0&quot;
+ 91  .  .  .  .  .  .  .  .  Kind: 0
+ 92  .  .  .  .  .  .  .  }
+ 93  .  .  .  .  .  .  }
+ 94  .  .  .  .  .  .  Body: *syntax.BlockStmt {
+ 95  .  .  .  .  .  .  .  List: []syntax.Stmt (2 entries) {
+ 96  .  .  .  .  .  .  .  .  0: *syntax.AssignStmt {
+ 97  .  .  .  .  .  .  .  .  .  Op: -
+ 98  .  .  .  .  .  .  .  .  .  Lhs: i @ ./useuntil.go:14:3
+ 99  .  .  .  .  .  .  .  .  .  Rhs: *(Node @ 52)
+100  .  .  .  .  .  .  .  .  }
+101  .  .  .  .  .  .  .  .  1: *syntax.ExprStmt {
+102  .  .  .  .  .  .  .  .  .  X: *syntax.CallExpr {
+103  .  .  .  .  .  .  .  .  .  .  Fun: *syntax.SelectorExpr {
+104  .  .  .  .  .  .  .  .  .  .  .  X: fmt @ ./useuntil.go:15:3
+105  .  .  .  .  .  .  .  .  .  .  .  Sel: Println @ ./useuntil.go:15:7
+106  .  .  .  .  .  .  .  .  .  .  }
+107  .  .  .  .  .  .  .  .  .  .  ArgList: []syntax.Expr (1 entries) {
+108  .  .  .  .  .  .  .  .  .  .  .  0: *syntax.BasicLit {
+109  .  .  .  .  .  .  .  .  .  .  .  .  Value: &quot;\&quot;Hello, until!\&quot;&quot;
+110  .  .  .  .  .  .  .  .  .  .  .  .  Kind: 4
+111  .  .  .  .  .  .  .  .  .  .  .  }
+112  .  .  .  .  .  .  .  .  .  .  }
+113  .  .  .  .  .  .  .  .  .  .  HasDots: false
+114  .  .  .  .  .  .  .  .  .  }
+115  .  .  .  .  .  .  .  .  }
+116  .  .  .  .  .  .  .  }
+117  .  .  .  .  .  .  .  Rbrace: syntax.Pos {}
+118  .  .  .  .  .  .  }
+119  .  .  .  .  .  }
+</pre></div>
+</div>
+<div class="section" id="type-check">
+<h2>Type-check</h2>
+<p>The next step in compilation is type-checking, which is done on the syntax
+tree and uses the <tt class="docutils literal">types2</tt> package <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>.
+In addition to detecting type errors, type-checking in Go also includes <em>type
+inference</em>, which allows us to write statements like:</p>
+<div class="highlight"><pre><span></span><span class="nx">res</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">args</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>Without declaring the types of <tt class="docutils literal">res</tt> and <tt class="docutils literal">err</tt> explicitly. The Go
+type-checker does a few more tasks, like linking identifiers to their
+declarations and computing compile-time constants. The
+code is in <tt class="docutils literal">types2/</tt>. Once again, following the lead of the <tt class="docutils literal">for</tt>
+statement, we'll add this clause to the switch in the <tt class="docutils literal">stmt</tt> method of
+<tt class="docutils literal">Checker</tt> (in <tt class="docutils literal">cmd/internal/types2/stmt.go</tt>):</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="o">*</span><span class="nx">syntax</span><span class="p">.</span><span class="nx">UntilStmt</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="nx">inner</span><span class="w"> </span><span class="o">|=</span><span class="w"> </span><span class="nx">breakOk</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="nx">continueOk</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">check</span><span class="p">.</span><span class="nx">openScope</span><span class="p">(</span><span class="nx">s</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;until&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">check</span><span class="p">.</span><span class="nx">closeScope</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">check</span><span class="p">.</span><span class="nx">simpleStmt</span><span class="p">(</span><span class="nx">s</span><span class="p">.</span><span class="nx">Init</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">Cond</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">x</span><span class="w"> </span><span class="nx">operand</span><span class="w"></span>
+<span class="w">    </span><span class="nx">check</span><span class="p">.</span><span class="nx">expr</span><span class="p">(</span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">x</span><span class="p">,</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">Cond</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">x</span><span class="p">.</span><span class="nx">mode</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nx">invalid</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="p">!</span><span class="nx">allBoolean</span><span class="p">(</span><span class="nx">x</span><span class="p">.</span><span class="nx">typ</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">check</span><span class="p">.</span><span class="nb">error</span><span class="p">(</span><span class="nx">s</span><span class="p">.</span><span class="nx">Cond</span><span class="p">,</span><span class="w"> </span><span class="nx">InvalidCond</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;non-boolean condition in for statement&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">check</span><span class="p">.</span><span class="nx">stmt</span><span class="p">(</span><span class="nx">inner</span><span class="p">,</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">Body</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+</div>
+<div class="section" id="create-ast">
+<h2>Create AST</h2>
+<p>Now that we have a type-checked syntax tree, the compiler builds an <em>abstract
+syntax tree</em>. I've written about <a class="reference external" href="../../2009/02/16/abstract-vs-concrete-syntax-trees.html">Abstract vs. Concrete syntax trees</a>
+in the past - it's worth checking out if you're not familiar with the
+differences. In case of Go, however, this may get changed in the future. The Go
+compiler was originally written in C and later auto-translated to Go; some parts
+of it are vestigial from the olden C days, and some parts are newer. Future
+refactorings may leave only one kind of syntax tree, but right now (Go 1.21)
+this is the process we have to follow.</p>
+<p>The AST code lives in the <tt class="docutils literal">ir</tt> package, and the node types are defined in
+<tt class="docutils literal">ir/node.go</tt> and <tt class="docutils literal">ir/stmt.go</tt>.</p>
+<p>We'll start by adding a new constant to identify an <tt class="docutils literal">until</tt> node in <tt class="docutils literal">ir/node.go</tt>:</p>
+<div class="highlight"><pre><span></span><span class="c1">// statements</span><span class="w"></span>
+<span class="c1">// ...</span><span class="w"></span>
+<span class="nx">OFALL</span><span class="w">     </span><span class="c1">// fallthrough</span><span class="w"></span>
+<span class="nx">OFOR</span><span class="w">      </span><span class="c1">// for Init; Cond; Post { Body }</span><span class="w"></span>
+<span class="hll"><span class="nx">OUNTIL</span><span class="w"></span>
+</span></pre></div>
+<p>We'll run <tt class="docutils literal">go generate</tt> again, this time on <tt class="docutils literal">ir/node.go</tt>, to
+generate a string representation for the new node type:</p>
+<div class="highlight"><pre><span></span>// from the ir directory
+GOROOT=&lt;src checkout&gt; go generate node.go
+</pre></div>
+<p>This should update the <tt class="docutils literal">gc/op_string.go</tt> file to include <tt class="docutils literal">OUNTIL</tt> <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.
+Another tool we need to run is <tt class="docutils literal">mknode.go</tt>, from the same directory. This tool
+generates additional code for the new node:</p>
+<div class="highlight"><pre><span></span>// from the ir directory
+GOROOT=&lt;src checkout&gt; &lt;checkout/bin&gt;go run -mod=mod mknode.go
+</pre></div>
+<p>Now let's define the AST node types for our new statement (in <tt class="docutils literal">ir/stmt.go</tt>):</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">UntilStmt</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">miniStmt</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Label</span><span class="w">    </span><span class="o">*</span><span class="nx">types</span><span class="p">.</span><span class="nx">Sym</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Cond</span><span class="w">     </span><span class="nx">Node</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Body</span><span class="w">     </span><span class="nx">Nodes</span><span class="w"></span>
+<span class="w">  </span><span class="nx">HasBreak</span><span class="w"> </span><span class="kt">bool</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">NewUntilStmt</span><span class="p">(</span><span class="nx">pos</span><span class="w"> </span><span class="nx">src</span><span class="p">.</span><span class="nx">XPos</span><span class="p">,</span><span class="w"> </span><span class="nx">init</span><span class="w"> </span><span class="nx">Node</span><span class="p">,</span><span class="w"> </span><span class="nx">cond</span><span class="w"> </span><span class="nx">Node</span><span class="p">,</span><span class="w"> </span><span class="nx">body</span><span class="w"> </span><span class="p">[]</span><span class="nx">Node</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="nx">UntilStmt</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">n</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">UntilStmt</span><span class="p">{</span><span class="nx">Cond</span><span class="p">:</span><span class="w"> </span><span class="nx">cond</span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">n</span><span class="p">.</span><span class="nx">pos</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">pos</span><span class="w"></span>
+<span class="w">  </span><span class="nx">n</span><span class="p">.</span><span class="nx">op</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">OUNTIL</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">init</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">n</span><span class="p">.</span><span class="nx">init</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="p">[]</span><span class="nx">Node</span><span class="p">{</span><span class="nx">init</span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">n</span><span class="p">.</span><span class="nx">Body</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">body</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">n</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>We'll also need to update <tt class="docutils literal">ir/fmt.go</tt> to be able to format / print out our
+new node for debugging:</p>
+<div class="highlight"><pre><span></span><span class="c1">// ... add this in OpNamse slice</span><span class="w"></span>
+<span class="nx">OFOR</span><span class="p">:</span><span class="w">         </span><span class="s">&quot;for&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="hll"><span class="nx">OUNTIL</span><span class="p">:</span><span class="w">       </span><span class="s">&quot;until&quot;</span><span class="p">,</span><span class="w"></span>
+</span></pre></div>
+<p>As well as this switch clause in the <tt class="docutils literal">stmtFmt</tt> method:</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="nx">OUNTIL</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="nx">n</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">n</span><span class="p">.(</span><span class="o">*</span><span class="nx">UntilStmt</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">opname</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="s">&quot;for&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">!</span><span class="nx">exportFormat</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">s</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;%s loop&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">opname</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">break</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprint</span><span class="p">(</span><span class="nx">s</span><span class="p">,</span><span class="w"> </span><span class="nx">opname</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">simpleinit</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">s</span><span class="p">,</span><span class="w"> </span><span class="s">&quot; %v;&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">n</span><span class="p">.</span><span class="nx">Init</span><span class="p">()[</span><span class="mi">0</span><span class="p">])</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">n</span><span class="p">.</span><span class="nx">Cond</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">s</span><span class="p">,</span><span class="w"> </span><span class="s">&quot; %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">n</span><span class="p">.</span><span class="nx">Cond</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">simpleinit</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprint</span><span class="p">(</span><span class="nx">s</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;;&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">s</span><span class="p">,</span><span class="w"> </span><span class="s">&quot; { %v }&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">n</span><span class="p">.</span><span class="nx">Body</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>Finally, the <em>noder</em> component is responsible for actually converting syntax
+trees to ASTs; we'll add this code in <tt class="docutils literal">noder/stmt.go</tt>:</p>
+<div class="highlight"><pre><span></span><span class="c1">// in irgen&#39;s stmt method...</span><span class="w"></span>
+
+<span class="k">case</span><span class="w"> </span><span class="o">*</span><span class="nx">syntax</span><span class="p">.</span><span class="nx">ForStmt</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">g</span><span class="p">.</span><span class="nx">forStmt</span><span class="p">(</span><span class="nx">stmt</span><span class="p">)</span><span class="w"></span>
+<span class="hll"><span class="k">case</span><span class="w"> </span><span class="o">*</span><span class="nx">syntax</span><span class="p">.</span><span class="nx">UntilStmt</span><span class="p">:</span><span class="w"></span>
+</span><span class="hll"><span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">g</span><span class="p">.</span><span class="nx">untilStmt</span><span class="p">(</span><span class="nx">stmt</span><span class="p">)</span><span class="w"></span>
+</span></pre></div>
+<p>And the new method:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">g</span><span class="w"> </span><span class="o">*</span><span class="nx">irgen</span><span class="p">)</span><span class="w"> </span><span class="nx">untilStmt</span><span class="p">(</span><span class="nx">stmt</span><span class="w"> </span><span class="o">*</span><span class="nx">syntax</span><span class="p">.</span><span class="nx">UntilStmt</span><span class="p">)</span><span class="w"> </span><span class="nx">ir</span><span class="p">.</span><span class="nx">Node</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">ir</span><span class="p">.</span><span class="nx">NewUntilStmt</span><span class="p">(</span><span class="nx">g</span><span class="p">.</span><span class="nx">pos</span><span class="p">(</span><span class="nx">stmt</span><span class="p">),</span><span class="w"> </span><span class="nx">g</span><span class="p">.</span><span class="nx">stmt</span><span class="p">(</span><span class="nx">stmt</span><span class="p">.</span><span class="nx">Init</span><span class="p">),</span><span class="w"> </span><span class="nx">g</span><span class="p">.</span><span class="nx">expr</span><span class="p">(</span><span class="nx">stmt</span><span class="p">.</span><span class="nx">Cond</span><span class="p">),</span><span class="w"> </span><span class="nx">g</span><span class="p">.</span><span class="nx">blockStmt</span><span class="p">(</span><span class="nx">stmt</span><span class="p">.</span><span class="nx">Body</span><span class="p">))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+</div>
+<div class="section" id="analyze-and-rewrite-ast">
+<h2>Analyze and rewrite AST</h2>
+<p>After type-checking, the compiler goes through several stages of AST analysis
+and rewrite. The exact sequence is laid out in the <tt class="docutils literal">gc.Main</tt> function in
+<tt class="docutils literal">gc/main.go</tt>. In compiler nomenclature such stages are usually called
+<em>passes</em>.</p>
+<p>Many passes don't require modifications to support <tt class="docutils literal">until</tt>
+because they act generically on all statement kinds (here the generic structure
+of <tt class="docutils literal">gc.Node</tt> comes useful). Some still do, however. For example escape
+analysis, which tries to find which variables &quot;escape&quot; their function scope and
+thus have to be allocated on the heap rather than on the stack.</p>
+<p>Escape analysis works per statement type, so we have to add this switch clause
+in <tt class="docutils literal">escape.stmt</tt>:</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="nx">ir</span><span class="p">.</span><span class="nx">OUNTIL</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="nx">n</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">n</span><span class="p">.(</span><span class="o">*</span><span class="nx">ir</span><span class="p">.</span><span class="nx">UntilStmt</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">e</span><span class="p">.</span><span class="nx">loopDepth</span><span class="o">++</span><span class="w"></span>
+<span class="w">  </span><span class="nx">e</span><span class="p">.</span><span class="nx">discard</span><span class="p">(</span><span class="nx">n</span><span class="p">.</span><span class="nx">Cond</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">e</span><span class="p">.</span><span class="nx">block</span><span class="p">(</span><span class="nx">n</span><span class="p">.</span><span class="nx">Body</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">e</span><span class="p">.</span><span class="nx">loopDepth</span><span class="o">--</span><span class="w"></span>
+</pre></div>
+<p>Now we're getting to the last stage of the compiler's middle end: rewriting
+the AST. This step is called &quot;walk&quot; in Go compiler nomenclature. Its main goal
+is to decompose complex operations into simpler ones, so that the backend will
+have to deal with fewer operation types.</p>
+<p>We'll have to update <tt class="docutils literal">walk/order.go</tt> to be aware of the new AST node we've
+added. It doesn't do much except serve as a pass-through for the transformation:</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="nx">ir</span><span class="p">.</span><span class="nx">OUNTIL</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="nx">n</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">n</span><span class="p">.(</span><span class="o">*</span><span class="nx">ir</span><span class="p">.</span><span class="nx">UntilStmt</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">t</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">o</span><span class="p">.</span><span class="nx">markTemp</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">n</span><span class="p">.</span><span class="nx">Cond</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">o</span><span class="p">.</span><span class="nx">exprInPlace</span><span class="p">(</span><span class="nx">n</span><span class="p">.</span><span class="nx">Cond</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">n</span><span class="p">.</span><span class="nx">Body</span><span class="p">.</span><span class="nx">Prepend</span><span class="p">(</span><span class="nx">o</span><span class="p">.</span><span class="nx">cleanTempNoPop</span><span class="p">(</span><span class="nx">t</span><span class="p">)</span><span class="o">...</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">orderBlock</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">n</span><span class="p">.</span><span class="nx">Body</span><span class="p">,</span><span class="w"> </span><span class="nx">o</span><span class="p">.</span><span class="nx">free</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">o</span><span class="p">.</span><span class="nx">out</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nb">append</span><span class="p">(</span><span class="nx">o</span><span class="p">.</span><span class="nx">out</span><span class="p">,</span><span class="w"> </span><span class="nx">n</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">o</span><span class="p">.</span><span class="nx">cleanTemp</span><span class="p">(</span><span class="nx">t</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>The rest of the <tt class="docutils literal">walk</tt> code collects a bunch of AST transformations that helps
+lower the AST to SSA later on. For example, it rewrites <tt class="docutils literal">range</tt> clauses in
+<tt class="docutils literal">for</tt> loops to simpler forms of <tt class="docutils literal">for</tt> loops with an explicit loop variable
+<a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>. It also <a class="reference external" href="https://dave.cheney.net/2018/05/29/how-the-go-runtime-implements-maps-efficiently-without-generics">rewrites map accesses to runtime calls</a>,
+and much more.</p>
+<p>This is where we'll implement our new <tt class="docutils literal">until</tt> statement by degurating it into
+a <tt class="docutils literal">for</tt> loop with an inverted condition.</p>
+<p>We'll start by handling the new op in the switch in <tt class="docutils literal">walkStmt</tt> (this code is
+in <tt class="docutils literal">walk/stmt.go</tt>):</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="nx">ir</span><span class="p">.</span><span class="nx">OUNTIL</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="nx">n</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">n</span><span class="p">.(</span><span class="o">*</span><span class="nx">ir</span><span class="p">.</span><span class="nx">UntilStmt</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">walkUntil</span><span class="p">(</span><span class="nx">n</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>And adding <tt class="docutils literal">walkUntil</tt> as follows:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">walkUntil</span><span class="p">(</span><span class="nx">n</span><span class="w"> </span><span class="o">*</span><span class="nx">ir</span><span class="p">.</span><span class="nx">UntilStmt</span><span class="p">)</span><span class="w"> </span><span class="nx">ir</span><span class="p">.</span><span class="nx">Node</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">n</span><span class="p">.</span><span class="nx">Cond</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">init</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">ir</span><span class="p">.</span><span class="nx">TakeInit</span><span class="p">(</span><span class="nx">n</span><span class="p">.</span><span class="nx">Cond</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">walkStmtList</span><span class="p">(</span><span class="nx">init</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">n</span><span class="p">.</span><span class="nx">Cond</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">ir</span><span class="p">.</span><span class="nx">NewUnaryExpr</span><span class="p">(</span><span class="nx">base</span><span class="p">.</span><span class="nx">Pos</span><span class="p">,</span><span class="w"> </span><span class="nx">ir</span><span class="p">.</span><span class="nx">ONOT</span><span class="p">,</span><span class="w"> </span><span class="nx">walkExpr</span><span class="p">(</span><span class="nx">n</span><span class="p">.</span><span class="nx">Cond</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">init</span><span class="p">))</span><span class="w"></span>
+<span class="w">    </span><span class="nx">n</span><span class="p">.</span><span class="nx">Cond</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">ir</span><span class="p">.</span><span class="nx">InitExpr</span><span class="p">(</span><span class="nx">init</span><span class="p">,</span><span class="w"> </span><span class="nx">n</span><span class="p">.</span><span class="nx">Cond</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">walkStmtList</span><span class="p">(</span><span class="nx">n</span><span class="p">.</span><span class="nx">Body</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">ir</span><span class="p">.</span><span class="nx">NewForStmt</span><span class="p">(</span><span class="nx">n</span><span class="p">.</span><span class="nx">Pos</span><span class="p">(),</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="nx">n</span><span class="p">.</span><span class="nx">Cond</span><span class="p">,</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="nx">n</span><span class="p">.</span><span class="nx">Body</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This is it! This rewrites the <tt class="docutils literal">UntilStmt</tt> node to a <tt class="docutils literal">ForStmt</tt> node, adding
+a unary boolean negation (essentially the <tt class="docutils literal">!</tt> operator) on the condition,
+as discussed at the very beginning of the post.</p>
+</div>
+<div class="section" id="trying-it-out">
+<h2>Trying it out</h2>
+<p>We can now try out our modified compiler and run a sample program that uses
+an <tt class="docutils literal">until</tt> statement:</p>
+<div class="highlight"><pre><span></span>$ cat useuntil.go
+package main
+
+import &quot;fmt&quot;
+
+func main() {
+  i := 4
+  until i == 0 {
+    i--
+    fmt.Println(&quot;Hello, until!&quot;)
+  }
+}
+
+$ &lt;src checkout&gt;/bin/go run useuntil.go
+Hello, until!
+Hello, until!
+Hello, until!
+Hello, until!
+</pre></div>
+<p>It works!</p>
+<p>Reminder: <tt class="docutils literal">&lt;src checkout&gt;</tt> is the directory where we checked out Go, changed
+it and compiled it (see Appendix for more details).</p>
+</div>
+<div class="section" id="concluding-part-1">
+<h2>Concluding part 1</h2>
+<p>This is it for part 1. We've successfully implemented a new statement in the Go
+compiler. We didn't cover all the parts of the compiler because we could take a
+shortcut by rewriting the AST of <tt class="docutils literal">until</tt> nodes to use <tt class="docutils literal">for</tt> nodes instead.
+This is a perfectly valid compilation strategy, and the Go compiler already has
+many similar transformations to <em>canonicalize</em> the AST (reducing many forms to
+fewer forms so the last stages of compilation have less work to do). That said,
+we're still interested in exploring the last two compilation stages - <em>Convert
+to SSA</em> and <em>Generate machine code</em>. This will be covered in <a class="reference external" href="../go-compiler-internals-adding-a-new-statement-to-go-part-2/index.html">part 2</a>.</p>
+</div>
+<div class="section" id="appendix-building-the-go-toolchain">
+<h2>Appendix - building the Go toolchain</h2>
+<p>Please start by going over the <a class="reference external" href="https://golang.org/doc/contribute.html">Go contribution guide</a>. Here are a few quick notes on
+reproducing the modified Go compiler as shown in this post.</p>
+<p>There are two paths to proceed:</p>
+<ol class="arabic simple">
+<li>Clone the <a class="reference external" href="https://github.com/golang/go">official Go repository</a> and
+apply the modifications described in this post.</li>
+<li>(recommended) Clone <a class="reference external" href="https://github.com/eliben/go">my fork of the Go repository</a> and
+check out the <tt class="docutils literal"><span class="pre">adduntil-121-part1</span></tt> branch, where all these changes are
+already applied along with some debugging helpers.</li>
+</ol>
+<p>The cloned directory is where <tt class="docutils literal">&lt;src checkout&gt;</tt> points throughout the post.</p>
+<p>To compile the toolchain, enter the <tt class="docutils literal">src/</tt> directory and run <tt class="docutils literal">./make.bash</tt>.
+We could also run <tt class="docutils literal">./all.bash</tt> to run many tests after building it. Running
+<tt class="docutils literal">make.bash</tt> invokes the full 3-step bootstrap process of building Go, but
+it only takes about a minute on my aging machine.</p>
+<p>Once built, the toolchain is installed in <tt class="docutils literal">bin</tt> alongside <tt class="docutils literal">src</tt>. We can
+then do quicker rebuilds of the compiler itself by running
+<tt class="docutils literal">bin/go install cmd/compile</tt>.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>The <tt class="docutils literal">types2</tt> package is a port (onto the compiler's internal data
+structures) of the type checking algorithms in <tt class="docutils literal">go/types</tt>. It's kept
+in sync with <tt class="docutils literal">go/types</tt>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>If you peruse this and related parts of the compiler's code, you'll
+notice there's another opcode called <tt class="docutils literal">OFORUNTIL</tt>. This node implements
+a for-like loop where the condition is checked at the end of an
+iteration; it's used internally by compiler to transform some loops and
+is not accessible to Go programmers. We'll ignore it in this post.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>Go has some special &quot;magic&quot; <tt class="docutils literal">range</tt> clauses like a <tt class="docutils literal">range</tt> over a
+string which splits its up into runes. This is where such transformations
+are implemented.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

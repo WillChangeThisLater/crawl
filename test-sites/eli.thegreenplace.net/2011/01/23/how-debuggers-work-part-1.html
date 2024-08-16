@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>How debuggers work: Part 1 - Basics - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="how-debuggers-work-part-1.html"
+                       rel="bookmark"
+                       title="Permalink to How debuggers work: Part 1 - Basics">
+                        How debuggers work: Part 1 - Basics
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> January 23, 2011 at 07:40</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/debuggers.html">Debuggers</a>
+        ,
+    <a href="../../../tag/programming.html">Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>This is the first part in a series of articles on how debuggers work. I'm still not sure how many articles the series will contain and what topics it will cover, but I'm going to start with the basics.</p>
+<div class="section" id="in-this-part">
+<h3>In this part</h3>
+<p>I'm going to present the main building block of a debugger's implementation on Linux - the <tt class="docutils literal">ptrace</tt> system call. All the code in this article is developed on a 32-bit Ubuntu machine. Note that the code is very much platform specific, although porting it to other platforms shouldn't be too difficult.</p>
+</div>
+<div class="section" id="motivation">
+<h3>Motivation</h3>
+<p>To understand where we're going, try to imagine what it takes for a debugger to do its work. A debugger can start some process and debug it, or attach itself to an existing process. It can single-step through the code, set breakpoints and run to them, examine variable values and stack traces. Many debuggers have advanced features such as executing expressions and calling functions in the debbugged process's address space, and even changing the process's code on-the-fly and watching the effects.</p>
+<p>Although modern debuggers are complex beasts <a class="footnote-reference" href="how-debuggers-work-part-1.html#id7" id="id1">[1]</a>, it's surprising how simple is the foundation on which they are built. Debuggers start with only a few basic services provided by the operating system and the compiler/linker, all the rest is just <a class="reference external" href="http://en.wikipedia.org/wiki/Small_matter_of_programming">a simple matter of programming</a>.</p>
+</div>
+<div class="section" id="linux-debugging-ptrace">
+<h3>Linux debugging - <tt class="docutils literal">ptrace</tt></h3>
+<p>The Swiss army knife of Linux debuggers is the <tt class="docutils literal">ptrace</tt> system call <a class="footnote-reference" href="how-debuggers-work-part-1.html#id8" id="id2">[2]</a>. It's a versatile and rather complex tool that allows one process to control the execution of another and to peek and poke at its innards <a class="footnote-reference" href="how-debuggers-work-part-1.html#id9" id="id3">[3]</a>. <tt class="docutils literal">ptrace</tt> can take a mid-sized book to explain fully, which is why I'm just going to focus on some of its practical uses in examples.</p>
+<p>Let's dive right in.</p>
+</div>
+<div class="section" id="stepping-through-the-code-of-a-process">
+<h3>Stepping through the code of a process</h3>
+<p>I'm now going to develop an example of running a process in &quot;traced&quot; mode in which we're going to single-step through its code - the machine code (assembly instructions) that's executed by the CPU. I'll show the example code in parts, explaining each, and in the end of the article you will find a link to download a complete C file that you can compile, execute and play with.</p>
+<p>The high-level plan is to write code that splits into a child process that will execute a user-supplied command, and a parent process that traces the child. First, the main function:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">main</span>(<span style="color: #00007f; font-weight: bold">int</span> argc, <span style="color: #00007f; font-weight: bold">char</span>** argv)
+{
+    pid_t child_pid;
+
+    <span style="color: #00007f; font-weight: bold">if</span> (argc &lt; <span style="color: #007f7f">2</span>) {
+        fprintf(stderr, <span style="color: #7f007f">&quot;Expected a program name as argument\n&quot;</span>);
+        <span style="color: #00007f; font-weight: bold">return</span> -<span style="color: #007f7f">1</span>;
+    }
+
+    child_pid = fork();
+    <span style="color: #00007f; font-weight: bold">if</span> (child_pid == <span style="color: #007f7f">0</span>)
+        run_target(argv[<span style="color: #007f7f">1</span>]);
+    <span style="color: #00007f; font-weight: bold">else</span> <span style="color: #00007f; font-weight: bold">if</span> (child_pid &gt; <span style="color: #007f7f">0</span>)
+        run_debugger(child_pid);
+    <span style="color: #00007f; font-weight: bold">else</span> {
+        perror(<span style="color: #7f007f">&quot;fork&quot;</span>);
+        <span style="color: #00007f; font-weight: bold">return</span> -<span style="color: #007f7f">1</span>;
+    }
+
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">0</span>;
+}
+</pre></div>
+<p>Pretty simple: we start a new child process with <tt class="docutils literal">fork</tt> <a class="footnote-reference" href="how-debuggers-work-part-1.html#id10" id="id4">[4]</a>. The <tt class="docutils literal">if</tt> branch of the subsequent condition runs the child process (called &quot;target&quot; here), and the <tt class="docutils literal">else if</tt> branch runs the parent process (called &quot;debugger&quot; here).</p>
+<p>Here's the target process:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">void</span> <span style="color: #00007f">run_target</span>(<span style="color: #00007f; font-weight: bold">const</span> <span style="color: #00007f; font-weight: bold">char</span>* programname)
+{
+    procmsg(<span style="color: #7f007f">&quot;target started. will run &#39;%s&#39;\n&quot;</span>, programname);
+
+    <span style="color: #007f00">/* Allow tracing of this process */</span>
+    <span style="color: #00007f; font-weight: bold">if</span> (ptrace(PTRACE_TRACEME, <span style="color: #007f7f">0</span>, <span style="color: #007f7f">0</span>, <span style="color: #007f7f">0</span>) &lt; <span style="color: #007f7f">0</span>) {
+        perror(<span style="color: #7f007f">&quot;ptrace&quot;</span>);
+        <span style="color: #00007f; font-weight: bold">return</span>;
+    }
+
+    <span style="color: #007f00">/* Replace this process&#39;s image with the given program */</span>
+    execl(programname, programname, <span style="color: #007f7f">0</span>);
+}
+</pre></div>
+<p>The most interesting line here is the <tt class="docutils literal">ptrace</tt> call. <tt class="docutils literal">ptrace</tt> is declared thus (in <tt class="docutils literal">sys/ptrace.h</tt>):</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">long</span> ptrace(<span style="color: #00007f; font-weight: bold">enum</span> __ptrace_request request, pid_t pid,
+                 <span style="color: #00007f; font-weight: bold">void</span> *addr, <span style="color: #00007f; font-weight: bold">void</span> *data);
+</pre></div>
+<p>The first argument is a <em>request</em>, which may be one of many predefined <tt class="docutils literal">PTRACE_*</tt> constants. The second argument specifies a process ID for some requests. The third and fourth arguments are address and data pointers, for memory manipulation. The <tt class="docutils literal">ptrace</tt> call in the code snippet above makes the <tt class="docutils literal">PTRACE_TRACEME</tt> request, which means that this child process asks the OS kernel to let its parent trace it. The request description from the man-page is quite clear:</p>
+<blockquote>
+Indicates that this process is to be traced by its parent. Any signal (except SIGKILL) delivered to this process will cause it to stop and its parent to be notified via wait(). <strong>Also, all subsequent calls to exec() by this process will cause a SIGTRAP to be sent to it, giving the parent a chance to gain control before the new program begins execution</strong>. A process probably shouldn't make this request if its parent isn't expecting to trace it. (pid, addr, and data are ignored.)</blockquote>
+<p>I've highlighted the part that interests us in this example. Note that the very next thing <tt class="docutils literal">run_target</tt> does after <tt class="docutils literal">ptrace</tt> is invoke the program given to it as an argument with <tt class="docutils literal">execl</tt>. This, as the highlighted part explains, causes the OS kernel to stop the process just before it begins executing the program in <tt class="docutils literal">execl</tt> and send a signal to the parent.</p>
+<p>Thus, time is ripe to see what the parent does:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">void</span> <span style="color: #00007f">run_debugger</span>(pid_t child_pid)
+{
+    <span style="color: #00007f; font-weight: bold">int</span> wait_status;
+    <span style="color: #00007f; font-weight: bold">unsigned</span> icounter = <span style="color: #007f7f">0</span>;
+    procmsg(<span style="color: #7f007f">&quot;debugger started\n&quot;</span>);
+
+    <span style="color: #007f00">/* Wait for child to stop on its first instruction */</span>
+    wait(&amp;wait_status);
+
+    <span style="color: #00007f; font-weight: bold">while</span> (WIFSTOPPED(wait_status)) {
+        icounter++;
+        <span style="color: #007f00">/* Make the child execute another instruction */</span>
+        <span style="color: #00007f; font-weight: bold">if</span> (ptrace(PTRACE_SINGLESTEP, child_pid, <span style="color: #007f7f">0</span>, <span style="color: #007f7f">0</span>) &lt; <span style="color: #007f7f">0</span>) {
+            perror(<span style="color: #7f007f">&quot;ptrace&quot;</span>);
+            <span style="color: #00007f; font-weight: bold">return</span>;
+        }
+
+        <span style="color: #007f00">/* Wait for child to stop on its next instruction */</span>
+        wait(&amp;wait_status);
+    }
+
+    procmsg(<span style="color: #7f007f">&quot;the child executed %u instructions\n&quot;</span>, icounter);
+}
+</pre></div>
+<p>Recall from above that once the child starts executing the <tt class="docutils literal">exec</tt> call, it will stop and be sent the <tt class="docutils literal">SIGTRAP</tt> signal. The parent here waits for this to happen with the first <tt class="docutils literal">wait</tt> call. <tt class="docutils literal">wait</tt> will return once something interesting happens, and the parent checks that it was because the child was stopped (<tt class="docutils literal">WIFSTOPPED</tt> returns true if the child process was stopped by delivery of a signal).</p>
+<p>What the parent does next is the most interesting part of this article. It invokes <tt class="docutils literal">ptrace</tt> with the <tt class="docutils literal">PTRACE_SINGLESTEP</tt> request giving it the child process ID. What this does is tell the OS - <em>please restart the child process, but stop it after it executes the next instruction</em>. Again, the parent waits for the child to stop and the loop continues. The loop will terminate when the signal that came out of the <tt class="docutils literal">wait</tt> call wasn't about the child stopping. During a normal run of the tracer, this will be the signal that tells the parent that the child process exited (<tt class="docutils literal">WIFEXITED</tt> would return true on it).</p>
+<p>Note that <tt class="docutils literal">icounter</tt> counts the amount of instructions executed by the child process. So our simple example actually does something useful - given a program name on the command line, it executes the program and reports the amount of CPU instructions it took to run from start to finish. Let's see it in action.</p>
+</div>
+<div class="section" id="a-test-run">
+<h3>A test run</h3>
+<p>I compiled the following simple program and ran it under the tracer:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">#include &lt;stdio.h&gt;</span>
+
+
+<span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">main</span>()
+{
+    printf(<span style="color: #7f007f">&quot;Hello, world!\n&quot;</span>);
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">0</span>;
+}
+</pre></div>
+<p>To my surprise, the tracer took quite long to run and reported that there were more than 100,000 instructions executed. For a simple <tt class="docutils literal">printf</tt> call? What gives? The answer is very interesting <a class="footnote-reference" href="how-debuggers-work-part-1.html#id11" id="id5">[5]</a>. By default, <tt class="docutils literal">gcc</tt> on Linux links programs to the C runtime libraries dynamically. What this means is  that one of the first things that runs when any program is executed is the dynamic library loader that looks for the required shared libraries. This is quite a lot of code - and remember that our basic tracer here looks at each and every instruction, not of just the <tt class="docutils literal">main</tt> function, but <em>of the whole process</em>.</p>
+<p>So, when I linked the test program with the <tt class="docutils literal"><span class="pre">-static</span></tt> flag (and verified that the executable gained some 500KB in weight, as is logical for a static link of the C runtime), the tracing reported only 7,000 instructions or so. This is still a lot, but makes perfect sense if you recall that <tt class="docutils literal">libc</tt> initialization still has to run before <tt class="docutils literal">main</tt>, and cleanup has to run after <tt class="docutils literal">main</tt>. Besides, <tt class="docutils literal">printf</tt> is a complex function.</p>
+<p>Still not satisfied, I wanted to see something <em>testable</em> - i.e. a whole run in which I could account for every instruction executed. This, of course, can be done with assembly code. So I took this version of &quot;Hello, world!&quot; and assembled it:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">section    .text
+    ; The _start symbol must be declared for the linker (ld)
+    global _start
+
+_start:
+
+    ; Prepare arguments for the sys_write system call:
+    ;   - eax: system call number (sys_write)
+    ;   - ebx: file descriptor (stdout)
+    ;   - ecx: pointer to string
+    ;   - edx: string length
+    mov    edx, len
+    mov    ecx, msg
+    mov    ebx, 1
+    mov    eax, 4
+
+    ; Execute the sys_write system call
+    int    0x80
+
+    ; Execute sys_exit
+    mov    eax, 1
+    int    0x80
+
+section   .data
+msg db    &#39;Hello, world!&#39;, 0xa
+len equ    $ - msg
+</pre></div>
+<p>Sure enough. Now the tracer reported that 7 instructions were executed, which is something I can easily verify.</p>
+</div>
+<div class="section" id="deep-into-the-instruction-stream">
+<h3>Deep into the instruction stream</h3>
+<p>The assembly-written program allows me to introduce you to another powerful use of <tt class="docutils literal">ptrace</tt> - closely examining the state of the traced process. Here's another version of the <tt class="docutils literal">run_debugger</tt> function:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">void</span> <span style="color: #00007f">run_debugger</span>(pid_t child_pid)
+{
+    <span style="color: #00007f; font-weight: bold">int</span> wait_status;
+    <span style="color: #00007f; font-weight: bold">unsigned</span> icounter = <span style="color: #007f7f">0</span>;
+    procmsg(<span style="color: #7f007f">&quot;debugger started\n&quot;</span>);
+
+    <span style="color: #007f00">/* Wait for child to stop on its first instruction */</span>
+    wait(&amp;wait_status);
+
+    <span style="color: #00007f; font-weight: bold">while</span> (WIFSTOPPED(wait_status)) {
+        icounter++;
+        <span style="color: #00007f; font-weight: bold">struct</span> user_regs_struct regs;
+        ptrace(PTRACE_GETREGS, child_pid, <span style="color: #007f7f">0</span>, &amp;regs);
+        <span style="color: #00007f; font-weight: bold">unsigned</span> instr = ptrace(PTRACE_PEEKTEXT, child_pid, regs.eip, <span style="color: #007f7f">0</span>);
+
+        procmsg(<span style="color: #7f007f">&quot;icounter = %u.  EIP = 0x%08x.  instr = 0x%08x\n&quot;</span>,
+                    icounter, regs.eip, instr);
+
+        <span style="color: #007f00">/* Make the child execute another instruction */</span>
+        <span style="color: #00007f; font-weight: bold">if</span> (ptrace(PTRACE_SINGLESTEP, child_pid, <span style="color: #007f7f">0</span>, <span style="color: #007f7f">0</span>) &lt; <span style="color: #007f7f">0</span>) {
+            perror(<span style="color: #7f007f">&quot;ptrace&quot;</span>);
+            <span style="color: #00007f; font-weight: bold">return</span>;
+        }
+
+        <span style="color: #007f00">/* Wait for child to stop on its next instruction */</span>
+        wait(&amp;wait_status);
+    }
+
+    procmsg(<span style="color: #7f007f">&quot;the child executed %u instructions\n&quot;</span>, icounter);
+}
+</pre></div>
+<p>The only difference is in the first few lines of the <tt class="docutils literal">while</tt> loop. There are two new <tt class="docutils literal">ptrace</tt> calls. The first one reads the value of the process's registers into a structure. <tt class="docutils literal">user_regs_struct</tt> is defined in <tt class="docutils literal">sys/user.h</tt>. Now here's the fun part - if you look at this header file, a comment close to the top says:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">/* The whole purpose of this file is for GDB and GDB only.</span>
+<span style="color: #007f00">   Don&#39;t read too much into it. Don&#39;t use it for</span>
+<span style="color: #007f00">   anything other than GDB unless know what you are</span>
+<span style="color: #007f00">   doing.  */</span>
+</pre></div>
+<p>Now, I don't know about you, but it makes <em>me</em> feel we're on the right track :-) Anyway, back to the example. Once we have all the registers in <tt class="docutils literal">regs</tt>, we can peek at the current instruction of the process by calling <tt class="docutils literal">ptrace</tt> with <tt class="docutils literal">PTRACE_PEEKTEXT</tt>, passing it <tt class="docutils literal">regs.eip</tt> (the extended instruction pointer on x86) as the address. What we get back is the instruction <a class="footnote-reference" href="how-debuggers-work-part-1.html#id12" id="id6">[6]</a>. Let's see this new tracer run on our assembly-coded snippet:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ simple_tracer traced_helloworld
+[5700] debugger started
+[5701] target started. will run &#39;traced_helloworld&#39;
+[5700] icounter = 1.  EIP = 0x08048080.  instr = 0x00000eba
+[5700] icounter = 2.  EIP = 0x08048085.  instr = 0x0490a0b9
+[5700] icounter = 3.  EIP = 0x0804808a.  instr = 0x000001bb
+[5700] icounter = 4.  EIP = 0x0804808f.  instr = 0x000004b8
+[5700] icounter = 5.  EIP = 0x08048094.  instr = 0x01b880cd
+Hello, world!
+[5700] icounter = 6.  EIP = 0x08048096.  instr = 0x000001b8
+[5700] icounter = 7.  EIP = 0x0804809b.  instr = 0x000080cd
+[5700] the child executed 7 instructions
+</pre></div>
+<p>OK, so now in addition to <tt class="docutils literal">icounter</tt> we also see the instruction pointer and the instruction it points to at each step. How to verify this is correct? By using <tt class="docutils literal">objdump <span class="pre">-d</span></tt> on the executable:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ objdump -d traced_helloworld
+
+traced_helloworld:     file format elf32-i386
+
+
+Disassembly of section .text:
+
+08048080 &lt;.text&gt;:
+ 8048080:     ba 0e 00 00 00          mov    $0xe,%edx
+ 8048085:     b9 a0 90 04 08          mov    $0x80490a0,%ecx
+ 804808a:     bb 01 00 00 00          mov    $0x1,%ebx
+ 804808f:     b8 04 00 00 00          mov    $0x4,%eax
+ 8048094:     cd 80                   int    $0x80
+ 8048096:     b8 01 00 00 00          mov    $0x1,%eax
+ 804809b:     cd 80                   int    $0x80
+</pre></div>
+<p>The correspondence between this and our tracing output is easily observed.</p>
+</div>
+<div class="section" id="attaching-to-a-running-process">
+<h3>Attaching to a running process</h3>
+<p>As you know, debuggers can also attach to an already-running process. By now you won't be surprised to find out that this is also done with <tt class="docutils literal">ptrace</tt>, which can get the <tt class="docutils literal">PTRACE_ATTACH</tt> request. I won't show a code sample here since it should be very easy to implement given the code we've already gone through. For educational purposes, the approach taken here is more convenient (since we can stop the child process right at its start).</p>
+</div>
+<div class="section" id="the-code">
+<h3>The code</h3>
+<p>The complete C source-code of the simple tracer presented in this article (the more advanced, instruction-printing version) is available <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2011/simple_tracer.c">here</a>. It compiles cleanly with <tt class="docutils literal"><span class="pre">-Wall</span> <span class="pre">-pedantic</span> <span class="pre">--std=c99</span></tt> on version 4.4 of <tt class="docutils literal">gcc</tt>.</p>
+</div>
+<div class="section" id="conclusion-and-next-steps">
+<h3>Conclusion and next steps</h3>
+<p>Admittedly, this part didn't cover much - we're still far from having a real debugger in our hands. However, I hope it has already made the process of debugging at least a little less mysterious. <tt class="docutils literal">ptrace</tt> is truly a versatile system call with many abilities, of which we've sampled only a few so far.</p>
+<p>Single-stepping through the code is useful, but only to a certain degree. Take the C &quot;Hello, world!&quot; sample I demonstrated above. To get to <tt class="docutils literal">main</tt> it would probably take a couple of thousands of instructions of C runtime initialization code to step through. This isn't very convenient. What we'd ideally want to have is the ability to place a breakpoint at the entry to <tt class="docutils literal">main</tt> and step from there. Fair enough, and in the next part of the series I intend to show how breakpoints are implemented.</p>
+</div>
+<div class="section" id="references">
+<h3>References</h3>
+<p>I've found the following resources and articles useful in the preparation of this article:</p>
+<ul class="simple">
+<li><a class="reference external" href="http://www.linuxjournal.com/article/6100?page=0,1">Playing with ptrace, Part I</a></li>
+<li><a class="reference external" href="http://www.alexonlinux.com/how-debugger-works">How debugger works</a></li>
+</ul>
+<img class="align-center" src="../../../images/hline.jpg" style="width: 320px; height: 5px;" />
+<table class="docutils footnote" frame="void" id="id7" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="how-debuggers-work-part-1.html#id1">[1]</a></td><td>I didn't check but I'm sure the LOC count of <tt class="docutils literal">gdb</tt> is at least in the six-figures range.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id8" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="how-debuggers-work-part-1.html#id2">[2]</a></td><td>Run <tt class="docutils literal">man 2 ptrace</tt> for complete enlightment.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id9" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="how-debuggers-work-part-1.html#id3">[3]</a></td><td><em>Peek</em> and <em>poke</em> are well-known system programming <a class="reference external" href="http://www.jargon.net/jargonfile/p/peek.html">jargon</a> for directly reading and writing memory contents.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id10" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="how-debuggers-work-part-1.html#id4">[4]</a></td><td>This article assumes some basic level of Unix/Linux programming experience. I assume you know (at least conceptually) about <tt class="docutils literal">fork</tt>, the <tt class="docutils literal">exec</tt> family of functions and Unix signals.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id11" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="how-debuggers-work-part-1.html#id5">[5]</a></td><td>At least if you're as obsessed with low-level details as I am :-)</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id12" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="how-debuggers-work-part-1.html#id6">[6]</a></td><td>A word of warning here: as I noted above, a lot of this is highly platform specific. I'm making some simplifying assumptions - for example, x86 instructions don't have to fit into 4 bytes (the size of <tt class="docutils literal">unsigned</tt> on my 32-bit Ubuntu machine). In fact, many won't. Peeking at instructions meaningfully requires us to have a complete disassembler at hand. We don't have one here, but real debuggers do.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="how-debuggers-work-part-1.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

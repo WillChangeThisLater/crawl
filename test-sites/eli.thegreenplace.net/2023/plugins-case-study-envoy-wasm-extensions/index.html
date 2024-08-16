@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Plugins case study: Envoy WASM extensions - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Plugins case study: Envoy WASM extensions">
+                        Plugins case study: Envoy WASM extensions
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> June 03, 2023 at 15:14</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/plugins.html">Plugins</a>
+        ,
+    <a href="../../tag/webassembly.html">WebAssembly</a>
+        ,
+    <a href="../../tag/c-c.html">C & C++</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p><a class="reference external" href="https://www.envoyproxy.io/">Envoy</a> is a configurable proxy that serves
+a prominent role in modern cloud-native projects; for example, it's
+used in many k8s deployments to provide inter-service communication (through
+Istio). In this post, I'd like to describe Envoy's extension mechanism as a case
+study of using WebAssembly for plugins.</p>
+<div class="section" id="some-background">
+<h2>Some background</h2>
+<p>Imagine a complex service-based infrastructure, in which service A has to
+communicate with service B. This is typically done via HTTP/REST or some RPC
+mechanism, but there are a lot of complex networking details to deal with:
+service discovery (I just want to send a message to an instance of service B,
+but which address/port is it on?), load balancing, retries, etc. Instead of
+having each service deal with this complexity, we can set up Envoy to run as a
+sidecar, and ask it to handle all of it. Then the actual services can focus on
+our business logic.</p>
+<p>Here's a handy diagram from <a class="reference external" href="https://istio.io">https://istio.io</a> that demonstrates this (Envoy is
+the <em>Proxy</em> boxes):</p>
+<object class="align-center" data="../../images/2023/envoyarch.svg" style="width: 600px;" type="image/svg+xml">System diagram of envoy proxies communicating for microservices</object>
+<p>As expected - for such a sophisticated piece of software - Envoy users
+frequently need to customize it in various ways for their projects. For example,
+we may want to define <a class="reference external" href="https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/listeners/listener_filters#arch-overview-network-filters">custom filters</a>;
+this is a kind of middleware.</p>
+<p>Envoy's original approach to extensions was to support writing C++ to link
+custom filters with Envoy itself. This, of course, is awkward for many reasons -
+such as having to distribute your own Envoy binaries instead of using the
+standard ones. Also, the filter API was not really designed to be stable so
+keeping up with changes was an issue; and finally, few people like writing C++
+these days.</p>
+<p>So the Envoy team came up with an alternative approach:
+<a class="reference external" href="https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/lua_filter">Lua extensions</a>.</p>
+<img alt="Lua programming language logo" class="align-center" src="../../images/2023/lua-logo.png" style="width: 200px;" />
+<p>The <a class="reference external" href="https://en.wikipedia.org/wiki/Lua_(programming_language)">Lua programming language</a> was designed
+for extensions and plugins; it's a small and simple language, and its
+implementation is also small and simple - making it easy to embed. You can write
+some Lua code either directly in your configuration file or a separate file it
+points to, and there's an API exposed to Lua that the extension can interact
+with.</p>
+<p>The Lua extension method is fully supported in Envoy and is currently in
+a <em>stable</em> state, but some folks weren't too keen on learning yet another
+programming language just for the sake of writing filters for their proxy. Lua
+is not particularly prominent in the Cloud world (which is mostly dominated
+by Go, Python, Java and some other languages). Therefore, the Envoy maintainers
+have created yet another way to extend it <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a> - with WebAssembly.</p>
+</div>
+<div class="section" id="wasm-extensions">
+<h2>WASM extensions</h2>
+<p>WASM extensions are still experimental in Envoy at the time of writing, but
+it's an intriguing approach and the main subject of this post. WASM elegantly
+solves the problems of the other extension methods as follows:</p>
+<ul class="simple">
+<li>The WASM extension is compiled into a <tt class="docutils literal">.wasm</tt> file that the Envoy config
+can point at, and is loaded dynamically at runtime. It doesn't require
+recompiling and distributing a custom version of Envoy.</li>
+<li>The extension can use any programming language that compiles down to WASM,
+and that covers <em>a lot</em> of languages these days.
+Your entire service infrastructure is written in Go and you don't want to
+wrangle C++ or learn Lua just for the proxy filters? No problem - Go compiles
+to WASM and there's even <a class="reference external" href="https://github.com/tetratelabs/proxy-wasm-go-sdk">an SDK</a>
+to help writing Envoy filters in it.</li>
+</ul>
+<p>To this end, Envoy embeds <a class="reference external" href="https://v8.dev/">v8</a> as a WASM VM. All that
+remains is to define the interface between these WASM extension modules and
+Envoy itself.</p>
+</div>
+<div class="section" id="the-proxy-wasm-abi">
+<h2>The Proxy-Wasm ABI</h2>
+<p>WebAssembly itself defines:</p>
+<ul class="simple">
+<li>A bytecode format (with an equivalent <a class="reference external" href="../webassembly-text-code-samples/index.html">text format</a>)
+and its execution semantics</li>
+<li>A way for WASM modules to export functions and data to the host environment</li>
+<li>A way for WASM modules to import functions and data from the host environment</li>
+</ul>
+<p>And that's about it. Everything else is left to the specific system implementer
+to figure out. Moreover, the data types WASM supports are very limited -
+essentially fixed-width integers and floats; users are expected to build
+their own higher-level data structures on top of these using addresses into
+WASM's linear heap memory, if needed.</p>
+<p>In a <a class="reference external" href="../faas-in-go-with-wasm-wasi-and-rust/index.html">previous post</a> I've
+talked about WASI - an API and ABI that enables OS-like functionality in WASM
+code. While WASI is useful for exposing WASM modules to the outside world in
+a vetted way, it's somewhat limited for complex host-wasm interactions, because
+at the moment the only way for this to happen is via interfaces like
+stdin/stdout <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.</p>
+<p>Therefore, systems that require sophisticated interactions between the host
+and WASM extensions are left to define their own interfaces. Which is exactly
+what the Envoy developers ended up creating: the <a class="reference external" href="https://github.com/proxy-wasm/spec">Proxy-Wasm
+ABI</a> <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>.</p>
+<p>The ABI is fairly low level, and it has two parts. One is
+<strong>Functions implemented in the WASM module</strong>. These are functions exported from
+WASM (the custom extension) and imported by the host (Envoy or another proxy).
+For example, <tt class="docutils literal">proxy_on_request_headers</tt> is exported by the WASM module as
+a callback to handle headers for HTTP requests sailing through the proxy.</p>
+<p>This is the signature of <tt class="docutils literal">proxy_on_request_headers</tt>:</p>
+<div class="highlight"><pre><span></span>params:
+    i32 (uint32_t) context_id
+    i32 (size_t) num_headers
+    i32 (bool) end_of_stream
+returns:
+    i32 (proxy_action_t) next_action
+</pre></div>
+<p>The import is done in the <a class="reference external" href="https://github.com/proxy-wasm/proxy-wasm-cpp-host/">proxy-wasm-cpp-host</a> project
+which is a dependency of Envoy. This project implements the host side of
+Proxy-wasm for C++ hosts.</p>
+<p>What should the extension do within <tt class="docutils literal">proxy_on_request_headers</tt>, though? It
+can do things like ask Envoy about the actual HTTP headers it sees with
+<tt class="docutils literal">proxy_get_header_map_value</tt>. This is in the second part of the ABI,
+<strong>Functions implemented in the host environment</strong>. Its signature is:</p>
+<div class="highlight"><pre><span></span>params:
+    i32 (proxy_map_type_t) map_type
+    i32 (const char*) key_data
+    i32 (size_t) key_size
+    i32 (const char**) return_value_data
+    i32 (size_t*) return_value_size
+returns:
+    i32 (proxy_result_t) call_result
+</pre></div>
+<p>As you can see this is <em>a very low level ABI</em>; all parameters are either
+pointers (addresses in WASM's linear memory) or constants of predefined types.
+Since WASM severely restricts the types of function parameters and return
+values, and both the WASM module and the host can be implemented in very diverse
+programming languages, there's not much choice here. Writing the glue code on
+the WASM-host interface is tedious and low-level.</p>
+<p>This is where the high-level SDKs come in.</p>
+</div>
+<div class="section" id="the-go-sdk-for-proxy-wasm">
+<h2>The Go SDK for Proxy-wasm</h2>
+<p>Suppose we're writing our Envoy extension module in Go (a reasonable choice
+given the dominance of Go in the Cloud Native / k8s / Istio ecosystem). It
+seems like hooking up a simple extension to snoop on all the HTTP traffic
+going through the proxy and logging the HTTP headers is quite a bit of work.</p>
+<p>Luckily, the good folks at Tetrate created the <a class="reference external" href="https://github.com/tetratelabs/proxy-wasm-go-sdk/">Go SDK for Proxy-Wasm</a>. This SDK handles all
+the Proxy-Wasm ABI mechanics and presents a clean, pure Go API to extension
+writers that won't have to worry about low level WASM details.</p>
+<p>Here's how the task of &quot;snoop on HTTP traffic and log headers&quot;
+<a class="reference external" href="https://github.com/tetratelabs/proxy-wasm-go-sdk/blob/main/examples/http_headers/main.go">looks using the Go SDK</a>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">ctx</span><span class="w"> </span><span class="o">*</span><span class="nx">httpHeaders</span><span class="p">)</span><span class="w"> </span><span class="nx">OnHttpRequestHeaders</span><span class="p">(</span><span class="nx">numHeaders</span><span class="w"> </span><span class="kt">int</span><span class="p">,</span><span class="w"> </span><span class="nx">endOfStream</span><span class="w"> </span><span class="kt">bool</span><span class="p">)</span><span class="w"> </span><span class="nx">types</span><span class="p">.</span><span class="nx">Action</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">hs</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">proxywasm</span><span class="p">.</span><span class="nx">GetHttpRequestHeaders</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">proxywasm</span><span class="p">.</span><span class="nx">LogCriticalf</span><span class="p">(</span><span class="s">&quot;failed to get request headers: %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">h</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">hs</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">proxywasm</span><span class="p">.</span><span class="nx">LogInfof</span><span class="p">(</span><span class="s">&quot;request header --&gt; %s: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">h</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span><span class="w"> </span><span class="nx">h</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">types</span><span class="p">.</span><span class="nx">ActionContinue</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Let's explore how both sides of the ABI (host-implemented and
+module-implemented) are handled by the Go SDK. Starting with the WASM-calls-host
+side, this is <tt class="docutils literal">proxywasm.GetHttpRequestHeaders</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">GetHttpRequestHeaders</span><span class="p">()</span><span class="w"> </span><span class="p">([][</span><span class="mi">2</span><span class="p">]</span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="kt">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">getMap</span><span class="p">(</span><span class="nx">internal</span><span class="p">.</span><span class="nx">MapTypeHttpRequestHeaders</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It's just a wrapper around a more general <tt class="docutils literal">getMap</tt> function with a map type
+that the ABI defines. The return type is a slice of 2-element arrays
+(key/value).</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">getMap</span><span class="p">(</span><span class="nx">mapType</span><span class="w"> </span><span class="nx">internal</span><span class="p">.</span><span class="nx">MapType</span><span class="p">)</span><span class="w"> </span><span class="p">([][</span><span class="mi">2</span><span class="p">]</span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="kt">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">rvs</span><span class="w"> </span><span class="kt">int</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">raw</span><span class="w"> </span><span class="o">*</span><span class="kt">byte</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">st</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">internal</span><span class="p">.</span><span class="nx">ProxyGetHeaderMapPairs</span><span class="p">(</span><span class="nx">mapType</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">raw</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">rvs</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">st</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nx">internal</span><span class="p">.</span><span class="nx">StatusOK</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="nx">internal</span><span class="p">.</span><span class="nx">StatusToError</span><span class="p">(</span><span class="nx">st</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="nx">raw</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="nx">types</span><span class="p">.</span><span class="nx">ErrorStatusNotFound</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">bs</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">internal</span><span class="p">.</span><span class="nx">RawBytePtrToByteSlice</span><span class="p">(</span><span class="nx">raw</span><span class="p">,</span><span class="w"> </span><span class="nx">rvs</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">internal</span><span class="p">.</span><span class="nx">DeserializeMap</span><span class="p">(</span><span class="nx">bs</span><span class="p">),</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p><tt class="docutils literal">internal.ProxyGetHeaderMapPairs</tt> is actually an ABI-defined function that's
+imported from the host (as <tt class="docutils literal">proxy_get_header_map_pairs</tt>). It writes raw
+pointers to its output parameters, so the rest of <tt class="docutils literal">getMap</tt> deals with
+converting those into Go data types.</p>
+<p>On the host side, <tt class="docutils literal">proxy_get_header_map_pairs</tt> is mapped to a
+C++ function <a class="reference external" href="https://github.com/proxy-wasm/proxy-wasm-cpp-host/blob/e1fe5e99eedfb517bea92aee3f13f442d4bfa3b4/src/exports.cc#L1">in this file</a>.</p>
+<p>Now the host-calls-WASM side. The Go SDK has the following function:</p>
+<div class="highlight"><pre><span></span><span class="c1">//export proxy_on_request_headers</span><span class="w"></span>
+<span class="kd">func</span><span class="w"> </span><span class="nx">proxyOnRequestHeaders</span><span class="p">(</span><span class="nx">contextID</span><span class="w"> </span><span class="kt">uint32</span><span class="p">,</span><span class="w"> </span><span class="nx">numHeaders</span><span class="w"> </span><span class="kt">int</span><span class="p">,</span><span class="w"> </span><span class="nx">endOfStream</span><span class="w"> </span><span class="kt">bool</span><span class="p">)</span><span class="w"> </span><span class="nx">types</span><span class="p">.</span><span class="nx">Action</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">recordTiming</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="nx">logTiming</span><span class="p">(</span><span class="s">&quot;proxyOnRequestHeaders&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Now</span><span class="p">())</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ctx</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">currentState</span><span class="p">.</span><span class="nx">httpContexts</span><span class="p">[</span><span class="nx">contextID</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">!</span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nb">panic</span><span class="p">(</span><span class="s">&quot;invalid context on proxy_on_request_headers&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">currentState</span><span class="p">.</span><span class="nx">setActiveContextID</span><span class="p">(</span><span class="nx">contextID</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">ctx</span><span class="p">.</span><span class="nx">OnHttpRequestHeaders</span><span class="p">(</span><span class="nx">numHeaders</span><span class="p">,</span><span class="w"> </span><span class="nx">endOfStream</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Note the <tt class="docutils literal">//export</tt> annotation that tells the compiler to export this function
+from the WASM module. To be clear, the entire SDK - along with our custom code -
+gets compiled into a <tt class="docutils literal">.wasm</tt> file that the host loads, and the <tt class="docutils literal">//export</tt>
+tag makes the Go compiler place this function in the WASM function export
+table that the host has access to.</p>
+<p>Once the host invokes it, it calls the <tt class="docutils literal">OnHttpRequestHeaders</tt> method on the
+context, which is user-defined as shown above. Hopefully this example gives a
+taste of what the SDK does for us - it provides a higher-level,
+language-idiomatic API on top of a low-level, language-agnostic ABI.</p>
+<p>The Go SDK is just an example; there are other SDKs that exist for developing
+WASM extensions for Envoy - for example in Rust or in C++.</p>
+<p>One small wrinkle in this story is that the Go SDK only supports the <a class="reference external" href="https://tinygo.org/">TinyGo</a> compiler at this time, not the default Go toolchain.
+This is because the default toolchain doesn't have sufficient WASM support yet,
+but this situation is changing; in Go 1.21 it has added WASI support and work
+is ongoing on additional features that should make it possible to develop
+Envoy extensions using the standard toolchain.</p>
+</div>
+<div class="section" id="fundamental-plugin-concepts-in-this-case-study">
+<h2>Fundamental plugin concepts in this case study</h2>
+<p>Let's see how this case study of Envoy extensions with WASM measures against the
+<a class="reference external" href="../../2012/08/07/fundamental-concepts-of-plugin-infrastructures.html">Fundamental plugin concepts</a>
+that were covered <a class="reference external" href="../../tag/plugins.html">several times on this blog</a>.</p>
+<div class="section" id="discovery">
+<h3>Discovery</h3>
+<p>Envoy &quot;discovers&quot; available extensions trivially, because they have to be
+explicitly specified in its configuration file. The config file lists the
+extensions and where to find them; for WASM, this could be either a local
+<tt class="docutils literal">.wasm</tt> file or a URL pointing to a file stored remotely (e.g. some
+cloud storage bucket).</p>
+</div>
+<div class="section" id="registration">
+<h3>Registration</h3>
+<p>The WASM extension registers functionality with Envoy by exporting certain
+functions from the WASM module. When Envoy loads an extension, it scans the list
+of exported functions for known names. For example, if the extension exports
+<tt class="docutils literal">proxy_on_request_headers</tt>, Envoy will call it for HTTP headers. If the
+extension doesn't export such a function, Envoy will assume it's not interested
+in this particular callback.</p>
+<p>Another interesting example of how this functionality is used is the
+<tt class="docutils literal">proxy_abi_version_X_Y_Z</tt> function. An extension will
+export this function with an actual ABI version replacing X, Y an Z. Envoy
+will look for a function with the <tt class="docutils literal">proxy_abi_version_*</tt> prefix, and from its
+name will determine which version of the ABI the WASM module was compiled
+against.</p>
+</div>
+<div class="section" id="hooks">
+<h3>Hooks</h3>
+<p>This is mostly covered in the previous section. There are multiple callbacks
+a WASM extension can register by exporting them from the WASM module;
+<tt class="docutils literal">proxy_on_request_headers</tt> is one example out of many defined in the ABI.</p>
+</div>
+<div class="section" id="exposing-an-application-api-to-plugins">
+<h3>Exposing an application API to plugins</h3>
+<p>This is the <strong>Functions implemented in the host environment</strong> part of the
+Proxy-Wasm ABI; we've seen an example of one of them -
+<tt class="docutils literal">proxy_get_header_map_pairs</tt>. The ABI defines others, like <tt class="docutils literal">proxy_log</tt> for
+emitting log messages to Envoy's log. These functions let extensions call
+into Envoy.</p>
+</div>
+</div>
+<div class="section" id="conclusion">
+<h2>Conclusion</h2>
+<p>As you can see from the string of posts this year, I'm pretty excited about
+the non-browser uses of WASM, particularly in the area of plugins.
+The <a class="reference external" href="../faas-in-go-with-wasm-wasi-and-rust/index.html">FAAS post</a> presented one interesting
+possibility - using the current (limited but functional) WASI for the
+host/plugin interface.</p>
+<p>What this post shows is a case study of a much more advanced extension system;
+the capabilities and performance requirements of custom network filter plugins
+are just way beyond what WASI can provide, so the Envoy developers ended up
+creating their own ABI. It's fascinating to study how such an ABI affects plugin
+development and what kind of ecosystem it spawns.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>Note that I'm not trying to criticize the existing extension mechanisms
+in Envoy in any way. Both work, and are used to solve real business
+problems. As a project like Envoy grows in popularity and usage, it's
+inevitable that it will spawn more options for different people to
+accomplish their tasks with it. Such is the way of software.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>The WASI folks are working on extensions to allow sockets and also
+more complex data to be shared between WASM and hosts in an RPC-like
+manner; this may enable greatly improved wasm-host interfaces in the
+future.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td><p class="first">This all sounds great - the way things should be - until reality kicks
+in. While doing research for this post I discovered that the Proxy-wasm
+ABI, while clearly and carefully specified, is in-fact
+<a class="reference external" href="https://github.com/proxy-wasm/spec/issues/36">out of date</a> and
+the &quot;real&quot; definition lives within the Envoy source code. It's yet
+another case of &quot;the ABI is whatever its main implementation does&quot;, even
+though other proxies implement it already
+(<a class="reference external" href="https://github.com/mosn/mosn">MOSN</a> for example).</p>
+<p>This is especially often the case in my favorite domain - systems
+programming. <em>Sigh</em>, such is life. The rest of the post talks about
+the <em>de-facto</em> specification, relying on the Envoy source code more
+than the written down ABI. Hopefully at some future point the ABI is
+updated and I can rewrite this footnote.</p>
+<p class="last">A shout out to <a class="reference external" href="https://github.com/codefromthecrypt">Adrian Cole</a>
+and <a class="reference external" href="https://github.com/mathetake">Takeshi Yoneda</a> for
+confirming these findings, and the useful chats about all things WASM,
+WASI and Go in general.</p>
+</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

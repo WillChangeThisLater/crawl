@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Exporting C++ classes from a DLL - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="exporting-c-classes-from-a-dll.html"
+                       rel="bookmark"
+                       title="Permalink to Exporting C++ classes from a DLL">
+                        Exporting C++ classes from a DLL
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> September 16, 2011 at 08:49</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/c-c.html">C & C++</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>Because of ABI incompatibilities between compilers and even different versions of the same compiler, exporting C++ classes from DLLs is a tricky business. Luckily, with some care it <em>is</em> possible to do this safely, by employing abstract interfaces.</p>
+<p>In this post I will show a code sample of a DLL and an application using it. The DLL exports a class by means of a factory function that creates new objects that adhere to a known abstract interface. The main application loads this DLL explicitly (with <tt class="docutils literal">LoadLibrary</tt>) and uses the objects created by it. The code shown here is Windows-specific, but the same method should work for Linux and other platforms. Also, the same export technique will work for implicit DLL loading as well.</p>
+<p>First, we define an abstract interface (by means of a class with pure virtual methods, and <em>no data</em>), in a file named <tt class="docutils literal">generic_interface.h</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">IKlass</span> {
+<span style="color: #00007f; font-weight: bold">public</span>:
+    <span style="color: #00007f; font-weight: bold">virtual</span> <span style="color: #00007f; font-weight: bold">void</span> destroy() = <span style="color: #007f7f">0</span>;
+    <span style="color: #00007f; font-weight: bold">virtual</span> <span style="color: #00007f; font-weight: bold">int</span> do_stuff(<span style="color: #00007f; font-weight: bold">int</span> param) = <span style="color: #007f7f">0</span>;
+    <span style="color: #00007f; font-weight: bold">virtual</span> <span style="color: #00007f; font-weight: bold">void</span> do_something_else(<span style="color: #00007f; font-weight: bold">double</span> f) = <span style="color: #007f7f">0</span>;
+};
+</pre></div>
+<p>Note that this interface has an explicit <tt class="docutils literal">destroy</tt> method, for reasons I will explain later. Now, the DLL code, contained in a single C++ file:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">#include &quot;generic_interface.h&quot;</span>
+<span style="color: #007f00">#include &lt;iostream&gt;</span>
+<span style="color: #007f00">#include &lt;windows.h&gt;</span>
+
+<span style="color: #00007f; font-weight: bold">using</span> <span style="color: #00007f; font-weight: bold">namespace</span> std;
+
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">MyKlass</span> : <span style="color: #00007f; font-weight: bold">public</span> IKlass {
+<span style="color: #00007f; font-weight: bold">public</span>:
+    MyKlass()
+        : m_data(<span style="color: #007f7f">0</span>)
+    {
+        cerr &lt;&lt; <span style="color: #7f007f">&quot;MyKlass constructor\n&quot;</span>;
+    }
+
+    ~MyKlass()
+    {
+        cerr &lt;&lt; <span style="color: #7f007f">&quot;MyKlass destructor\n&quot;</span>;
+    }
+
+    <span style="color: #00007f; font-weight: bold">void</span> destroy()
+    {
+        <span style="color: #00007f; font-weight: bold">delete</span> <span style="color: #00007f; font-weight: bold">this</span>;
+    }
+
+    <span style="color: #00007f; font-weight: bold">int</span> do_stuff(<span style="color: #00007f; font-weight: bold">int</span> param)
+    {
+        m_data += param;
+        <span style="color: #00007f; font-weight: bold">return</span> m_data;
+    }
+
+    <span style="color: #00007f; font-weight: bold">void</span> do_something_else(<span style="color: #00007f; font-weight: bold">double</span> f)
+    {
+        <span style="color: #00007f; font-weight: bold">int</span> intpart = <span style="color: #00007f; font-weight: bold">static_cast</span>&lt;<span style="color: #00007f; font-weight: bold">int</span>&gt;(f);
+        m_data += intpart;
+    }
+<span style="color: #00007f; font-weight: bold">private</span>:
+    <span style="color: #00007f; font-weight: bold">int</span> m_data;
+};
+
+<span style="color: #00007f; font-weight: bold">extern</span> <span style="color: #7f007f">&quot;C&quot;</span> <span style="color: #00007f; font-weight: bold">__declspec</span>(dllexport) IKlass* <span style="color: #00007f; font-weight: bold">__cdecl</span> create_klass()
+{
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f; font-weight: bold">new</span> MyKlass;
+}
+</pre></div>
+<p>There are two interesting entities here:</p>
+<ol class="arabic simple">
+<li><tt class="docutils literal">MyKlass</tt> - a simplistic implementation of the <tt class="docutils literal">IKlass</tt> interface.</li>
+<li>A factory function for creating new instances of <tt class="docutils literal">MyKlass</tt>.</li>
+</ol>
+<p>And here is a simple application (also contained in a single C++ file) that uses this library by loading the DLL explicitly, creating a new object and doing some work with it:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">#include &quot;generic_interface.h&quot;</span>
+<span style="color: #007f00">#include &lt;iostream&gt;</span>
+<span style="color: #007f00">#include &lt;windows.h&gt;</span>
+
+<span style="color: #00007f; font-weight: bold">using</span> <span style="color: #00007f; font-weight: bold">namespace</span> std;
+
+<span style="color: #007f00">// A factory of IKlass-implementing objects looks thus</span>
+<span style="color: #00007f; font-weight: bold">typedef</span> IKlass* (<span style="color: #00007f; font-weight: bold">__cdecl</span> *iklass_factory)();
+
+
+<span style="color: #00007f; font-weight: bold">int</span> main()
+{
+    <span style="color: #007f00">// Load the DLL</span>
+    HINSTANCE dll_handle = ::LoadLibrary(TEXT(<span style="color: #7f007f">&quot;mylib.dll&quot;</span>));
+    <span style="color: #00007f; font-weight: bold">if</span> (!dll_handle) {
+        cerr &lt;&lt; <span style="color: #7f007f">&quot;Unable to load DLL!\n&quot;</span>;
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">1</span>;
+    }
+
+    <span style="color: #007f00">// Get the function from the DLL</span>
+    iklass_factory factory_func = <span style="color: #00007f; font-weight: bold">reinterpret_cast</span>&lt;iklass_factory&gt;(
+        ::GetProcAddress(dll_handle, <span style="color: #7f007f">&quot;create_klass&quot;</span>));
+    <span style="color: #00007f; font-weight: bold">if</span> (!factory_func) {
+        cerr &lt;&lt; <span style="color: #7f007f">&quot;Unable to load create_klass from DLL!\n&quot;</span>;
+        ::FreeLibrary(dll_handle);
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">1</span>;
+    }
+
+    <span style="color: #007f00">// Ask the factory for a new object implementing the IKlass</span>
+    <span style="color: #007f00">// interface</span>
+    IKlass* instance = factory_func();
+
+    <span style="color: #007f00">// Play with the object</span>
+    <span style="color: #00007f; font-weight: bold">int</span> t = instance-&gt;do_stuff(<span style="color: #007f7f">5</span>);
+    cout &lt;&lt; <span style="color: #7f007f">&quot;t = &quot;</span> &lt;&lt; t &lt;&lt; endl;
+    instance-&gt;do_something_else(<span style="color: #007f7f">100.3</span>);
+    <span style="color: #00007f; font-weight: bold">int</span> t2 = instance-&gt;do_stuff(<span style="color: #007f7f">0</span>);
+    cout &lt;&lt; <span style="color: #7f007f">&quot;t2 = &quot;</span> &lt;&lt; t2 &lt;&lt; endl;
+
+    <span style="color: #007f00">// Destroy it explicitly</span>
+    instance-&gt;destroy();
+    ::FreeLibrary(dll_handle);
+
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">0</span>;
+}
+</pre></div>
+<p>Alright, I raced through the code, but there are a lot of interesting details hiding in it. Let's go through them one by one.</p>
+<div class="section" id="clean-separation">
+<h3>Clean separation</h3>
+<p>There are other methods of exporting C++ classes from DLLs (<a class="reference external" href="http://www.codeproject.com/KB/cpp/howto_export_cpp_classes.aspx?fid=1525934&amp;df=90&amp;mpp=25&amp;noise=3&amp;prof=False&amp;sort=Position&amp;view=Quick&amp;fr=26#CppMatureApproach">here's one good discussion</a> of the subject). The one presented here is the cleanest - the least amount of information is shared between the DLL and the application using it - just the generic interface header defining <tt class="docutils literal">IKlass</tt> and an implicit agreement about the signature of the factory function.</p>
+<p>The actual <tt class="docutils literal">MyKlass</tt> can now use whatever it wants to implement its functionality, without exposing any additional details to the application.</p>
+<p>Additionally, this code can easily serve as a basis for an even more generic plugin architecture. DLL files can be auto-discoverable from a known location, and a known function can be exposed from each that defines the exported factories.</p>
+</div>
+<div class="section" id="memory-management">
+<h3>Memory management</h3>
+<p>Memory management between DLLs can be a real pain, especially if each DLL links the MSVC C runtime statically (which tends to be common on Windows). Memory allocated in one DLL must not be released in another in such cases.</p>
+<p>The solution presented here neatly overcomes this issue by leaving all memory management to the DLL. This is done by providing an explicit <tt class="docutils literal">destroy</tt> function in the interface, that must be called when the object is no longer needed. Naturally, the application can wrap these objects by a smart pointer of some kind to implement RAII.</p>
+<p>Note that <tt class="docutils literal">destroy</tt> is implemented with <tt class="docutils literal">delete this</tt>. This may raise an eyebrow or two, but it's actually valid C++ that <a class="reference external" href="http://www.parashift.com/c++-faq-lite/freestore-mgmt.html#faq-16.15">occasionally makes sense if used judiciously</a>.</p>
+<p>It's time for a pop quiz: why doesn't <tt class="docutils literal">IKlass</tt> need a virtual destructor?</p>
+</div>
+<div class="section" id="name-mangling-and-calling-convention">
+<h3>Name mangling and calling convention</h3>
+<p>You've surely noticed that the signature of <tt class="docutils literal">create_klass</tt> is rather intricate:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">extern</span> <span style="color: #7f007f">&quot;C&quot;</span> <span style="color: #00007f; font-weight: bold">__declspec</span>(dllexport) IKlass* <span style="color: #00007f; font-weight: bold">__cdecl</span> create_klass()
+</pre></div>
+<p>Let's see what each part means, in order:</p>
+<ul class="simple">
+<li><tt class="docutils literal">extern &quot;C&quot;</tt> - <a class="reference external" href="http://www.parashift.com/c++-faq-lite/mixing-c-and-cpp.html">tells the C++ compiler</a> that the linker should use the C calling convention and name mangling for this function. The name itself is exported from the DLL unmangled (<tt class="docutils literal">create_klass</tt>)</li>
+<li><tt class="docutils literal">__declspec(dllexport)</tt> - tells the linker to export the <tt class="docutils literal">create_klass</tt> symbol from the DLL. Alternatively, the name <tt class="docutils literal">create_klass</tt> can be placed in a <tt class="docutils literal">.def</tt> file given to the linker.</li>
+<li><tt class="docutils literal">__cdecl</tt> - repeats that the C calling convention is to be used. It's not strictly necessary here, but I include it for completeness (in the <tt class="docutils literal">typedef</tt> for <tt class="docutils literal">iklass_factory</tt> in the application code as well).</li>
+</ul>
+<p>There is a variation on this theme, which I'll mention because it's a common problem people run into.</p>
+<p>One can declare the function with the <tt class="docutils literal">__stdcall</tt> calling convention instead of <tt class="docutils literal">__cdecl</tt>. What this will do is cause <tt class="docutils literal">GetProcAddress</tt> to not find the function in the DLL. A peek inside the DLL (with <tt class="docutils literal">dumpbin /exports</tt> or another tool) reveals why - <tt class="docutils literal">__stdcall</tt> causes the name to <a class="reference external" href="http://en.wikipedia.org/wiki/Name_mangling">be mangled</a> to something like <tt class="docutils literal">_create_klass&#64;0</tt>. To overcome this, either place the plain name <tt class="docutils literal">create_klass</tt> in the exports section of the linker <tt class="docutils literal">.def</tt> file, or use the full, mangled name in <tt class="docutils literal">GetProcAddress</tt>. The latter might be required if you don't actually control the source code for the DLL.</p>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="exporting-c-classes-from-a-dll.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Python - parallelizing CPU-bound tasks with multiprocessing - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="python-parallelizing-cpu-bound-tasks-with-multiprocessing.html"
+                       rel="bookmark"
+                       title="Permalink to Python - parallelizing CPU-bound tasks with multiprocessing">
+                        Python - parallelizing CPU-bound tasks with multiprocessing
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> January 16, 2012 at 19:51</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/python.html">Python</a>
+        ,
+    <a href="../../../tag/concurrency.html">Concurrency</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+    <p><em>Update (2017-01-31)</em>: The full code sample for this article that
+    works on both Python 2 and 3 has been
+   <a href="https://github.com/eliben/code-for-blog/tree/main/2012/parallel_python_multiprocessing">posted to Github</a>;
+   it also addresses platform-specific pickling issues some folks have run
+   into.</p>
+
+        <p>In a <a class="reference external" href="../../../2011/12/27/python-threads-communication-and-stopping/index.html">previous post</a> on Python threads, I briefly mentioned that threads are unsuitable for CPU-bound tasks, and <tt class="docutils literal">multiprocessing</tt> should be used instead. Here I want to demonstrate this with benchmark numbers, also showing that creating multiple processes in Python is just as simple as creating multiple threads.</p>
+<p>First, let's pick a simple computation to use for the benchmarking. I don't want it to be completely artificial, so I'll use a dumbed-down version of factorization - breaking a number to its prime factors. Here is a very naive and un-optimized function that takes a number and returns a list of factors:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">factorize_naive</span>(n):
+    <span style="color: #7f007f">&quot;&quot;&quot; A naive factorization method. Take integer &#39;n&#39;, return list of</span>
+<span style="color: #7f007f">        factors.</span>
+<span style="color: #7f007f">    &quot;&quot;&quot;</span>
+    <span style="color: #00007f; font-weight: bold">if</span> n &lt; <span style="color: #007f7f">2</span>:
+        <span style="color: #00007f; font-weight: bold">return</span> []
+    factors = []
+    p = <span style="color: #007f7f">2</span>
+
+    <span style="color: #00007f; font-weight: bold">while</span> <span style="color: #00007f">True</span>:
+        <span style="color: #00007f; font-weight: bold">if</span> n == <span style="color: #007f7f">1</span>:
+            <span style="color: #00007f; font-weight: bold">return</span> factors
+
+        r = n % p
+        <span style="color: #00007f; font-weight: bold">if</span> r == <span style="color: #007f7f">0</span>:
+            factors.append(p)
+            n = n / p
+        <span style="color: #00007f; font-weight: bold">elif</span> p * p &gt;= n:
+            factors.append(n)
+            <span style="color: #00007f; font-weight: bold">return</span> factors
+        <span style="color: #00007f; font-weight: bold">elif</span> p &gt; <span style="color: #007f7f">2</span>:
+            <span style="color: #007f00"># Advance in steps of 2 over odd numbers</span>
+            p += <span style="color: #007f7f">2</span>
+        <span style="color: #00007f; font-weight: bold">else</span>:
+            <span style="color: #007f00"># If p == 2, get to 3</span>
+            p += <span style="color: #007f7f">1</span>
+    <span style="color: #00007f; font-weight: bold">assert</span> <span style="color: #00007f">False</span>, <span style="color: #7f007f">&quot;unreachable&quot;</span>
+</pre></div>
+<p>Now, as the base for benchmarking, I'll be using the following serial (single-thread) factorizer that takes a list of numbers to factorize, and returns a dict mapping a number to its list of factors:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">serial_factorizer</span>(nums):
+    <span style="color: #00007f; font-weight: bold">return</span> {n: factorize_naive(n) <span style="color: #00007f; font-weight: bold">for</span> n <span style="color: #0000aa">in</span> nums}
+</pre></div>
+<p>The threaded version follows. It also takes a list of numbers to factorize, as well as the amount of threads to create. It then divides the list into chunks and assigns each chunk to a separate thread:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">threaded_factorizer</span>(nums, nthreads):
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">worker</span>(nums, outdict):
+        <span style="color: #7f007f">&quot;&quot;&quot; The worker function, invoked in a thread. &#39;nums&#39; is a</span>
+<span style="color: #7f007f">            list of numbers to factor. The results are placed in</span>
+<span style="color: #7f007f">            outdict.</span>
+<span style="color: #7f007f">        &quot;&quot;&quot;</span>
+        <span style="color: #00007f; font-weight: bold">for</span> n <span style="color: #0000aa">in</span> nums:
+            outdict[n] = factorize_naive(n)
+
+    <span style="color: #007f00"># Each thread will get &#39;chunksize&#39; nums and its own output dict</span>
+    chunksize = <span style="color: #00007f">int</span>(math.ceil(<span style="color: #00007f">len</span>(nums) / <span style="color: #00007f">float</span>(nthreads)))
+    threads = []
+    outs = [{} <span style="color: #00007f; font-weight: bold">for</span> i <span style="color: #0000aa">in</span> <span style="color: #00007f">range</span>(nthreads)]
+
+    <span style="color: #00007f; font-weight: bold">for</span> i <span style="color: #0000aa">in</span> <span style="color: #00007f">range</span>(nthreads):
+        <span style="color: #007f00"># Create each thread, passing it its chunk of numbers to factor</span>
+        <span style="color: #007f00"># and output dict.</span>
+        t = threading.Thread(
+                target=worker,
+                args=(nums[chunksize * i:chunksize * (i + <span style="color: #007f7f">1</span>)],
+                      outs[i]))
+        threads.append(t)
+        t.start()
+
+    <span style="color: #007f00"># Wait for all threads to finish</span>
+    <span style="color: #00007f; font-weight: bold">for</span> t <span style="color: #0000aa">in</span> threads:
+        t.join()
+
+    <span style="color: #007f00"># Merge all partial output dicts into a single dict and return it</span>
+    <span style="color: #00007f; font-weight: bold">return</span> {k: v <span style="color: #00007f; font-weight: bold">for</span> out_d <span style="color: #0000aa">in</span> outs <span style="color: #00007f; font-weight: bold">for</span> k, v <span style="color: #0000aa">in</span> out_d.iteritems()}
+</pre></div>
+<p>Note that the interface between the main and worker threads is very simple. Each worker thread has some amount of work to do, after which it simply returns. Thus the only thing the main thread does is fire up <tt class="docutils literal">nthreads</tt> threads with suitable arguments and then waits for them to finish.</p>
+<p>I ran a benchmark of the serial vs. threaded factorizer with 2, 4 and 8 threads. The benchmark was to factorize a constant set of large numbers, to minimize differences due to random chance. All the tests were run on my Ubuntu 10.04 laptop with a Intel Core i7-2820MQ CPU (4 physical cores, hyper-threaded).</p>
+<p>Here are the results:</p>
+<img class="align-center" src="../../../images/2012/01/serial_vs_threaded.png" />
+<p>The horizontal axis is time in seconds, hence shorter bars mean faster execution. Yes, splitting the computation to several threads is actually <em>slower</em> than the serial implementation, and the more threads are used, the slower it gets.</p>
+<p>This may be a bit surprising if you're not familiar with the way Python threads are implemented and the GIL (Global Interpreter Lock). To understand why this is happening, you can hardly do better than read <a class="reference external" href="http://www.dabeaz.com/GIL/">Dave Beazley's articles and presentations</a> on this topic. His work is so comprehensive and accessible that I see absolutely no point repeating any of it (except the conclusions) here.</p>
+<p>Let's now do the same, just with processes instead of threads. Python's excellent <tt class="docutils literal">multiprocessing</tt> module makes processes as simple to launch and manage as threads. In fact, it provides very similar APIs to the <tt class="docutils literal">threading</tt> module. Here's multi-process factorizer:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">mp_factorizer</span>(nums, nprocs):
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">worker</span>(nums, out_q):
+        <span style="color: #7f007f">&quot;&quot;&quot; The worker function, invoked in a process. &#39;nums&#39; is a</span>
+<span style="color: #7f007f">            list of numbers to factor. The results are placed in</span>
+<span style="color: #7f007f">            a dictionary that&#39;s pushed to a queue.</span>
+<span style="color: #7f007f">        &quot;&quot;&quot;</span>
+        outdict = {}
+        <span style="color: #00007f; font-weight: bold">for</span> n <span style="color: #0000aa">in</span> nums:
+            outdict[n] = factorize_naive(n)
+        out_q.put(outdict)
+
+    <span style="color: #007f00"># Each process will get &#39;chunksize&#39; nums and a queue to put his out</span>
+    <span style="color: #007f00"># dict into</span>
+    out_q = Queue()
+    chunksize = <span style="color: #00007f">int</span>(math.ceil(<span style="color: #00007f">len</span>(nums) / <span style="color: #00007f">float</span>(nprocs)))
+    procs = []
+
+    <span style="color: #00007f; font-weight: bold">for</span> i <span style="color: #0000aa">in</span> <span style="color: #00007f">range</span>(nprocs):
+        p = multiprocessing.Process(
+                target=worker,
+                args=(nums[chunksize * i:chunksize * (i + <span style="color: #007f7f">1</span>)],
+                      out_q))
+        procs.append(p)
+        p.start()
+
+    <span style="color: #007f00"># Collect all results into a single result dict. We know how many dicts</span>
+    <span style="color: #007f00"># with results to expect.</span>
+    resultdict = {}
+    <span style="color: #00007f; font-weight: bold">for</span> i <span style="color: #0000aa">in</span> <span style="color: #00007f">range</span>(nprocs):
+        resultdict.update(out_q.get())
+
+    <span style="color: #007f00"># Wait for all worker processes to finish</span>
+    <span style="color: #00007f; font-weight: bold">for</span> p <span style="color: #0000aa">in</span> procs:
+        p.join()
+
+    <span style="color: #00007f; font-weight: bold">return</span> resultdict
+</pre></div>
+<p>The only real difference here vs. the thread solution is the way output is passed back from the worker to the main thread/process. With <tt class="docutils literal">multiprocessing</tt>, we can't simply pass a dict to the sub-process and expect its modifications to be visible in another process. There are several approaches to solve this problem. One is use a synchronized dictionary from <tt class="docutils literal">multiprocessing.managers.SyncManager</tt>. The one I've chosen is to simply create a <tt class="docutils literal">Queue</tt>, and let each worker process put a result dictionary into it. <tt class="docutils literal">mp_factorizer</tt> can then collect all results into a single dictionary and then <tt class="docutils literal">join</tt> the processes (note that as mentioned in the <tt class="docutils literal">multiprocessing</tt> documentation, <tt class="docutils literal">join</tt> should be called after all results in a <tt class="docutils literal">Queue</tt> the process was writing into were consumed).</p>
+<p>I've run the same benchmark, adding the runtimes from <tt class="docutils literal">mp_factorizer</tt> to the chart:</p>
+<img class="align-center" src="../../../images/2012/01/serial_vs_threaded_vs_mp.png" />
+<p>As you can see, there are nice speedups. The fastest multi-process version (split to 8 processes) runs 3.1 times as fast as the serial version. Although my CPU only has 4 physical cores (and the pair of hardware &quot;threads&quot; in each core share a lot of execution resources), the 8-process version runs faster, which is probably due to the fact that the OS doesn't allocate the CPUs optimally between &quot;heavy&quot; tasks. Another reason for the speedup being a bit far from 4x is that the work isn't evenly divided between sub-processes. Some numbers are <em>dramatically</em> faster to factorize than others, and currently no attention is being paid to load-balancing the tasks between the workers.</p>
+<p>These are interesting topics to explore, but way beyond the scope of this post. For our needs the best advice is to run benchmarks and decide on the best parallellization strategy according to the results.</p>
+<p>The goal of this post was two-fold. One, to provide an easy demonstration of how Python threads are bad for speeding up CPU-bound computations (they're actually pretty good for slowing them down!), while <tt class="docutils literal">multiprocessing</tt> does use the multi-core CPU in a parallel manner, as expected. Two, to show that <tt class="docutils literal">multiprocessing</tt> makes writing parallel code as easy as using <tt class="docutils literal">threading</tt>. There's a bit more work to be done when synchronizing objects between processes than between threads, but otherwise it's very similar code. And if you ask me, that object synchronization is more difficult is a <em>good thing</em>, because the less objects are shared the better. This is the main reason why multi-process programming is often considered safer and less bug-prone than multi-threaded programming.</p>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="python-parallelizing-cpu-bound-tasks-with-multiprocessing.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

@@ -1,0 +1,645 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"><title>Eli Bendersky's website - Django</title><link href="https://eli.thegreenplace.net/" rel="alternate"></link><link href="https://eli.thegreenplace.net/feeds/django.atom.xml" rel="self"></link><id>https://eli.thegreenplace.net/</id><updated>2023-06-30T23:16:27-07:00</updated><entry><title>Clearing the database with Django commands</title><link href="https://eli.thegreenplace.net/2014/02/20/clearing-the-database-with-django-commands" rel="alternate"></link><published>2014-02-20T06:01:07-08:00</published><updated>2023-02-04T13:41:52-08:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2014-02-20:/2014/02/20/clearing-the-database-with-django-commands</id><summary type="html">
+        &lt;p&gt;In a &lt;a class="reference external" href="https://eli.thegreenplace.net/2014/02/15/programmatically-populating-a-django-database/"&gt;previous post&lt;/a&gt;, I presented a method of loading initial data into a Django database by using a custom management command. An accompanying task is cleaning the database up. Here I want to discuss a few options of doing that.&lt;/p&gt;
+&lt;p&gt;First, some general design notes on Django management commands …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;In a &lt;a class="reference external" href="https://eli.thegreenplace.net/2014/02/15/programmatically-populating-a-django-database/"&gt;previous post&lt;/a&gt;, I presented a method of loading initial data into a Django database by using a custom management command. An accompanying task is cleaning the database up. Here I want to discuss a few options of doing that.&lt;/p&gt;
+&lt;p&gt;First, some general design notes on Django management commands. If you run &lt;tt class="docutils literal"&gt;manage.py help&lt;/tt&gt; you'll see a whole bunch of commands starting with &lt;tt class="docutils literal"&gt;sql&lt;/tt&gt;. These all share a common idiom - print SQL statements to the standard output. Almost all DB engines have means to pipe commands from the standard input, so this plays great with the Unix philosophy of building pipes of single-task programs.&lt;/p&gt;
+&lt;p&gt;Django even provides a convenient shortcut for us to access the actual DB that's being used with a given project - the &lt;tt class="docutils literal"&gt;dbshell&lt;/tt&gt; command.&lt;/p&gt;
+&lt;p&gt;As an example, we have the &lt;tt class="docutils literal"&gt;sqlflush&lt;/tt&gt; command, which returns a list of the SQL statements required to return all tables in the database to the state they were in just after they were installed. In a simple blog-like application with &amp;quot;post&amp;quot; and &amp;quot;tag&amp;quot; models, it may return something like:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;$ python manage.py sqlflush
+BEGIN;
+DELETE FROM &amp;quot;auth_permission&amp;quot;;
+DELETE FROM &amp;quot;auth_group&amp;quot;;
+DELETE FROM &amp;quot;django_content_type&amp;quot;;
+DELETE FROM &amp;quot;django_session&amp;quot;;
+DELETE FROM &amp;quot;blogapp_tag&amp;quot;;
+DELETE FROM &amp;quot;auth_user_groups&amp;quot;;
+DELETE FROM &amp;quot;auth_group_permissions&amp;quot;;
+DELETE FROM &amp;quot;auth_user_user_permissions&amp;quot;;
+DELETE FROM &amp;quot;blogapp_post&amp;quot;;
+DELETE FROM &amp;quot;blogapp_post_tags&amp;quot;;
+DELETE FROM &amp;quot;auth_user&amp;quot;;
+DELETE FROM &amp;quot;django_admin_log&amp;quot;;
+
+COMMIT;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Note there's a lot of tables here, because the project also installed the &lt;tt class="docutils literal"&gt;admin&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;auth&lt;/tt&gt; applications from &lt;tt class="docutils literal"&gt;django.contrib&lt;/tt&gt;.&lt;/p&gt;
+&lt;p&gt;We can actually execute these SQL statements, and thus wipe out all the DB tables in our database, by running:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;$ python manage.py sqlflush | python manage.py dbshell
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;For this particular sequence, since it's so useful, Django has a special built-in command named &lt;tt class="docutils literal"&gt;flush&lt;/tt&gt;.&lt;/p&gt;
+&lt;p&gt;But there's a problem with running &lt;tt class="docutils literal"&gt;flush&lt;/tt&gt; that may or may not bother you, depending on what your goals are. It wipes out &lt;em&gt;all&lt;/em&gt; tables, and this means authentication data as well. So if you've created a default admin user when jump-starting the application, you'll have to re-create it now.&lt;/p&gt;
+&lt;p&gt;Perhaps there's a more gentle way to delete just your app's data, without messing with the other apps? Yes. In fact, I'm going to show a number of ways.&lt;/p&gt;
+&lt;p&gt;First, let's see what other existing management commands have to offer. &lt;tt class="docutils literal"&gt;sqlclear&lt;/tt&gt; will emit the commands needed to drop all tables in a given app. For example:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;$ python manage.py sqlclear blogapp
+BEGIN;
+DROP TABLE &amp;quot;blogapp_tag&amp;quot;;
+DROP TABLE &amp;quot;blogapp_post&amp;quot;;
+DROP TABLE &amp;quot;blogapp_post_tags&amp;quot;;
+
+COMMIT;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;So we can use it to target a specific app, rather than using the kill-all approach of flush. There's a catch, though. While &lt;tt class="docutils literal"&gt;flush&lt;/tt&gt; runs &lt;tt class="docutils literal"&gt;delete&lt;/tt&gt; to wipe all data from the tables, &lt;tt class="docutils literal"&gt;sqlclear&lt;/tt&gt; removes the actual tables. So in order to be able to work with the database, these tables have to be re-created. Worry not, there's a command for that:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;$ python manage.py sql blogapp
+BEGIN;
+CREATE TABLE &amp;quot;blogapp_post_tags&amp;quot; (
+    &amp;quot;id&amp;quot; integer NOT NULL PRIMARY KEY AUTOINCREMENT,
+    &amp;quot;post_id&amp;quot; integer NOT NULL REFERENCES &amp;quot;blogapp_post&amp;quot; (&amp;quot;id&amp;quot;),
+    &amp;quot;tag_id&amp;quot; varchar(50) NOT NULL REFERENCES &amp;quot;blogapp_tag&amp;quot; (&amp;quot;name&amp;quot;),
+    UNIQUE (&amp;quot;post_id&amp;quot;, &amp;quot;tag_id&amp;quot;)
+)
+;
+CREATE TABLE &amp;quot;blogapp_post&amp;quot; (
+    &amp;quot;id&amp;quot; integer NOT NULL PRIMARY KEY AUTOINCREMENT,
+ &amp;lt;.......&amp;gt;
+)
+;
+CREATE TABLE &amp;quot;blogapp_tag&amp;quot; (
+ &amp;lt;.......&amp;gt;
+)
+;
+
+COMMIT;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;So here's a first way to do a DB cleanup: pipe &lt;tt class="docutils literal"&gt;sqlclear appname&lt;/tt&gt; into &lt;tt class="docutils literal"&gt;dbshell&lt;/tt&gt;. Then pipe &lt;tt class="docutils literal"&gt;sql appname&lt;/tt&gt; to &lt;tt class="docutils literal"&gt;dbshell&lt;/tt&gt;.&lt;/p&gt;
+&lt;p&gt;An alternative way, which I like less, is to take the subset of &lt;tt class="docutils literal"&gt;DELETE&lt;/tt&gt; statements generated by &lt;tt class="docutils literal"&gt;sqlflush&lt;/tt&gt;, save them in a text file, and pipe it through to &lt;tt class="docutils literal"&gt;dbshell&lt;/tt&gt; when needed. For example, for the blog app discussed above, these statements should do it:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;BEGIN;
+DELETE FROM &amp;quot;blogapp_tag&amp;quot;;
+DELETE FROM &amp;quot;blogapp_post&amp;quot;;
+DELETE FROM &amp;quot;blogapp_post_tags&amp;quot;;
+DELETE
+COMMIT;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The reason I don't like it is that it forces you to have explicit table names stored somewhere, which is a duplication of the existing models. If you happen to change some of your foreign keys, for example, tables will need changing so this file will have to be regenerated.&lt;/p&gt;
+&lt;p&gt;The approach I like best is more programmatic. Django's model API is flexible and convenient, and we can just use it in a custom management command:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;from&lt;/span&gt; &lt;span style="color: #00007f"&gt;django.core.management.base&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; BaseCommand
+&lt;span style="color: #00007f; font-weight: bold"&gt;from&lt;/span&gt; &lt;span style="color: #00007f"&gt;blogapp.models&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; Post, Tag
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;class&lt;/span&gt; &lt;span style="color: #00007f"&gt;Command&lt;/span&gt;(BaseCommand):
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;handle&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;, *args, **options):
+        Tag.objects.all().delete()
+        Post.objects.all().delete()
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Save this code as &lt;tt class="docutils literal"&gt;blogapp/management/commands/clear_models.py&lt;/tt&gt;, and now it can be invoked with:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;$ python manage.py clear_models
+&lt;/pre&gt;&lt;/div&gt;
+
+    </content><category term="misc"></category><category term="Django"></category></entry><entry><title>Programmatically populating a Django database</title><link href="https://eli.thegreenplace.net/2014/02/15/programmatically-populating-a-django-database" rel="alternate"></link><published>2014-02-15T05:43:52-08:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2014-02-15:/2014/02/15/programmatically-populating-a-django-database</id><summary type="html">
+        &lt;p&gt;This is a quick post to demonstrate a very useful way of programmatically populating the models (i.e. database) of a Django application.&lt;/p&gt;
+&lt;p&gt;The canonical way to accomplish this is fixtures - the &lt;tt class="docutils literal"&gt;loaddata&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;dumpdata&lt;/tt&gt; commands, but these seem to be more useful when you already have some data in …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;This is a quick post to demonstrate a very useful way of programmatically populating the models (i.e. database) of a Django application.&lt;/p&gt;
+&lt;p&gt;The canonical way to accomplish this is fixtures - the &lt;tt class="docutils literal"&gt;loaddata&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;dumpdata&lt;/tt&gt; commands, but these seem to be more useful when you already have some data in the DB. Alternatively, you could generate the JSON information loadable by &lt;tt class="docutils literal"&gt;loaddata&lt;/tt&gt; programmatically, but this would require following its format exactly (which means observing how real dumps are structured). One could, for the very first entries, just laboriously hammer them in through the admin interface. As programmers, however, we have a natural resentment for such methods.&lt;/p&gt;
+&lt;img class="align-center" src="https://eli.thegreenplace.net/images/2014/02/cGhJp6B-e1392433920338.jpg" /&gt;
+&lt;p&gt;Since Django apps are just Python modules, there's a much easier way. The &lt;a class="reference external" href="https://docs.djangoproject.com/en/dev/intro/tutorial01/"&gt;very first chapter of the Django tutorial&lt;/a&gt; hints at the approach by test-driving the &lt;tt class="docutils literal"&gt;shell&lt;/tt&gt; management command, which opens a Python shell in which the application is accessible, so the model classes can be imported and through them data can be both examined and created.&lt;/p&gt;
+&lt;p&gt;The same tutorial also mentions that you can bypass &lt;tt class="docutils literal"&gt;manage.py&lt;/tt&gt; by pointing &lt;tt class="docutils literal"&gt;DJANGO_SETTINGS_MODULE&lt;/tt&gt; to your project's settings and then calling &lt;tt class="docutils literal"&gt;django.setup()&lt;/tt&gt;. This provides a clue on how the same steps can be done from a script, but in fact there's an even easier way.&lt;/p&gt;
+&lt;p&gt;There's no need to bypass &lt;tt class="docutils literal"&gt;manage.py&lt;/tt&gt;, since it's a wonderful convenience wrapper &lt;a class="reference external" href="https://docs.djangoproject.com/en/dev/ref/django-admin/"&gt;around the Django project administration tools&lt;/a&gt;. It can be used to create custom management commands - e.g. your own commands parallel to &lt;tt class="docutils literal"&gt;shell&lt;/tt&gt;, &lt;tt class="docutils literal"&gt;dumpdata&lt;/tt&gt;, and so on. Not only that creating such commands gives you a very succinct, boilterplate-free way of writing custom management scripts, it also gives you a natural location to house them, per application.&lt;/p&gt;
+&lt;p&gt;Here's some simple code that adds a couple of tags into a blog-like model. Let's say the application is named &lt;tt class="docutils literal"&gt;blogapp&lt;/tt&gt;:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;from&lt;/span&gt; &lt;span style="color: #00007f"&gt;django.core.management.base&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; BaseCommand
+&lt;span style="color: #00007f; font-weight: bold"&gt;from&lt;/span&gt; &lt;span style="color: #00007f"&gt;blogapp.models&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; Post, Tag
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;class&lt;/span&gt; &lt;span style="color: #00007f"&gt;Command&lt;/span&gt;(BaseCommand):
+    args = &lt;span style="color: #7f007f"&gt;&amp;#39;&amp;lt;foo bar ...&amp;gt;&amp;#39;&lt;/span&gt;
+    help = &lt;span style="color: #7f007f"&gt;&amp;#39;our help string comes here&amp;#39;&lt;/span&gt;
+
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;_create_tags&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;):
+        tlisp = Tag(name=&lt;span style="color: #7f007f"&gt;&amp;#39;Lisp&amp;#39;&lt;/span&gt;)
+        tlisp.save()
+
+        tjava = Tag(name=&lt;span style="color: #7f007f"&gt;&amp;#39;Java&amp;#39;&lt;/span&gt;)
+        tjava.save()
+
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;handle&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;, *args, **options):
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;._create_tags()
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;This code has to be placed in a file within the &lt;tt class="docutils literal"&gt;blogapp/management/commands&lt;/tt&gt; directory in your project. If that directory doesn't exist, create it. The name of the script is the name of the custom command, so let's call it &lt;tt class="docutils literal"&gt;populate_db.py&lt;/tt&gt;. Another thing that has to be done is creating &lt;tt class="docutils literal"&gt;__init__.py&lt;/tt&gt; files in both the &lt;tt class="docutils literal"&gt;management&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;commands&lt;/tt&gt; directories, because these have to be Python packages. The directory tree will look like this:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;blogapp
+├── admin.py
+├── __init__.py
+├── management
+│   ├── commands
+│   │   ├── __init__.py
+│   │   └── populate_db.py
+│   └── __init__.py
+├── models.py
+... other files
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;That's it. Now you should be able to invoke this command with:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;$ python manage.py populate_db
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;All the facilities of &lt;tt class="docutils literal"&gt;manage.py&lt;/tt&gt; are available, such as help:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;$ python manage.py help populate_db
+Usage: manage.py populate_db [options] &amp;lt;foo bar ...&amp;gt;
+
+our help string comes here
+
+Options:
+...
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Note how &lt;tt class="docutils literal"&gt;help&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;args&lt;/tt&gt; are taken from the &lt;tt class="docutils literal"&gt;Command&lt;/tt&gt; class we defined. &lt;tt class="docutils literal"&gt;manage.py&lt;/tt&gt; will also pass custom positional arguments and keyword options to our command, if needed. More details on writing custom management commands are available in &lt;a class="reference external" href="https://docs.djangoproject.com/en/dev/howto/custom-management-commands/"&gt;this Django howto&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Once you start playing with such a custom data entry script, some of the existing Django management commands may come in very useful. You can see the full list by running &lt;tt class="docutils literal"&gt;manage.py help&lt;/tt&gt;, but here's a list of those I found handy in the context of this post.&lt;/p&gt;
+&lt;p&gt;For dumping, &lt;tt class="docutils literal"&gt;dumpdata&lt;/tt&gt; is great. Once your data grows a bit, you may find it useful only to dump specific models, or even specific rows by specifying primary keys with &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;--pks&lt;/span&gt;&lt;/tt&gt;. I also find the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;--indent=2&lt;/span&gt;&lt;/tt&gt; option to be essential when doing the default JSON dumps.&lt;/p&gt;
+&lt;p&gt;The &lt;tt class="docutils literal"&gt;flush&lt;/tt&gt; command will clear the DB for you. A handy &amp;quot;undo&amp;quot; for those very first forays into entering data. Be careful with this command once you have real data in the DB.&lt;/p&gt;
+&lt;p&gt;Finally, the &lt;tt class="docutils literal"&gt;sqlall&lt;/tt&gt; command is very useful when you're trying to figure out the structure of your models and the connections between them. IMHO model problems are important to detect early in the development of an application.&lt;/p&gt;
+&lt;p&gt;To conclude, I just want to mention that while custom management commands live within applications, nothing ties them to a specific app. It is customary for Django management commands to accept app and model names as arguments. While a data entry command is naturally tied to some application and model, this doesn't necessarily have to be the case in general. You can even envision an &amp;quot;app&amp;quot; named &lt;tt class="docutils literal"&gt;my_custom_commands&lt;/tt&gt; which you can add to projects and reuse its functionality between them.&lt;/p&gt;
+
+    </content><category term="misc"></category><category term="Django"></category></entry><entry><title>Django sessions - part III: User authentication</title><link href="https://eli.thegreenplace.net/2011/07/17/django-sessions-part-iii-user-authentication" rel="alternate"></link><published>2011-07-17T06:13:11-07:00</published><updated>2023-06-30T23:16:27-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2011-07-17:/2011/07/17/django-sessions-part-iii-user-authentication</id><summary type="html">
+        &lt;p&gt;In the previous two articles of this series we learned how Django implements sessions, thus allowing the abstraction of persistent state in a web application. The session framework can be employed by developers to implement all kinds of interesting features for their application, but Django also uses it for its …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;In the previous two articles of this series we learned how Django implements sessions, thus allowing the abstraction of persistent state in a web application. The session framework can be employed by developers to implement all kinds of interesting features for their application, but Django also uses it for its own needs. Specifically, Django's user authentication system relies on the session framework to do its job.&lt;/p&gt;
+&lt;p&gt;The user authentication system allows users to log in and out of the application, and act based on a set of permissions. Borrowing from &lt;a class="reference external" href="http://www.djangobook.com/en/2.0/chapter14/"&gt;the Django Book&lt;/a&gt;:&lt;/p&gt;
+&lt;p&gt;This system is often referred to as an &lt;em&gt;auth/auth&lt;/em&gt; (authentication and authorization) system. That name recognizes that dealing with users is often a two-step process. We need to&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;Verify (&lt;em&gt;authenticate&lt;/em&gt;) that a user is who he or she claims to be (usually by checking a username and password against a database of users)&lt;/li&gt;
+&lt;li&gt;Verify that the user is &lt;em&gt;authorized&lt;/em&gt; to perform some given operation (usually by checking against a table of permissions)&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;In this, the final part of the series, I want to explain how Django's user authentication is implemented. I will focus on item 1 in the list above - &lt;em&gt;authentication&lt;/em&gt;, which makes actual use of sessions &lt;a class="footnote-reference" href="#id7" id="id1"&gt;[1]&lt;/a&gt;.&lt;/p&gt;
+&lt;div class="section" id="snooping-on-http-traffic"&gt;
+&lt;h3&gt;Snooping on HTTP traffic&lt;/h3&gt;
+&lt;p&gt;Before diving into the source code of Django, let's see how authentication looks when viewed from the level of HTTP traffic. I'll be using this view to test things:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;test_user&lt;/span&gt;(request):
+    user_str = &lt;span style="color: #00007f"&gt;str&lt;/span&gt;(request.user)
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; request.user.is_authenticated():
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; HttpResponse(&lt;span style="color: #7f007f"&gt;&amp;#39;%s is logged in&amp;#39;&lt;/span&gt; % user_str)
+    &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt;:
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; HttpResponse(&lt;span style="color: #7f007f"&gt;&amp;#39;%s is not logged in&amp;#39;&lt;/span&gt; % user_str)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Before I logged in, I get the message &amp;quot;AnonymousUser is not logged in&amp;quot;. The server doesn't return any cookie.&lt;/p&gt;
+&lt;p&gt;When I log in with Django's default login template, more interesting things can be observed. The login form sends a POST request to the server, with my login information in the form data:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;username:eliben
+password:password
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Assuming this is a valid username/password pair, the server sends back a session ID in a cookie:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;Set-Cookie:sessionid=4980ec04546e434c1ea13c675fafbc98;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;What is this session? As we saw in the previous article, it's a key into the &lt;tt class="docutils literal"&gt;django_session&lt;/tt&gt; DB table. Decoding the session data from the table, I get:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;{&amp;#39;_auth_user_id&amp;#39;: 1, &amp;#39;_auth_user_backend&amp;#39;: &amp;#39;django.contrib.auth.backends.ModelBackend&amp;#39;}
+[26/Jun/2011 11:28:48] &amp;quot;GET /user/ HTTP/1.1&amp;quot; 200 19
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;By looking into the &lt;tt class="docutils literal"&gt;auth_user&lt;/tt&gt; table, I can indeed see that &lt;tt class="docutils literal"&gt;eliben&lt;/tt&gt; is the user with ID = 1. Also, in subsequent requests to the server, my browser sends the aforementioned session ID in a cookie, as expected.&lt;/p&gt;
+&lt;p&gt;When I log out, the server sends a different session ID, which now contains an empty dictionary - no user is logged in.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="auth-middleware"&gt;
+&lt;h3&gt;Auth middleware&lt;/h3&gt;
+&lt;p&gt;Similarly to the path we've taken with sessions, it's instrumental to first see how authentication middleware is implemented. Or in other words, &lt;em&gt;how did the &amp;quot;user&amp;quot; attribute get into my HTTP request&lt;/em&gt;?&lt;/p&gt;
+&lt;p&gt;The answer is in &lt;tt class="docutils literal"&gt;contrib/auth/middleware.py&lt;/tt&gt; &lt;a class="footnote-reference" href="#id8" id="id2"&gt;[2]&lt;/a&gt;:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;class&lt;/span&gt; &lt;span style="color: #00007f"&gt;LazyUser&lt;/span&gt;(&lt;span style="color: #00007f"&gt;object&lt;/span&gt;):
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;__get__&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;, request, obj_type=&lt;span style="color: #00007f"&gt;None&lt;/span&gt;):
+        &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; &lt;span style="color: #0000aa"&gt;not&lt;/span&gt; &lt;span style="color: #00007f"&gt;hasattr&lt;/span&gt;(request, &lt;span style="color: #7f007f"&gt;&amp;#39;_cached_user&amp;#39;&lt;/span&gt;):
+            &lt;span style="color: #00007f; font-weight: bold"&gt;from&lt;/span&gt; &lt;span style="color: #00007f"&gt;django.contrib.auth&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; get_user
+            request._cached_user = get_user(request)
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; request._cached_user
+
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;class&lt;/span&gt; &lt;span style="color: #00007f"&gt;AuthenticationMiddleware&lt;/span&gt;(&lt;span style="color: #00007f"&gt;object&lt;/span&gt;):
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;process_request&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;, request):
+        request.__class__.user = LazyUser()
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f"&gt;None&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Behold, we've encountered a rare sighting of one of Python's more obscure, and yet powerful features - descriptors. Explaining descriptors fully will take an article of its own, so I kindly direct you to google it &lt;a class="footnote-reference" href="#id9" id="id3"&gt;[3]&lt;/a&gt;. Here I'll just briefly explain how this specific code works.&lt;/p&gt;
+&lt;p&gt;&lt;tt class="docutils literal"&gt;AuthenticationMiddleware&lt;/tt&gt; is a middleware class, implementing the &lt;tt class="docutils literal"&gt;process_request&lt;/tt&gt; hook. What it does is attach the &lt;tt class="docutils literal"&gt;LazyUser&lt;/tt&gt; &lt;em&gt;descriptor&lt;/em&gt; to the &lt;tt class="docutils literal"&gt;user&lt;/tt&gt; attribute of the request class. The &lt;tt class="docutils literal"&gt;LazyUser&lt;/tt&gt; descriptor implements &lt;tt class="docutils literal"&gt;__get__&lt;/tt&gt;, which will get called when we access &lt;tt class="docutils literal"&gt;request.user&lt;/tt&gt; in our views. This &lt;tt class="docutils literal"&gt;__get__&lt;/tt&gt; simply caches the user object in another attribute of the request class - &lt;tt class="docutils literal"&gt;_cached_user&lt;/tt&gt;, making sure the possibly costly &lt;tt class="docutils literal"&gt;get_user&lt;/tt&gt; operation doesn't get fully executed for each access to the &lt;tt class="docutils literal"&gt;user&lt;/tt&gt; attribute.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="finding-the-active-user"&gt;
+&lt;h3&gt;Finding the active user&lt;/h3&gt;
+&lt;p&gt;Recall that &lt;tt class="docutils literal"&gt;request.user&lt;/tt&gt; gets us the currently logged-in user, if there is one. Let's see how this gets done. In the code sample above, the user is accessed with &lt;tt class="docutils literal"&gt;get_user(request)&lt;/tt&gt;. Here's &lt;tt class="docutils literal"&gt;get_user&lt;/tt&gt;:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;get_user&lt;/span&gt;(request):
+    &lt;span style="color: #00007f; font-weight: bold"&gt;from&lt;/span&gt; &lt;span style="color: #00007f"&gt;django.contrib.auth.models&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; AnonymousUser
+    &lt;span style="color: #00007f; font-weight: bold"&gt;try&lt;/span&gt;:
+        user_id = request.session[SESSION_KEY]
+        backend_path = request.session[BACKEND_SESSION_KEY]
+        backend = load_backend(backend_path)
+        user = backend.get_user(user_id) &lt;span style="color: #0000aa"&gt;or&lt;/span&gt; AnonymousUser()
+    &lt;span style="color: #00007f; font-weight: bold"&gt;except&lt;/span&gt; KeyError:
+        user = AnonymousUser()
+    &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; user
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Looking at the beginning of the file this function is defined in (&lt;tt class="docutils literal"&gt;auth/__init__.py&lt;/tt&gt;), we see:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;SESSION_KEY = &lt;span style="color: #7f007f"&gt;&amp;#39;_auth_user_id&amp;#39;&lt;/span&gt;
+BACKEND_SESSION_KEY = &lt;span style="color: #7f007f"&gt;&amp;#39;_auth_user_backend&amp;#39;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;So what &lt;tt class="docutils literal"&gt;get_user&lt;/tt&gt; does is just try to extract the user from the current session. Recall from the HTTP snooping section that when a user is actually logged in, the &lt;tt class="docutils literal"&gt;_auth_user_id&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;_auth_user_backend&lt;/tt&gt; entries are set in the session dictionary. &lt;tt class="docutils literal"&gt;get_user&lt;/tt&gt; reads them, and turns to the auth backend to fetch the user object, with the &lt;tt class="docutils literal"&gt;backend.get_user&lt;/tt&gt; method.&lt;/p&gt;
+&lt;p&gt;The default auth backend is &lt;tt class="docutils literal"&gt;auth.backends.ModelBackend&lt;/tt&gt; - the DB backed user model (contained in all those &lt;tt class="docutils literal"&gt;auth_*&lt;/tt&gt; tables that get added to your DB when the auth framework is enabled). Its &lt;tt class="docutils literal"&gt;get_user&lt;/tt&gt; method simply does this:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;get_user&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;, user_id):
+    &lt;span style="color: #00007f; font-weight: bold"&gt;try&lt;/span&gt;:
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; User.objects.get(pk=user_id)
+    &lt;span style="color: #00007f; font-weight: bold"&gt;except&lt;/span&gt; User.DoesNotExist:
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f"&gt;None&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Standard Django code for fetching data from a DB, where &lt;tt class="docutils literal"&gt;User&lt;/tt&gt; is a model defined in &lt;tt class="docutils literal"&gt;contrib/auth/models.py&lt;/tt&gt;.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="the-user-model"&gt;
+&lt;h3&gt;The User model&lt;/h3&gt;
+&lt;p&gt;&lt;tt class="docutils literal"&gt;User&lt;/tt&gt; is a fairly standard Django model with a bunch of fields and helper methods that help decoding them. The most interesting part, IMHO, and the one I'll focus here on is setting and verifying the user's password. Here's the &lt;tt class="docutils literal"&gt;set_password&lt;/tt&gt; method:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;set_password&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;, raw_password):
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; raw_password &lt;span style="color: #0000aa"&gt;is&lt;/span&gt; &lt;span style="color: #00007f"&gt;None&lt;/span&gt;:
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.set_unusable_password()
+    &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt;:
+        &lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; &lt;span style="color: #00007f"&gt;random&lt;/span&gt;
+        algo = &lt;span style="color: #7f007f"&gt;&amp;#39;sha1&amp;#39;&lt;/span&gt;
+        salt = get_hexdigest(algo, &lt;span style="color: #00007f"&gt;str&lt;/span&gt;(random.random()), &lt;span style="color: #00007f"&gt;str&lt;/span&gt;(random.random()))[:&lt;span style="color: #007f7f"&gt;5&lt;/span&gt;]
+        hsh = get_hexdigest(algo, salt, raw_password)
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.password = &lt;span style="color: #7f007f"&gt;&amp;#39;%s$%s$%s&amp;#39;&lt;/span&gt; % (algo, salt, hsh)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;We see this uses the accepted modern approach - instead of storing the password itself (in &lt;em&gt;plaintext&lt;/em&gt;), a cryptographic hash is computed and stored. Further, the password is &lt;a class="reference external" href="http://en.wikipedia.org/wiki/Password_salt"&gt;salted&lt;/a&gt;, to defeat a potential &lt;a class="reference external" href="http://en.wikipedia.org/wiki/Rainbow_table"&gt;rainbow table&lt;/a&gt; cracking attack. The password's hash, together with the salt value and the algorithm used for the hashing (which is &lt;tt class="docutils literal"&gt;SHA1&lt;/tt&gt; by default) are then stored in the database, separated by dollar signs. For example, here's my user's &lt;tt class="docutils literal"&gt;password&lt;/tt&gt; field:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;sha1$f0670$2a0781bd8f2361042ebdf0cd1b3ce1e8be3f8dcc
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;To verify the password, the &lt;tt class="docutils literal"&gt;check_password&lt;/tt&gt; function is invoked &lt;a class="footnote-reference" href="#id10" id="id4"&gt;[4]&lt;/a&gt;:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;check_password&lt;/span&gt;(raw_password, enc_password):
+    &lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;    Returns a boolean of whether the raw_password was correct. Handles&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;    encryption formats behind the scenes.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;    &amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+    algo, salt, hsh = enc_password.split(&lt;span style="color: #7f007f"&gt;&amp;#39;$&amp;#39;&lt;/span&gt;)
+    &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; constant_time_compare(hsh, get_hexdigest(algo, salt, raw_password))
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;It computes the hash on the password provided and compares it to the one stored in the DB. What is this &lt;tt class="docutils literal"&gt;constant_time_compare&lt;/tt&gt; call about though? This is a function that compares two strings in time that depends on the length of the strings, but not the amount of matching characters in the beginning. Such comparison is important cryptographically, to thwart &lt;a class="reference external" href="http://en.wikipedia.org/wiki/Timing_attack"&gt;timing attacks&lt;/a&gt;.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="logging-in"&gt;
+&lt;h3&gt;Logging in&lt;/h3&gt;
+&lt;p&gt;Django provides a powerful and versatile &lt;tt class="docutils literal"&gt;login&lt;/tt&gt; view (in &lt;tt class="docutils literal"&gt;django.contrib.auth.views&lt;/tt&gt;) to allow an application implement logging-in functionality. What this view does is explained quite well in Django's auth's docs. Here, I will focus on &lt;em&gt;how it works&lt;/em&gt;.&lt;/p&gt;
+&lt;p&gt;&lt;tt class="docutils literal"&gt;login&lt;/tt&gt; is your typical form-handling Django view. If it gets a &lt;tt class="docutils literal"&gt;GET&lt;/tt&gt; request, it displays the login form. On the other hand, for a &lt;tt class="docutils literal"&gt;POST&lt;/tt&gt; request, it tries to log the user in. This is the interesting part.&lt;/p&gt;
+&lt;p&gt;On first sight, it's hard to see where exactly the login authentication is handled. The &lt;tt class="docutils literal"&gt;POST&lt;/tt&gt; request handling part of the &lt;tt class="docutils literal"&gt;login&lt;/tt&gt; view is:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; request.method == &lt;span style="color: #7f007f"&gt;&amp;quot;POST&amp;quot;&lt;/span&gt;:
+    form = authentication_form(data=request.POST)
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; form.is_valid():
+        netloc = urlparse.urlparse(redirect_to)[&lt;span style="color: #007f7f"&gt;1&lt;/span&gt;]
+
+        &lt;span style="color: #007f00"&gt;# Use default setting if redirect_to is empty&lt;/span&gt;
+        &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; &lt;span style="color: #0000aa"&gt;not&lt;/span&gt; redirect_to:
+            redirect_to = settings.LOGIN_REDIRECT_URL
+
+        &lt;span style="color: #007f00"&gt;# Security check -- don&amp;#39;t allow redirection to a different&lt;/span&gt;
+        &lt;span style="color: #007f00"&gt;# host.&lt;/span&gt;
+        &lt;span style="color: #00007f; font-weight: bold"&gt;elif&lt;/span&gt; netloc &lt;span style="color: #0000aa"&gt;and&lt;/span&gt; netloc != request.get_host():
+            redirect_to = settings.LOGIN_REDIRECT_URL
+
+        &lt;span style="color: #007f00"&gt;# Okay, security checks complete. Log the user in.&lt;/span&gt;
+        auth_login(request, form.get_user())
+
+        &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; request.session.test_cookie_worked():
+            request.session.delete_test_cookie()
+
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; HttpResponseRedirect(redirect_to)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;After some head scratching and stunning feats of reverse engineering &lt;a class="footnote-reference" href="#id11" id="id5"&gt;[5]&lt;/a&gt;, it became clear that the authentication happens in the call &lt;tt class="docutils literal"&gt;form.is_valid&lt;/tt&gt;. This call invokes (after some steps &lt;a class="footnote-reference" href="#id12" id="id6"&gt;[6]&lt;/a&gt;) &lt;tt class="docutils literal"&gt;AuthenticationForm.clean&lt;/tt&gt;, which itself calls &lt;tt class="docutils literal"&gt;authenticate&lt;/tt&gt;. A bit down the road, the flow of control reaches &lt;tt class="docutils literal"&gt;ModelBackend.authenticate&lt;/tt&gt;:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;authenticate&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;, username=&lt;span style="color: #00007f"&gt;None&lt;/span&gt;, password=&lt;span style="color: #00007f"&gt;None&lt;/span&gt;):
+    &lt;span style="color: #00007f; font-weight: bold"&gt;try&lt;/span&gt;:
+        user = User.objects.get(username=username)
+        &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; user.check_password(password):
+            &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; user
+    &lt;span style="color: #00007f; font-weight: bold"&gt;except&lt;/span&gt; User.DoesNotExist:
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f"&gt;None&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;And we've already seen the definition of &lt;tt class="docutils literal"&gt;check_password&lt;/tt&gt; in section &amp;quot;The User model&amp;quot;.
+Alright, so now we know how the &lt;tt class="docutils literal"&gt;login&lt;/tt&gt; view authenticates the user. What does it do next? After some more checks, the &lt;tt class="docutils literal"&gt;auth_login&lt;/tt&gt; function is called, which is an alias for &lt;tt class="docutils literal"&gt;django.contrib.auth.login&lt;/tt&gt;. This function uses the session framework to save the cookie we've seen in the first section of this article.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="summary"&gt;
+&lt;h3&gt;Summary&lt;/h3&gt;
+&lt;p&gt;This concludes the article on how user authentication works, and also the &lt;a class="reference external" href="https://eli.thegreenplace.net/2011/06/24/how-django-sessions-work-introduction/"&gt;3-article series on Django sessions&lt;/a&gt;. Sessions in general and user logins in particular are one aspect of web applications we take for granted. It just works, &lt;em&gt;automagically&lt;/em&gt;. And yet, as I hope these articles have demonstrated, the magic that happens under the hood isn't really difficult to understand. Sure, there are a lot of concepts to grasp and code to read, but with some determination enlightenment is just around the corner.&lt;/p&gt;
+&lt;img class="align-center" src="https://eli.thegreenplace.net/images/hline.jpg" style="width: 320px; height: 5px;" /&gt;
+&lt;table class="docutils footnote" frame="void" id="id7" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;&lt;em&gt;Authorization&lt;/em&gt; is a simple matter of keeping tables of users, groups and permissions.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id8" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id2"&gt;[2]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;Just a reminder: at the time of writing this series of articles, the latest released version of Django is 1.3, which is what I'm looking at here. In this particular code sample I've removed a longish assertion line from &lt;tt class="docutils literal"&gt;process_request&lt;/tt&gt;.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id9" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id3"&gt;[3]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;But start with &lt;a class="reference external" href="http://users.rcn.com/python/download/Descriptor.htm"&gt;this excellent article&lt;/a&gt; by Raymond Hettinger.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id10" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id4"&gt;[4]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;It's invoked by the &lt;tt class="docutils literal"&gt;check_password&lt;/tt&gt; method which also handles a backwards-compatibility issue, which I don't cover here.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id11" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id5"&gt;[5]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;I'm kidding :-) All it took was 30 seconds to strategically insert &lt;tt class="docutils literal"&gt;traceback.print_stack()&lt;/tt&gt; into &lt;tt class="docutils literal"&gt;User.check_password&lt;/tt&gt; and see where it's being called from when I log in.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id12" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id6"&gt;[6]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;According to the Django docs, the &lt;tt class="docutils literal"&gt;clean&lt;/tt&gt; method of a subclass of &lt;tt class="docutils literal"&gt;Form&lt;/tt&gt; is responsible for whole-form validation. Not the most intuitive nomenclature, I'd say.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;/div&gt;
+
+    </content><category term="misc"></category><category term="Django"></category></entry><entry><title>Django sessions - part II: How sessions work</title><link href="https://eli.thegreenplace.net/2011/06/29/django-sessions-part-ii-how-sessions-work" rel="alternate"></link><published>2011-06-29T05:03:14-07:00</published><updated>2023-06-30T23:16:27-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2011-06-29:/2011/06/29/django-sessions-part-ii-how-sessions-work</id><summary type="html">
+        &lt;p&gt;This is the second in a &lt;a class="reference external" href="https://eli.thegreenplace.net/2011/06/24/how-django-sessions-work-introduction/"&gt;series of three articles&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Sessions are Django's high-level tool for keeping a persistent state for users on the server. Sessions allow to store arbitrary data per visitor, and have this data available the next time the visitor visits the site. As we'll learn in …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;This is the second in a &lt;a class="reference external" href="https://eli.thegreenplace.net/2011/06/24/how-django-sessions-work-introduction/"&gt;series of three articles&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Sessions are Django's high-level tool for keeping a persistent state for users on the server. Sessions allow to store arbitrary data per visitor, and have this data available the next time the visitor visits the site. As we'll learn in this article, sessions are still based on cookies, but cookie management is abstracted away, handling a lot of issues on the way - as sessions provide a more convenient, robust and safe way to store the data.&lt;/p&gt;
+&lt;div class="section" id="example-using-sessions"&gt;
+&lt;h3&gt;Example - using sessions&lt;/h3&gt;
+&lt;p&gt;First, it's useful to see an easy example of using Django sessions. Here's a simple view that uses sessions to count the amount of times a user has triggered it &lt;a class="footnote-reference" href="#id7" id="id1"&gt;[1]&lt;/a&gt;.&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;test_count_session&lt;/span&gt;(request):
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; &lt;span style="color: #7f007f"&gt;&amp;#39;count&amp;#39;&lt;/span&gt; &lt;span style="color: #0000aa"&gt;in&lt;/span&gt; request.session:
+        request.session[&lt;span style="color: #7f007f"&gt;&amp;#39;count&amp;#39;&lt;/span&gt;] += &lt;span style="color: #007f7f"&gt;1&lt;/span&gt;
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; HttpResponse(&lt;span style="color: #7f007f"&gt;&amp;#39;new count=%s&amp;#39;&lt;/span&gt; % request.session[&lt;span style="color: #7f007f"&gt;&amp;#39;count&amp;#39;&lt;/span&gt;])
+    &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt;:
+        request.session[&lt;span style="color: #7f007f"&gt;&amp;#39;count&amp;#39;&lt;/span&gt;] = &lt;span style="color: #007f7f"&gt;1&lt;/span&gt;
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; HttpResponse(&lt;span style="color: #7f007f"&gt;&amp;#39;No count in session. Setting to 1&amp;#39;&lt;/span&gt;)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;If we compare this to the cookies usage example from &lt;a class="reference external" href="https://eli.thegreenplace.net/2011/06/24/django-sessions-part-i-cookies/"&gt;part I&lt;/a&gt;, a couple of differences are apparent:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;Sessions are more uniform - a single &lt;tt class="docutils literal"&gt;session&lt;/tt&gt; attribute of the request is used for both querying and modifying the session.&lt;/li&gt;
+&lt;li&gt;While in this example we're only using an integer as the value, the &lt;tt class="docutils literal"&gt;session&lt;/tt&gt; attribute acts as a dictionary, allowing string keys and almost arbitrary Python objects as values &lt;a class="footnote-reference" href="#id8" id="id2"&gt;[2]&lt;/a&gt;.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;However, looking at the actual HTTP traffic for this view, we notice yet another, very important difference. Here's the cookie the view returns to the user for this particular instance of the application on my machine:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;Set-Cookie:sessionid=a92d67e44a9b92d7dafca67e507985c0;
+           expires=Thu, 07-Jul-2011 04:16:28 GMT;
+           Max-Age=1209600;
+           Path=/
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;There's no &lt;tt class="docutils literal"&gt;count=1&lt;/tt&gt; (or other numeric value) here - the cookie just sets some unique &lt;tt class="docutils literal"&gt;sessionid&lt;/tt&gt;. We'll see what this means shortly, but I'll just note that this is a very important feature of session management. Think about the security implications, for instance. Suppose the user gets a prize for the 10th time he triggers the view. With a simple cookie passing the count into the user's browser this would be something very easy to spoof. With a session, however, the user has no idea what the correct &lt;tt class="docutils literal"&gt;sessionid&lt;/tt&gt; - in fact, no such &lt;tt class="docutils literal"&gt;sessionid&lt;/tt&gt; exists yet, so the user has no real way spoofing his 10th visit &lt;a class="footnote-reference" href="#id9" id="id3"&gt;[3]&lt;/a&gt;&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="deciphering-the-session-id"&gt;
+&lt;h3&gt;Deciphering the session ID&lt;/h3&gt;
+&lt;p&gt;By default, Django's session module stores sessions in the app's main DB, in table &lt;tt class="docutils literal"&gt;django_session&lt;/tt&gt; with this schema:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;CREATE&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;TABLE&lt;/span&gt; &lt;span style="color: #7f007f"&gt;&amp;quot;django_session&amp;quot;&lt;/span&gt; (
+    &lt;span style="color: #7f007f"&gt;&amp;quot;session_key&amp;quot;&lt;/span&gt; &lt;span style="color: #00007f"&gt;varchar&lt;/span&gt;(&lt;span style="color: #007f7f"&gt;40&lt;/span&gt;) &lt;span style="color: #00007f; font-weight: bold"&gt;NOT&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;NULL&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;PRIMARY&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;KEY&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;quot;session_data&amp;quot;&lt;/span&gt; &lt;span style="color: #00007f"&gt;text&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;NOT&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;NULL&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;quot;expire_date&amp;quot;&lt;/span&gt; datetime &lt;span style="color: #00007f; font-weight: bold"&gt;NOT&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;NULL&lt;/span&gt;
+);
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;tt class="docutils literal"&gt;session_key&lt;/tt&gt; is the ID placed in the cookie, and &lt;tt class="docutils literal"&gt;session_data&lt;/tt&gt; contains the actual session data in encoded format. Here's how to decipher the session ID we've seen above:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;from&lt;/span&gt; &lt;span style="color: #00007f"&gt;django.contrib.sessions.models&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; Session
+&lt;span style="color: #007f00"&gt;#...&lt;/span&gt;
+sess = Session.objects.get(pk=&lt;span style="color: #7f007f"&gt;&amp;#39;a92d67e44a9b92d7dafca67e507985c0&amp;#39;&lt;/span&gt;)
+&lt;span style="color: #00007f; font-weight: bold"&gt;print&lt;/span&gt;(sess.session_data)
+&lt;span style="color: #00007f; font-weight: bold"&gt;print&lt;/span&gt;(sess.get_decoded())
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;This prints:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;ZmEyNDVhNTBhMTk2ZmRjNzVlYzQ4NTFjZDk2Y2UwODc3YmVjNWVjZjqAAn1xAVUFY291bnRxAksG
+cy4=
+
+{&amp;#39;count&amp;#39;: 6}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;As you can see, Django stores the &lt;tt class="docutils literal"&gt;request.session&lt;/tt&gt; dictionary in the DB, in an encoded manner. Django can recover it from the DB by using the session ID the user's browser returns in a cookie. All of this is done transparently by Django's session module - the application's view just has a simple access to the &lt;tt class="docutils literal"&gt;request.session&lt;/tt&gt; dictionary. Let's dive into the guts of Django to understand how it manages to make this work.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="session-middleware"&gt;
+&lt;h3&gt;Session middleware&lt;/h3&gt;
+&lt;p&gt;The first layer of magic I'd like to unwrap has to deal with the &lt;tt class="docutils literal"&gt;session&lt;/tt&gt; attribute of &lt;tt class="docutils literal"&gt;django.http.HttpRequest&lt;/tt&gt;. How does the session information even get there, and how can the view change the session by simply modifying the attribute?&lt;/p&gt;
+&lt;p&gt;The answer is Django's &lt;em&gt;middleware&lt;/em&gt;. To borrow a quote from &lt;a class="reference external" href="http://www.djangobook.com/en/2.0/"&gt;the Django Book&lt;/a&gt;:&lt;/p&gt;
+&lt;blockquote&gt;
+[...] Django’s middleware framework, which is a set of hooks into Django’s request/response processing. It’s a light, low-level “plug-in” system capable of globally altering both Django’s input and output.&lt;/blockquote&gt;
+&lt;p&gt;We can think of middleware in the following way. The normal flow of data around the view we're coding in Django looks like this:&lt;/p&gt;
+&lt;img class="align-center" src="https://eli.thegreenplace.net/images/2011/06/view_req_resp.png" /&gt;
+&lt;p&gt;The view accepts a HTTP request object, does some application-specific work based on its contents and eventually returns a HTTP response object. Middleware makes this process a bit more complicated:&lt;/p&gt;
+&lt;img class="align-center" src="https://eli.thegreenplace.net/images/2011/06/view_req_resp_middleware.png" /&gt;
+&lt;p&gt;This is done by allowing the programmer to write &amp;quot;hook classes&amp;quot; with special methods that the middleware framework knows about &lt;a class="footnote-reference" href="#id10" id="id4"&gt;[4]&lt;/a&gt;. These hooks can be registered in the &lt;tt class="docutils literal"&gt;MIDDLEWARE_CLASSES&lt;/tt&gt; setting in &lt;tt class="docutils literal"&gt;settings.py&lt;/tt&gt;. Note that the &lt;tt class="docutils literal"&gt;django.contrib.sessions.middleware.SessionMiddleware&lt;/tt&gt; class is there by default. Looking at its source code, it has two middleware hooks - &lt;tt class="docutils literal"&gt;process_request&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;process_response&lt;/tt&gt; &lt;a class="footnote-reference" href="#id11" id="id5"&gt;[5]&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;&lt;tt class="docutils literal"&gt;process_request&lt;/tt&gt; pulls the session key (ID) from a cookie. We can see that &lt;tt class="docutils literal"&gt;sessionid&lt;/tt&gt; is actually a configurable name - &lt;tt class="docutils literal"&gt;SESSION_COOKIE_NAME&lt;/tt&gt;, set by default in Django's global settings to &lt;tt class="docutils literal"&gt;sessionid&lt;/tt&gt;. The &lt;tt class="docutils literal"&gt;request.session&lt;/tt&gt; attribute is then populated to contain a &amp;quot;session store&amp;quot; object. More on this object a bit later.&lt;/p&gt;
+&lt;p&gt;&lt;tt class="docutils literal"&gt;process_response&lt;/tt&gt; saves the session store object (thus making the changes the view did persistent) and attaches a cookie to the response sent to the client. To save on traffic, it does that only if the view actually modified the session, or if the &lt;tt class="docutils literal"&gt;SESSION_SAVE_EVERY_REQUEST&lt;/tt&gt; setting is set.&lt;/p&gt;
+&lt;p&gt;This explains how the sessions are translated to cookies. But clearly, a lot of the logic is still hidden, implemented in the store object of sessions. Let's see how that works.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="session-store"&gt;
+&lt;h3&gt;Session store&lt;/h3&gt;
+&lt;p&gt;Sessions can use one of several storage &amp;quot;engines&amp;quot; (backends). This is configurable via the &lt;tt class="docutils literal"&gt;SESSION_ENGINE&lt;/tt&gt; setting, which points to &lt;tt class="docutils literal"&gt;django.contrib.sessions.backends.db&lt;/tt&gt; by default - the application's main database (as mentioned above in &amp;quot;Deciphering the session ID&amp;quot;). If you look at the &lt;tt class="docutils literal"&gt;sessions/backends&lt;/tt&gt; directory in Django's source you'll see other available engines, but unless your needs are very special, you're probably OK with the default one.&lt;/p&gt;
+&lt;p&gt;Each storage engine exports a &lt;tt class="docutils literal"&gt;StorageSession&lt;/tt&gt; class which derives from &lt;tt class="docutils literal"&gt;StorageBase&lt;/tt&gt;. This common base implements most of the functionality of session stores, relying on methods from its specializations to abstract away the actual method of storing the data - whether in DB, file, in-memory cache or some other way. The DB-backed store uses Django's standard ORM, defined in module &lt;tt class="docutils literal"&gt;session.models&lt;/tt&gt;.&lt;/p&gt;
+&lt;p&gt;To understand how all these classes play together, let's follow through what happens when the user tries to access &lt;tt class="docutils literal"&gt;request.session&lt;/tt&gt; in a view, assuming the default DB store:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;Session middleware's &lt;tt class="docutils literal"&gt;process_request&lt;/tt&gt; sets &lt;tt class="docutils literal"&gt;request.session&lt;/tt&gt; to be an instance of &lt;tt class="docutils literal"&gt;db.SessionStore&lt;/tt&gt; with &lt;tt class="docutils literal"&gt;session_key&lt;/tt&gt; passed into the constructor.&lt;/li&gt;
+&lt;li&gt;The constructor of &lt;tt class="docutils literal"&gt;SessionStore&lt;/tt&gt; defers to the constructor of &lt;tt class="docutils literal"&gt;SessionBase&lt;/tt&gt;, which stores the session key for later use.&lt;ul&gt;
+&lt;li&gt;Note that the session isn't loaded right away from the DB. This is &lt;em&gt;lazy loading&lt;/em&gt; - the actual data is loaded when it's actually being accessed.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;li&gt;&lt;tt class="docutils literal"&gt;process_request&lt;/tt&gt; is done at this point, so the HTTP request is passed into the view. Suppose we now read its &lt;tt class="docutils literal"&gt;count&lt;/tt&gt; key, as in the example above.&lt;/li&gt;
+&lt;li&gt;&lt;tt class="docutils literal"&gt;SessionBase&lt;/tt&gt; implements a dict-like interface &lt;a class="footnote-reference" href="#id12" id="id6"&gt;[6]&lt;/a&gt;, and in particular &lt;tt class="docutils literal"&gt;__getitem__&lt;/tt&gt;, which takes the key from a &lt;tt class="docutils literal"&gt;_session&lt;/tt&gt; attribute, which in itself is a &lt;em&gt;property&lt;/em&gt;, deferring reads to the &lt;tt class="docutils literal"&gt;_get_session&lt;/tt&gt; method.&lt;/li&gt;
+&lt;li&gt;&lt;tt class="docutils literal"&gt;_get_session&lt;/tt&gt; does the actual lazy loading, using the &lt;tt class="docutils literal"&gt;load&lt;/tt&gt; method.&lt;/li&gt;
+&lt;li&gt;&lt;tt class="docutils literal"&gt;load&lt;/tt&gt; is one of the methods related to the actual storage, so &lt;tt class="docutils literal"&gt;SessionBase&lt;/tt&gt; doesn't implement it. Instead &lt;tt class="docutils literal"&gt;db.SessionStore&lt;/tt&gt; implements it and uses the session DB model to load the value from the DB based on the key, decoding it first.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;This is about it, except one small detail. How does encoding and decoding work? Let's look at &lt;tt class="docutils literal"&gt;encode&lt;/tt&gt;:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;encode&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;, session_dict):
+    &lt;span style="color: #7f007f"&gt;&amp;quot;Returns the given session dictionary pickled and encoded as a string.&amp;quot;&lt;/span&gt;
+    pickled = pickle.dumps(session_dict, pickle.HIGHEST_PROTOCOL)
+    &lt;span style="color: #00007f"&gt;hash&lt;/span&gt; = &lt;span style="color: #00007f"&gt;self&lt;/span&gt;._hash(pickled)
+    &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; base64.encodestring(&lt;span style="color: #00007f"&gt;hash&lt;/span&gt; + &lt;span style="color: #7f007f"&gt;&amp;quot;:&amp;quot;&lt;/span&gt; + pickled)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The session dictionary is pickled. Then, a hash is computed and prepended to the pickle string. Finally the whole string is encoded in base 64, which is stored in the &lt;tt class="docutils literal"&gt;session_data&lt;/tt&gt; field of the DB table.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="conclusion"&gt;
+&lt;h3&gt;Conclusion&lt;/h3&gt;
+&lt;p&gt;In this article, we've seen how to use Django sessions, what happens on the low-level of HTTP requests and responses when sessions are being used, and how sessions are actually implemented by Django. While I didn't cover every little detail, I hope there's enough information to understand the big picture. If there's any important information you think I may have missed, please let me know.&lt;/p&gt;
+&lt;img class="align-center" src="https://eli.thegreenplace.net/images/hline.jpg" style="width: 320px; height: 5px;" /&gt;
+&lt;table class="docutils footnote" frame="void" id="id7" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;For the sake of this article, I'm ignoring cookie/session expiration issues. Assume they never expire.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id8" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id2"&gt;[2]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;By &amp;quot;almost arbitrary&amp;quot; I refer to Python objects that are &lt;em&gt;pickle-able&lt;/em&gt;.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id9" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id3"&gt;[3]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;I say no &amp;quot;real&amp;quot; way because this scheme is, of course, not entirely secure - so don't bet real money on it. Depending on the exact configuration and usage of sessions by the application, by having access to the traffic from other users, the attacker can possibly spoof a session ID.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id10" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id4"&gt;[4]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;These middleware classes are a prime example of Python's duck typing. No need to adhere to any specified interface; no need to derive from some common base or explicitly set the hook methods. Just implement the methods you need in a class, and register that class with the framework. Python's reflection and duck typing capabilities are then used to automatically discover and use these hooks.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id11" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id5"&gt;[5]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;Take a moment to review the Django middleware docs to understand how to use these hooks.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id12" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id6"&gt;[6]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;More formally, a Python &lt;em&gt;mapping type&lt;/em&gt;.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;/div&gt;
+
+    </content><category term="misc"></category><category term="Django"></category></entry><entry><title>Django sessions - part I: Cookies</title><link href="https://eli.thegreenplace.net/2011/06/24/django-sessions-part-i-cookies" rel="alternate"></link><published>2011-06-24T12:54:49-07:00</published><updated>2023-06-30T23:16:27-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2011-06-24:/2011/06/24/django-sessions-part-i-cookies</id><summary type="html">
+        &lt;p&gt;HTTP is a stateless protocol - the server is not required to retain information or status about each user for the duration of multiple requests.&lt;/p&gt;
+&lt;p&gt;For smart web applications, however, this isn't good enough. You want to login into an application and have it remember you across requests. A good example …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;HTTP is a stateless protocol - the server is not required to retain information or status about each user for the duration of multiple requests.&lt;/p&gt;
+&lt;p&gt;For smart web applications, however, this isn't good enough. You want to login into an application and have it remember you across requests. A good example is maintaining a &amp;quot;shopping cart&amp;quot; at some merchandise website, which you gradually fill as you browse through the products that interest you.&lt;/p&gt;
+&lt;div align="center" class="align-center"&gt;&lt;img class="align-center" src="https://eli.thegreenplace.net/images/2011/06/cookie-small.gif" /&gt;&lt;/div&gt;
+&lt;p&gt;To solve this problem, &lt;a class="reference external" href="http://en.wikipedia.org/wiki/Http_cookie"&gt;HTTP cookies&lt;/a&gt; were invented by Netscape back in the 1990s. Cookies are formally defined in &lt;a class="reference external" href="http://tools.ietf.org/html/rfc2965"&gt;RFC2965&lt;/a&gt;, but to spare you all that jabber, cookies can be described very simply.&lt;/p&gt;
+&lt;p&gt;A cookie is just an arbitrary string sent by the server to the client as part of the HTTP response. The client will then return this cookie back to the server in subsequent requests. The information stored in the cookie is &lt;em&gt;opaque&lt;/em&gt; to the client - it's only for the server's own use. This scheme allows the client to identify itself back to the server with some state the server has assigned it. Here's a more detailed flow of events:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;The client connects to the server for the first time, and sends a normal HTTP request (say, a simple &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;GET&lt;/span&gt;&lt;/tt&gt; for the main page).&lt;/li&gt;
+&lt;li&gt;The server wants to track the client's state and in its HTTP response (which contains the page contents) attaches a &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;Set-Cookie&lt;/span&gt;&lt;/tt&gt; header. This header's information is a set of &lt;em&gt;key, value&lt;/em&gt; pairs, where both keys and values are strings that make sense for the server, but for the client are a black box.&lt;/li&gt;
+&lt;li&gt;In subsequent requests the client makes to the server, it adds a &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;Cookie&lt;/span&gt;&lt;/tt&gt; header in the HTTP requests it sends, with the cookie information the server specified in previous responses.&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;Implementation-wise, the client stores the latest cookie received from various servers (which are easily identifiable by their URLs). Even if the next time the client accesses the server is a few days after the previous request, it will still send this information (assuming the cookie hasn't expired), and the server will be able to identify it. This is why I can point my browser to Amazon today, not having visited it for some weeks, and the website will greet me with &amp;quot;Hello, Eli&amp;quot;.&lt;/p&gt;
+&lt;p&gt;The above is a necessarily simplified explanation of cookies - I have no intention of repeating the contents of the RFC here. There are a lot of details I've left out like expiration time, filtering of cookies by paths, various size and amount limits the user agents (web browsers, etc.) are forced to abide, and so on. However, it's a sufficient amount of details for the needs of this article, so let's see some code.&lt;/p&gt;
+&lt;div class="section" id="setting-cookies-in-python-without-django"&gt;
+&lt;h3&gt;Setting cookies in Python, without Django&lt;/h3&gt;
+&lt;p&gt;The following demonstrates how to set cookies in from a Python server-side application without using Django. For simplicity, I'll just use the web server built-in into the Python standard library:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;from&lt;/span&gt; &lt;span style="color: #00007f"&gt;BaseHTTPServer&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; HTTPServer
+&lt;span style="color: #00007f; font-weight: bold"&gt;from&lt;/span&gt; &lt;span style="color: #00007f"&gt;SimpleHTTPServer&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; SimpleHTTPRequestHandler
+&lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; &lt;span style="color: #00007f"&gt;Cookie&lt;/span&gt;
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;class&lt;/span&gt; &lt;span style="color: #00007f"&gt;MyRequestHandler&lt;/span&gt;(SimpleHTTPRequestHandler):
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;do_GET&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;):
+        content = &lt;span style="color: #7f007f"&gt;&amp;quot;&amp;lt;html&amp;gt;&amp;lt;body&amp;gt;Path is: %s&amp;lt;/body&amp;gt;&amp;lt;/html&amp;gt;&amp;quot;&lt;/span&gt; % &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.path
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.send_response(&lt;span style="color: #007f7f"&gt;200&lt;/span&gt;)
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.send_header(&lt;span style="color: #7f007f"&gt;&amp;#39;Content-type&amp;#39;&lt;/span&gt;, &lt;span style="color: #7f007f"&gt;&amp;#39;text/html&amp;#39;&lt;/span&gt;)
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.send_header(&lt;span style="color: #7f007f"&gt;&amp;#39;Content-length&amp;#39;&lt;/span&gt;, &lt;span style="color: #00007f"&gt;str&lt;/span&gt;(&lt;span style="color: #00007f"&gt;len&lt;/span&gt;(content)))
+
+        cookie = Cookie.SimpleCookie()
+        cookie[&lt;span style="color: #7f007f"&gt;&amp;#39;id&amp;#39;&lt;/span&gt;] = &lt;span style="color: #7f007f"&gt;&amp;#39;some_value_42&amp;#39;&lt;/span&gt;
+
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.wfile.write(cookie.output())
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.wfile.write(&lt;span style="color: #7f007f"&gt;&amp;#39;\r\n&amp;#39;&lt;/span&gt;)
+
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.end_headers()
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.wfile.write(content)
+
+server = HTTPServer((&lt;span style="color: #7f007f"&gt;&amp;#39;&amp;#39;&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;59900&lt;/span&gt;), MyRequestHandler)
+server.serve_forever()
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;This is a very simple application that just shows the path that the client requested. The more interesting thing happens below the covers - the application also sets a cookie. If we examine the HTTP response sent by this application to a client that connected to it, we'll see this among the headers:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;Set-Cookie: id=some_value_42
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;In a similar manner, the &lt;cite&gt;Cookie&lt;/cite&gt; module allows the server to parse cookies returned by the client in &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;Cookie&lt;/span&gt;&lt;/tt&gt; headers, using the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;load&lt;/span&gt;&lt;/tt&gt; method.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="setting-and-reading-cookies-with-django"&gt;
+&lt;h3&gt;Setting and reading cookies with Django&lt;/h3&gt;
+&lt;p&gt;Django makes setting and reading cookies almost trivial. Here's a simple view that checks whether the client set the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;id&lt;/span&gt;&lt;/tt&gt; cookie in its request, and if it hadn't, sends the cookie to the client (so that the client will have it for the next request):&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;test_cookie&lt;/span&gt;(request):
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; &lt;span style="color: #7f007f"&gt;&amp;#39;id&amp;#39;&lt;/span&gt; &lt;span style="color: #0000aa"&gt;in&lt;/span&gt; request.COOKIES:
+        cookie_id = request.COOKIES[&lt;span style="color: #7f007f"&gt;&amp;#39;id&amp;#39;&lt;/span&gt;]
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; HttpResponse(&lt;span style="color: #7f007f"&gt;&amp;#39;Got cookie with id=%s&amp;#39;&lt;/span&gt; % cookie_id)
+    &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt;:
+        resp = HttpResponse(&lt;span style="color: #7f007f"&gt;&amp;#39;No id cookie! Sending cookie to client&amp;#39;&lt;/span&gt;)
+        resp.set_cookie(&lt;span style="color: #7f007f"&gt;&amp;#39;id&amp;#39;&lt;/span&gt;, &lt;span style="color: #7f007f"&gt;&amp;#39;some_value_99&amp;#39;&lt;/span&gt;)
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; resp
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;As you can see, cookies are taken from the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;COOKIES&lt;/span&gt;&lt;/tt&gt; dict-like attribute of Django's &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;HttpRequest&lt;/span&gt;&lt;/tt&gt;, and set by calling the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;set_cookie&lt;/span&gt;&lt;/tt&gt; method of &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;HttpResponse&lt;/span&gt;&lt;/tt&gt;. Couldn't be any simpler. What we're really here for is to understand how these things work under the hood of Django, so let's dive in.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="how-cookies-are-implemented-in-django"&gt;
+&lt;h3&gt;How cookies are implemented in Django&lt;/h3&gt;
+&lt;p&gt;The recommended way to deploy Django applications is with WSGI, so I'll focus on the WSGI backend implemented in Django. This is a good place to mention that at the time of this writing, I'm looking into the source code of Django 1.3, which is installed in &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;site-packages/django&lt;/span&gt;&lt;/tt&gt; in the usual installation structure of Python.&lt;/p&gt;
+&lt;p&gt;Looking at Django's &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;WSGIRequest&lt;/span&gt;&lt;/tt&gt; class (which inherits from &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;http.Request&lt;/span&gt;&lt;/tt&gt;) we can see that &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;COOKIES&lt;/span&gt;&lt;/tt&gt; is a &lt;em&gt;property&lt;/em&gt; that hides a dict attribute named &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;self._cookies&lt;/span&gt;&lt;/tt&gt; behind a getter/setter pair. The dict is initialized in &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;_get_cookies&lt;/span&gt;&lt;/tt&gt;:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;_get_cookies&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;):
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; &lt;span style="color: #0000aa"&gt;not&lt;/span&gt; &lt;span style="color: #00007f"&gt;hasattr&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;, &lt;span style="color: #7f007f"&gt;&amp;#39;_cookies&amp;#39;&lt;/span&gt;):
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;._cookies = http.parse_cookie(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;.environ.get(&lt;span style="color: #7f007f"&gt;&amp;#39;HTTP_COOKIE&amp;#39;&lt;/span&gt;, &lt;span style="color: #7f007f"&gt;&amp;#39;&amp;#39;&lt;/span&gt;))
+    &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f"&gt;self&lt;/span&gt;._cookies
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;This appears to be a lazy initialization that should aid performance - if the view doesn't want to look into the cookies of a request, there's no need to parse them. Cookies are taken from the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;HTTP_COOKIE&lt;/span&gt;&lt;/tt&gt; entry of the request's environment object, per the &lt;a class="reference external" href="http://www.python.org/dev/peps/pep-3333/"&gt;WSGI specification&lt;/a&gt;. What about &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;http.parse_cookie&lt;/span&gt;&lt;/tt&gt;? This is a utility method in Django's HTTP module:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;parse_cookie&lt;/span&gt;(cookie):
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; cookie == &lt;span style="color: #7f007f"&gt;&amp;#39;&amp;#39;&lt;/span&gt;:
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; {}
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; &lt;span style="color: #0000aa"&gt;not&lt;/span&gt; &lt;span style="color: #00007f"&gt;isinstance&lt;/span&gt;(cookie, Cookie.BaseCookie):
+        &lt;span style="color: #00007f; font-weight: bold"&gt;try&lt;/span&gt;:
+            c = SimpleCookie()
+            c.load(cookie, ignore_parse_errors=&lt;span style="color: #00007f"&gt;True&lt;/span&gt;)
+        &lt;span style="color: #00007f; font-weight: bold"&gt;except&lt;/span&gt; Cookie.CookieError:
+            &lt;span style="color: #007f00"&gt;# Invalid cookie&lt;/span&gt;
+            &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; {}
+    &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt;:
+        c = cookie
+    cookiedict = {}
+    &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; key &lt;span style="color: #0000aa"&gt;in&lt;/span&gt; c.keys():
+        cookiedict[key] = c.get(key).value
+    &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; cookiedict
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;As you can see, it uses the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;Cookie&lt;/span&gt;&lt;/tt&gt; module from the standard library to parse the cookie with the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;load&lt;/span&gt;&lt;/tt&gt; method, similarly to what I mentioned above for the non-Django code.&lt;/p&gt;
+&lt;p&gt;Setting cookies on a response is done with the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;set_cookie&lt;/span&gt;&lt;/tt&gt; method of &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;HttpResponse&lt;/span&gt;&lt;/tt&gt;. This method simply writes down the new cookie in its &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;self.cookies&lt;/span&gt;&lt;/tt&gt; attribute. &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;WSGIHandler&lt;/span&gt;&lt;/tt&gt; then adds the cookies to its response headers when sending the response.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="wrapping-up"&gt;
+&lt;h3&gt;Wrapping up&lt;/h3&gt;
+&lt;p&gt;As you can see, cookies are relatively easy to handle in Python, and in particular with Django. That said, when writing a Django application it's rare to be needing cookies directly, because cookies are a fairly low-level building block. Django's higher level session framework is much easier to use and is the recommended way to implement persistent state in applications. The next part of the article will examine how to use Django sessions and how they work under the hood.&lt;/p&gt;
+&lt;/div&gt;
+
+    </content><category term="misc"></category><category term="Django"></category></entry><entry><title>How Django sessions work - introduction</title><link href="https://eli.thegreenplace.net/2011/06/24/how-django-sessions-work-introduction" rel="alternate"></link><published>2011-06-24T12:50:50-07:00</published><updated>2023-02-04T13:41:52-08:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2011-06-24:/2011/06/24/how-django-sessions-work-introduction</id><summary type="html">
+        &lt;p&gt;While working on a private web application earlier this week, I ran into Django's session support for the first time. Like many other aspects of web app development, Django can make dealing with sessions very easy, although sessions are a complex topic - adding state on top of the stateless HTTP …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;While working on a private web application earlier this week, I ran into Django's session support for the first time. Like many other aspects of web app development, Django can make dealing with sessions very easy, although sessions are a complex topic - adding state on top of the stateless HTTP protocol isn't trivial.&lt;/p&gt;
+&lt;p&gt;As happens sometimes, my curiosity was triggered and I decided to understand how Django achieves this &amp;quot;magic&amp;quot; - seamlessly implementing sessions while facing the user with a very simple-to-use API, hiding the complexity underneath. And reusing my well-chewed maxim - the best way to learn is to teach. Hence, this series of articles.&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;&lt;a class="reference external" href="https://eli.thegreenplace.net/2011/06/24/django-sessions-part-i-cookies/"&gt;Part I: Cookies&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="reference external" href="https://eli.thegreenplace.net/2011/06/29/django-sessions-part-ii-how-sessions-work/"&gt;Part II: How sessions work&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="reference external" href="https://eli.thegreenplace.net/2011/07/17/django-sessions-part-iii-user-authentication/"&gt;Part III: Users and Authentication&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+    </content><category term="misc"></category><category term="Django"></category></entry><entry><title>A simple canvas-based Javascript game, with a Django back-end</title><link href="https://eli.thegreenplace.net/2010/02/24/a-simple-canvas-based-javascript-game-with-a-django-back-end" rel="alternate"></link><published>2010-02-24T19:17:37-08:00</published><updated>2023-02-04T13:41:52-08:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2010-02-24:/2010/02/24/a-simple-canvas-based-javascript-game-with-a-django-back-end</id><summary type="html">
+        &lt;p&gt;A &lt;a class="reference external" href="https://eli.thegreenplace.net/2003/05/30/perlines/"&gt;few years
+        ago&lt;/a&gt; I've released a clone of the &amp;quot;Colorful lines&amp;quot; game
+      (called &lt;em&gt;GLines&lt;/em&gt; on Gnome), named Perlines. It still works quite
+      well.&lt;/p&gt;
+&lt;p&gt;In the past couple of weeks I've implemented a web-based version the game, using Javascript and the HTML5 canvas element for the game itself, and a …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;A &lt;a class="reference external" href="https://eli.thegreenplace.net/2003/05/30/perlines/"&gt;few years
+        ago&lt;/a&gt; I've released a clone of the &amp;quot;Colorful lines&amp;quot; game
+      (called &lt;em&gt;GLines&lt;/em&gt; on Gnome), named Perlines. It still works quite
+      well.&lt;/p&gt;
+&lt;p&gt;In the past couple of weeks I've implemented a web-based version the game, using Javascript and the HTML5 canvas element for the game itself, and a Django back-end server for storing high-scores in a centralized manner.&lt;/p&gt;
+&lt;p&gt;Here's a screenshot:&lt;/p&gt;
+&lt;div align="center" class="align-center"&gt;
+&lt;img src="https://eli.thegreenplace.net/images/2010/02/linesshot.png" /&gt;
+&lt;/div&gt;
+&lt;p&gt;Some observations on the development of the game:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;It's really the first time I've written a large amount of Javascript code. It was an interesting experience about which I have mixed feelings - so I think it deserves a separate post.&lt;/li&gt;
+&lt;li&gt;The HTML5 canvas element is really nice and works just like any other canvas / graphical device context in a GUI framework. It has nice performance and an intuitive API.&lt;/li&gt;
+&lt;li&gt;It's also the first time I've actually done any serious AJAX. It turned out to be pretty straightforward on the client, with the generous help of jQuery. On the server side it's even simpler.&lt;/li&gt;
+&lt;li&gt;I was surprised how easy it is to craft a simple DB-backed server for storing the high-scores using Django. It was probably the most effortless part of the project - Django really does make server development in Python ridiculously simple.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;I will play with it myself for a few more days and then release all its source code to the public domain. Naturally, the client-side code is accessible even now by viewing the source of the page in your browser.&lt;/p&gt;
+&lt;p&gt;P.S. There seems to be at least &lt;a class="reference external" href="http://www.mclean.net.nz/jslines/index.html"&gt;one other&lt;/a&gt; Javascript clone of the lines game online, but it doesn't use &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;canvas&lt;/span&gt;&lt;/tt&gt; and doesn't have a global high-scores table.&lt;/p&gt;
+
+    </content><category term="misc"></category><category term="Django"></category><category term="Games"></category><category term="Javascript"></category></entry><entry><title>Porting from Turbogears to Django - a personal experience</title><link href="https://eli.thegreenplace.net/2009/10/11/porting-from-turbogears-to-django-a-personal-experience" rel="alternate"></link><published>2009-10-11T05:52:27-07:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2009-10-11:/2009/10/11/porting-from-turbogears-to-django-a-personal-experience</id><summary type="html">
+        &lt;div class="section" id="introduction"&gt;
+&lt;h3&gt;Introduction&lt;/h3&gt;
+&lt;p&gt;About a year ago, I taught myself Turbogears (version 1.0.7 at the time) in order to write a small personal web-application for my own use. Although I have very little web development experience, Turbogears was easy to use, and its power was apparent.&lt;/p&gt;
+&lt;p&gt;Recently I've decided to …&lt;/p&gt;&lt;/div&gt;</summary><content type="html">
+        &lt;div class="section" id="introduction"&gt;
+&lt;h3&gt;Introduction&lt;/h3&gt;
+&lt;p&gt;About a year ago, I taught myself Turbogears (version 1.0.7 at the time) in order to write a small personal web-application for my own use. Although I have very little web development experience, Turbogears was easy to use, and its power was apparent.&lt;/p&gt;
+&lt;p&gt;Recently I've decided to make some improvements to my application. However, in the meantime TG moved on to version 2.0, and because of the many changes it came with, I had two options. Either stick to the old TG version or learn what it takes to use 2.0. Since this is mostly a learning experience, it was a shame to just use an old version. On the other hand, if I need to learn a new approach (for 2.0) anyway, I could learn another framework, while I'm at it.&lt;/p&gt;
+&lt;p&gt;This is how I got to Django. I made up my mind to rewrite the application from scratch, and to learn the other large Python framework in the process. This post summarizes some of my (highly subjective!) thoughts about it, and how I see the differences between TG and Django.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="components"&gt;
+&lt;h3&gt;Components&lt;/h3&gt;
+&lt;p&gt;A big difference between TG and Django is in their basic architecture and philosophy. Django is a monolithic framework with an ORM of their own, a templating engine of their own, and so on. TG ties together several independent packages to do everything.&lt;/p&gt;
+&lt;p&gt;When I first started checking out the frameworks last year, this is what decided in favor of TG for me. I figured that tying together several well-known and tested packages is a better approach. If I'll have to do something other than a web app in the future, I'll be able to just reuse this knowledge and, say, use SQLObject (TG's ORM in version 1.0.7) for other things. The same with the templating engine and so on. Django just looked like everything depends on everything else.&lt;/p&gt;
+&lt;p&gt;On the other hand, consider this. TG 1.0.7 had SQLObject for the ORM, Kid for the templating and Cherrypy for the controller (HTTP event handler). TG 2, on the other hand, has SQLAlchemy for the ORM, Genshi for the templating and Pylons for the controller. Now, this isn't exactly persistent, and investing in becoming an expert in SQLObject wouldn't really pay off, would it?&lt;/p&gt;
+&lt;p&gt;Django, being monolithic, has stayed much more consistent during its evolution. Of course if you really want, you &lt;em&gt;can&lt;/em&gt; use other components with Django - so if you really dig SQLAlchemy you can replace Django's ORM with it. It takes work, but it's possible. You can also use Django's components outside of Django, if you really want to. It's less natural than with TG though.&lt;/p&gt;
+&lt;p&gt;That said, I have a feeling that Django can be a bit too inflexible when you need to really customize it. It gives you less freedom than TG to against its &amp;quot;way&amp;quot;.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="documentation"&gt;
+&lt;h3&gt;Documentation&lt;/h3&gt;
+&lt;p&gt;TG has nice documentation, but Django is simply in a league of its own - not only against TG, but against most Python libraries and frameworks. Besides the excellent online docs, you also have a &lt;a class="reference external" href="http://www.djangobook.com/"&gt;complete book&lt;/a&gt; for free online. Since it's the most popular Python web framework around, there's also a lot of unofficial documentation and tutorials floating around the web.&lt;/p&gt;
+&lt;p&gt;To use TG you should really go through the docs of its components, so you have to look in many places. For Django, it's all in a single place, logically linked together.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="installation"&gt;
+&lt;h3&gt;Installation&lt;/h3&gt;
+&lt;p&gt;Django took much less time to deploy on my Bluehost account. The installation took a couple of minutes and was very well documented. TG was more trouble - it took a couple of hours to make everything work. I suspect that this is, again, because TG consists of several components that should all be configured to work just right together.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="miscellanea"&gt;
+&lt;h3&gt;Miscellanea&lt;/h3&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;I really like Django's &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;urls.py&lt;/span&gt;&lt;/tt&gt; approach: your URLs are in a separate file from your controller functions. This has several benefits: (1) Things are more decoupled, which is always good - it helps reusability and maintainability. (2) The &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;urls.py&lt;/span&gt;&lt;/tt&gt; is a good &amp;quot;table of contents&amp;quot; for your website - it makes it simpler to find out quickly what is where (I'm talking about the developer, of course, not the user).&lt;/li&gt;
+&lt;li&gt;Django has a nice automatic admin, which I don't recall in TG.&lt;/li&gt;
+&lt;li&gt;I like Django's template language much more than Kid. It has all the required features, is easily extensible through Python code and most importantly, isn't XML based like Kid. Template languages are supposed to be aimed at designers and content editors - not programmers. Thus, using XML for them kinda beats the cause.&lt;/li&gt;
+&lt;li&gt;Django's way is to have several &lt;em&gt;applications&lt;/em&gt; in a single &lt;em&gt;project&lt;/em&gt;. This isn't natural for small applications - and in TG you don't have to do it.&lt;/li&gt;
+&lt;li&gt;Django's settings file is pure Python, which is far better than TG's INI file approach (in version 1.0.7 - maybe it's been changed already).&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/div&gt;
+&lt;div class="section" id="conclusion"&gt;
+&lt;h3&gt;Conclusion&lt;/h3&gt;
+&lt;p&gt;Both frameworks are very good, in my opinion. Working with Python is a pleasure (especially after you've tried to tweak your Wordpress by writing some f****** PHP code which made your eyes bleed), and the frameworks make web app development a snap.&lt;/p&gt;
+&lt;p&gt;But there's always a favorite, right? And my favorite is Django. I just liked it better - the documentation, the internal consistency, etc. I think that for me, a developer of small and simple web apps, Django is the best choice - it lets you get to where you need to go with the least effort. Maybe TG is better for the larger applications, maybe not, I can't be really sure.&lt;/p&gt;
+&lt;/div&gt;
+
+    </content><category term="misc"></category><category term="Django"></category><category term="Internet"></category></entry></feed>

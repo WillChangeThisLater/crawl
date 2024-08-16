@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Django sessions - part I: Cookies - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../../index.html" class="navbar-brand">
+                <img src="../../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="../django-sessions-part-i-cookies.html"
+                       rel="bookmark"
+                       title="Permalink to Django sessions - part I: Cookies">
+                        Django sessions - part I: Cookies
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> June 24, 2011 at 12:54</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../../tag/django.html">Django</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>HTTP is a stateless protocol - the server is not required to retain information or status about each user for the duration of multiple requests.</p>
+<p>For smart web applications, however, this isn't good enough. You want to login into an application and have it remember you across requests. A good example is maintaining a &quot;shopping cart&quot; at some merchandise website, which you gradually fill as you browse through the products that interest you.</p>
+<div align="center" class="align-center"><img class="align-center" src="../../../../images/2011/06/cookie-small.gif" /></div>
+<p>To solve this problem, <a class="reference external" href="http://en.wikipedia.org/wiki/Http_cookie">HTTP cookies</a> were invented by Netscape back in the 1990s. Cookies are formally defined in <a class="reference external" href="http://tools.ietf.org/html/rfc2965">RFC2965</a>, but to spare you all that jabber, cookies can be described very simply.</p>
+<p>A cookie is just an arbitrary string sent by the server to the client as part of the HTTP response. The client will then return this cookie back to the server in subsequent requests. The information stored in the cookie is <em>opaque</em> to the client - it's only for the server's own use. This scheme allows the client to identify itself back to the server with some state the server has assigned it. Here's a more detailed flow of events:</p>
+<ol class="arabic simple">
+<li>The client connects to the server for the first time, and sends a normal HTTP request (say, a simple <tt class="docutils literal"><span class="pre">GET</span></tt> for the main page).</li>
+<li>The server wants to track the client's state and in its HTTP response (which contains the page contents) attaches a <tt class="docutils literal"><span class="pre">Set-Cookie</span></tt> header. This header's information is a set of <em>key, value</em> pairs, where both keys and values are strings that make sense for the server, but for the client are a black box.</li>
+<li>In subsequent requests the client makes to the server, it adds a <tt class="docutils literal"><span class="pre">Cookie</span></tt> header in the HTTP requests it sends, with the cookie information the server specified in previous responses.</li>
+</ol>
+<p>Implementation-wise, the client stores the latest cookie received from various servers (which are easily identifiable by their URLs). Even if the next time the client accesses the server is a few days after the previous request, it will still send this information (assuming the cookie hasn't expired), and the server will be able to identify it. This is why I can point my browser to Amazon today, not having visited it for some weeks, and the website will greet me with &quot;Hello, Eli&quot;.</p>
+<p>The above is a necessarily simplified explanation of cookies - I have no intention of repeating the contents of the RFC here. There are a lot of details I've left out like expiration time, filtering of cookies by paths, various size and amount limits the user agents (web browsers, etc.) are forced to abide, and so on. However, it's a sufficient amount of details for the needs of this article, so let's see some code.</p>
+<div class="section" id="setting-cookies-in-python-without-django">
+<h3>Setting cookies in Python, without Django</h3>
+<p>The following demonstrates how to set cookies in from a Python server-side application without using Django. For simplicity, I'll just use the web server built-in into the Python standard library:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">from</span> <span style="color: #00007f">BaseHTTPServer</span> <span style="color: #00007f; font-weight: bold">import</span> HTTPServer
+<span style="color: #00007f; font-weight: bold">from</span> <span style="color: #00007f">SimpleHTTPServer</span> <span style="color: #00007f; font-weight: bold">import</span> SimpleHTTPRequestHandler
+<span style="color: #00007f; font-weight: bold">import</span> <span style="color: #00007f">Cookie</span>
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">MyRequestHandler</span>(SimpleHTTPRequestHandler):
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">do_GET</span>(<span style="color: #00007f">self</span>):
+        content = <span style="color: #7f007f">&quot;&lt;html&gt;&lt;body&gt;Path is: %s&lt;/body&gt;&lt;/html&gt;&quot;</span> % <span style="color: #00007f">self</span>.path
+        <span style="color: #00007f">self</span>.send_response(<span style="color: #007f7f">200</span>)
+        <span style="color: #00007f">self</span>.send_header(<span style="color: #7f007f">&#39;Content-type&#39;</span>, <span style="color: #7f007f">&#39;text/html&#39;</span>)
+        <span style="color: #00007f">self</span>.send_header(<span style="color: #7f007f">&#39;Content-length&#39;</span>, <span style="color: #00007f">str</span>(<span style="color: #00007f">len</span>(content)))
+
+        cookie = Cookie.SimpleCookie()
+        cookie[<span style="color: #7f007f">&#39;id&#39;</span>] = <span style="color: #7f007f">&#39;some_value_42&#39;</span>
+
+        <span style="color: #00007f">self</span>.wfile.write(cookie.output())
+        <span style="color: #00007f">self</span>.wfile.write(<span style="color: #7f007f">&#39;\r\n&#39;</span>)
+
+        <span style="color: #00007f">self</span>.end_headers()
+        <span style="color: #00007f">self</span>.wfile.write(content)
+
+server = HTTPServer((<span style="color: #7f007f">&#39;&#39;</span>, <span style="color: #007f7f">59900</span>), MyRequestHandler)
+server.serve_forever()
+</pre></div>
+<p>This is a very simple application that just shows the path that the client requested. The more interesting thing happens below the covers - the application also sets a cookie. If we examine the HTTP response sent by this application to a client that connected to it, we'll see this among the headers:</p>
+<div class="highlight"><pre>Set-Cookie: id=some_value_42
+</pre></div>
+<p>In a similar manner, the <cite>Cookie</cite> module allows the server to parse cookies returned by the client in <tt class="docutils literal"><span class="pre">Cookie</span></tt> headers, using the <tt class="docutils literal"><span class="pre">load</span></tt> method.</p>
+</div>
+<div class="section" id="setting-and-reading-cookies-with-django">
+<h3>Setting and reading cookies with Django</h3>
+<p>Django makes setting and reading cookies almost trivial. Here's a simple view that checks whether the client set the <tt class="docutils literal"><span class="pre">id</span></tt> cookie in its request, and if it hadn't, sends the cookie to the client (so that the client will have it for the next request):</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">test_cookie</span>(request):
+    <span style="color: #00007f; font-weight: bold">if</span> <span style="color: #7f007f">&#39;id&#39;</span> <span style="color: #0000aa">in</span> request.COOKIES:
+        cookie_id = request.COOKIES[<span style="color: #7f007f">&#39;id&#39;</span>]
+        <span style="color: #00007f; font-weight: bold">return</span> HttpResponse(<span style="color: #7f007f">&#39;Got cookie with id=%s&#39;</span> % cookie_id)
+    <span style="color: #00007f; font-weight: bold">else</span>:
+        resp = HttpResponse(<span style="color: #7f007f">&#39;No id cookie! Sending cookie to client&#39;</span>)
+        resp.set_cookie(<span style="color: #7f007f">&#39;id&#39;</span>, <span style="color: #7f007f">&#39;some_value_99&#39;</span>)
+        <span style="color: #00007f; font-weight: bold">return</span> resp
+</pre></div>
+<p>As you can see, cookies are taken from the <tt class="docutils literal"><span class="pre">COOKIES</span></tt> dict-like attribute of Django's <tt class="docutils literal"><span class="pre">HttpRequest</span></tt>, and set by calling the <tt class="docutils literal"><span class="pre">set_cookie</span></tt> method of <tt class="docutils literal"><span class="pre">HttpResponse</span></tt>. Couldn't be any simpler. What we're really here for is to understand how these things work under the hood of Django, so let's dive in.</p>
+</div>
+<div class="section" id="how-cookies-are-implemented-in-django">
+<h3>How cookies are implemented in Django</h3>
+<p>The recommended way to deploy Django applications is with WSGI, so I'll focus on the WSGI backend implemented in Django. This is a good place to mention that at the time of this writing, I'm looking into the source code of Django 1.3, which is installed in <tt class="docutils literal"><span class="pre">site-packages/django</span></tt> in the usual installation structure of Python.</p>
+<p>Looking at Django's <tt class="docutils literal"><span class="pre">WSGIRequest</span></tt> class (which inherits from <tt class="docutils literal"><span class="pre">http.Request</span></tt>) we can see that <tt class="docutils literal"><span class="pre">COOKIES</span></tt> is a <em>property</em> that hides a dict attribute named <tt class="docutils literal"><span class="pre">self._cookies</span></tt> behind a getter/setter pair. The dict is initialized in <tt class="docutils literal"><span class="pre">_get_cookies</span></tt>:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">_get_cookies</span>(<span style="color: #00007f">self</span>):
+    <span style="color: #00007f; font-weight: bold">if</span> <span style="color: #0000aa">not</span> <span style="color: #00007f">hasattr</span>(<span style="color: #00007f">self</span>, <span style="color: #7f007f">&#39;_cookies&#39;</span>):
+        <span style="color: #00007f">self</span>._cookies = http.parse_cookie(<span style="color: #00007f">self</span>.environ.get(<span style="color: #7f007f">&#39;HTTP_COOKIE&#39;</span>, <span style="color: #7f007f">&#39;&#39;</span>))
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">self</span>._cookies
+</pre></div>
+<p>This appears to be a lazy initialization that should aid performance - if the view doesn't want to look into the cookies of a request, there's no need to parse them. Cookies are taken from the <tt class="docutils literal"><span class="pre">HTTP_COOKIE</span></tt> entry of the request's environment object, per the <a class="reference external" href="http://www.python.org/dev/peps/pep-3333/">WSGI specification</a>. What about <tt class="docutils literal"><span class="pre">http.parse_cookie</span></tt>? This is a utility method in Django's HTTP module:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">parse_cookie</span>(cookie):
+    <span style="color: #00007f; font-weight: bold">if</span> cookie == <span style="color: #7f007f">&#39;&#39;</span>:
+        <span style="color: #00007f; font-weight: bold">return</span> {}
+    <span style="color: #00007f; font-weight: bold">if</span> <span style="color: #0000aa">not</span> <span style="color: #00007f">isinstance</span>(cookie, Cookie.BaseCookie):
+        <span style="color: #00007f; font-weight: bold">try</span>:
+            c = SimpleCookie()
+            c.load(cookie, ignore_parse_errors=<span style="color: #00007f">True</span>)
+        <span style="color: #00007f; font-weight: bold">except</span> Cookie.CookieError:
+            <span style="color: #007f00"># Invalid cookie</span>
+            <span style="color: #00007f; font-weight: bold">return</span> {}
+    <span style="color: #00007f; font-weight: bold">else</span>:
+        c = cookie
+    cookiedict = {}
+    <span style="color: #00007f; font-weight: bold">for</span> key <span style="color: #0000aa">in</span> c.keys():
+        cookiedict[key] = c.get(key).value
+    <span style="color: #00007f; font-weight: bold">return</span> cookiedict
+</pre></div>
+<p>As you can see, it uses the <tt class="docutils literal"><span class="pre">Cookie</span></tt> module from the standard library to parse the cookie with the <tt class="docutils literal"><span class="pre">load</span></tt> method, similarly to what I mentioned above for the non-Django code.</p>
+<p>Setting cookies on a response is done with the <tt class="docutils literal"><span class="pre">set_cookie</span></tt> method of <tt class="docutils literal"><span class="pre">HttpResponse</span></tt>. This method simply writes down the new cookie in its <tt class="docutils literal"><span class="pre">self.cookies</span></tt> attribute. <tt class="docutils literal"><span class="pre">WSGIHandler</span></tt> then adds the cookies to its response headers when sending the response.</p>
+</div>
+<div class="section" id="wrapping-up">
+<h3>Wrapping up</h3>
+<p>As you can see, cookies are relatively easy to handle in Python, and in particular with Django. That said, when writing a Django application it's rare to be needing cookies directly, because cookies are a fairly low-level building block. Django's higher level session framework is much easier to use and is the recommended way to implement persistent state in applications. The next part of the article will examine how to use Django sessions and how they work under the hood.</p>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../../theme/js/count.js"></script>
+</body>
+</html>

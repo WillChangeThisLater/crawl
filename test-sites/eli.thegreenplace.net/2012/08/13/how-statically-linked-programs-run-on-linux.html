@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>How statically linked programs run on Linux - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="how-statically-linked-programs-run-on-linux.html"
+                       rel="bookmark"
+                       title="Permalink to How statically linked programs run on Linux">
+                        How statically linked programs run on Linux
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> August 13, 2012 at 04:44</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/assembly.html">Assembly</a>
+        ,
+    <a href="../../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../../tag/linkers-and-loaders.html">Linkers and loaders</a>
+        ,
+    <a href="../../../tag/linux.html">Linux</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>In this article I want to explore what happens when a statically linked program gets executed on Linux. By <em>statically linked</em> I mean a program that does not require any shared objects to run, even the ubiquitous <tt class="docutils literal">libc</tt>. In reality, most programs one encounters on Linux aren't statically linked, and do require one or more shared objects to run. However, the running sequence of such programs is more involved, which is why I want to present statically linked programs first. It will serve as a good basis for understanding, allowing me to explore most of the mechanisms involved with less details getting in the way. In a future article I will cover the dynamic linking process in detail.</p>
+<div class="section" id="the-linux-kernel">
+<h3>The Linux kernel</h3>
+<p>Program execution begins in the <a class="reference external" href="http://www.kernel.org/">Linux kernel</a>. To run a program, a process will call a function from the <tt class="docutils literal">exec</tt> <a class="reference external" href="http://en.wikipedia.org/wiki/Execve">family</a>. The functions in this family are all very similar, differing only in small details regarding the manner of passing arguments and environment variables to the invoked program. What they all end up doing is issuing the <tt class="docutils literal">sys_execve</tt> <a class="reference external" href="http://en.wikipedia.org/wiki/System_call">system call</a> to the Linux kernel.</p>
+<p><tt class="docutils literal">sys_execve</tt> does a lot of work to prepare the new program for execution. Explaining it all is far beyond the scope of this article - a good book on  kernel internals can be helpful to understand the details <a class="footnote-reference" href="how-statically-linked-programs-run-on-linux.html#id5" id="id1">[1]</a>. I'll just focus on the stuff useful for our current discussion.</p>
+<p>As part of its job, the kernel must read the program's executable file from disk into memory and prepare it for execution. The kernel knows how to handle a lot of binary file formats, and tries to open the file with different handlers until it succeeds (this happens in the function <tt class="docutils literal">search_binary_handler</tt> in <tt class="docutils literal">fs/exec.c</tt>). We're only interested in ELF here, however; for this format the action happens in function <tt class="docutils literal">load_elf_binary</tt> (in <tt class="docutils literal">fs/binfmt_elf.c</tt>).</p>
+<p>The kernel reads the ELF header of the program, and looks for a <tt class="docutils literal">PT_INTERP</tt> segment to see if an interpreter was specified. Here the statically linked vs. dynamically linked distinction kicks in. For statically linked programs, there is no <tt class="docutils literal">PT_INTERP</tt> segment. This is the scenario this article covers.</p>
+<p>The kernel then goes on mapping the program's segments into memory, according to the information contained in the ELF program headers. Finally, it passes the execution, by directly modifying the IP register, to the entry address read from the ELF header of the program (<tt class="docutils literal">e_entry</tt>). Arguments are passed to the program on the stack (the code responsible for this is in <tt class="docutils literal">create_elf_tables</tt>). Here's the stack layout when the program is called, for x64:</p>
+<img class="align-center" src="../../../images/2012/08/stack_for_start.png" />
+<p>At the <a class="reference external" href="../../../2011/02/04/where-the-top-of-the-stack-is-on-x86/index.html">top of the stack</a> is <tt class="docutils literal">argc</tt>, the amount of command-line arguments. It is followed by all the arguments themselves (each a <tt class="docutils literal">char*</tt>), terminated by a zero pointer. Then, the environment variables are listed (also a <tt class="docutils literal">char*</tt> each), terminated by a zero pointer. The observant reader will notice that this argument layout is not what one usually expects in <tt class="docutils literal">main</tt>. This is because <tt class="docutils literal">main</tt> is not really the entry point of the program, as the rest of the article shows.</p>
+</div>
+<div class="section" id="program-entry-point">
+<h3>Program entry point</h3>
+<p>So, the Linux kernel reads the program's entry address from the ELF header. Let's now explore how this address gets there.</p>
+<p>Unless you're doing something very funky, the final program binary image is probably being created by the system linker - <tt class="docutils literal">ld</tt>. By default, <tt class="docutils literal">ld</tt> looks for a special symbol called <tt class="docutils literal">_start</tt> in one of the object files linked into the program, and sets the entry point to the address of that symbol. This will be simplest to demonstrate with an example written in assembly (the following is NASM syntax):</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">section    .text
+    ; The _start symbol must be declared for the linker (ld)
+    global _start
+
+_start:
+    ; Execute sys_exit call. Argument: status -&gt; ebx
+    mov     eax, 1
+    mov     ebx, 42
+    int     0x80
+</pre></div>
+<p>This is a very basic program that simply returns <tt class="docutils literal">42</tt>. Note that it has the <tt class="docutils literal">_start</tt> symbol defined. Let's build it, examine the ELF header and its disassembly:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ nasm -f elf64 nasm_rc.asm -o nasm_rc.o
+$ ld -o nasm_rc64 nasm_rc.o
+$ readelf -h nasm_rc64
+ELF Header:
+  Magic:   7f 45 4c 46 02 01 01 00 00 00 00 00 00 00 00 00
+  Class:                             ELF64
+  ...
+  Entry point address:               0x400080
+  ...
+$ objdump -d nasm_rc64
+
+nasm_rc64:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000000400080 &lt;_start&gt;:
+  400080:     b8 01 00 00 00          mov    $0x1,%eax
+  400085:     bb 2a 00 00 00          mov    $0x2a,%ebx
+  40008a:     cd 80                   int    $0x80
+</pre></div>
+<p>As you can see, the entry point address in the ELF header was set to <tt class="docutils literal">0x400080</tt>, which also happens to be the address of <tt class="docutils literal">_start</tt>.</p>
+<p><tt class="docutils literal">ld</tt> looks for <tt class="docutils literal">_start</tt> by default, but this behavior can be modified by either the <tt class="docutils literal"><span class="pre">--entry</span></tt> command-line flag, or by providing an <tt class="docutils literal">ENTRY</tt> command in a custom <a class="reference external" href="http://sourceware.org/binutils/docs/ld/Scripts.html#Scripts">linker script</a>.</p>
+</div>
+<div class="section" id="the-entry-point-in-c-code">
+<h3>The entry point in C code</h3>
+<p>We're usually not writing our code in assembly, however. For C/C++ the situation is different, because the entry point familiar to users is the <tt class="docutils literal">main</tt> function and not the <tt class="docutils literal">_start</tt> symbol. Now it's time to explain how these two are related.</p>
+<p>Let's start with this simple C program which is functionally equivalent to the assembly shown above:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">main</span>() {
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">42</span>;
+}
+</pre></div>
+<p>I will compile this code into an object file and then attempt to link it with <tt class="docutils literal">ld</tt>, like I did with the assembly:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ gcc -c c_rc.c
+$ ld -o c_rc c_rc.o
+ld: warning: cannot find entry symbol _start; defaulting to 00000000004000b0
+</pre></div>
+<p>Whoops, <tt class="docutils literal">ld</tt> can't find the entry point. It tries to guess using a default, but it won't work - the program will segfault when run. <tt class="docutils literal">ld</tt> obviously needs some additional object files where it will find the entry point. But which object files are these? Luckily, we can use <tt class="docutils literal">gcc</tt> to find out. <tt class="docutils literal">gcc</tt> can act as a full compilation driver, invoking <tt class="docutils literal">ld</tt> as needed. Let's now use <tt class="docutils literal">gcc</tt> to link our object file into a program. Note that the <tt class="docutils literal"><span class="pre">-static</span></tt> flag is passed to force static linking of the C library and the <tt class="docutils literal">gcc</tt> runtime library:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ gcc -o c_rc -static c_rc.o
+$ c_rc; echo $?
+42
+</pre></div>
+<p>It works. So how does <tt class="docutils literal">gcc</tt> manage to do the linking correctly? We can pass the <tt class="docutils literal"><span class="pre">-Wl,-verbose</span></tt> flag to <tt class="docutils literal">gcc</tt> which will spill the list of objects and libraries it passed to the linker. Doing this, we'll see additional object files like <tt class="docutils literal">crt1.o</tt> and the whole <tt class="docutils literal">libc.a</tt> static library (which has objects with telling names like <tt class="docutils literal"><span class="pre">libc-start.o</span></tt>). C code does not live in a vacuum. To run, it requires some support libraries such as the gcc runtime and <tt class="docutils literal">libc</tt>.</p>
+<p>Since it obviously linked and ran correctly, the program we built with <tt class="docutils literal">gcc</tt> should have a <tt class="docutils literal">_start</tt> symbol at the right place. Let's check <a class="footnote-reference" href="how-statically-linked-programs-run-on-linux.html#id6" id="id2">[2]</a>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ readelf -h c_rc
+ELF Header:
+  Magic:   7f 45 4c 46 02 01 01 03 00 00 00 00 00 00 00 00
+  Class:                             ELF64
+  ...
+  Entry point address:               0x4003c0
+  ...
+
+$ objdump -d c_rc | grep -A15 &quot;&lt;_start&quot;
+00000000004003c0 &lt;_start&gt;:
+  4003c0:     31 ed                   xor    %ebp,%ebp
+  4003c2:     49 89 d1                mov    %rdx,%r9
+  4003c5:     5e                      pop    %rsi
+  4003c6:     48 89 e2                mov    %rsp,%rdx
+  4003c9:     48 83 e4 f0             and    $0xfffffffffffffff0,%rsp
+  4003cd:     50                      push   %rax
+  4003ce:     54                      push   %rsp
+  4003cf:     49 c7 c0 20 0f 40 00    mov    $0x400f20,%r8
+  4003d6:     48 c7 c1 90 0e 40 00    mov    $0x400e90,%rcx
+  4003dd:     48 c7 c7 d4 04 40 00    mov    $0x4004d4,%rdi
+  4003e4:     e8 f7 00 00 00          callq  4004e0 &lt;__libc_start_main&gt;
+  4003e9:     f4                      hlt
+  4003ea:     90                      nop
+  4003eb:     90                      nop
+</pre></div>
+<p>Indeed, <tt class="docutils literal">0x4003c0</tt> is the address of <tt class="docutils literal">_start</tt> and it's the program entry point. However, what is all that code at <tt class="docutils literal">_start</tt>? Where does it come from, and what does it mean?</p>
+</div>
+<div class="section" id="decoding-the-start-sequence-of-c-code">
+<h3>Decoding the start sequence of C code</h3>
+<p>The startup code shown above comes from glibc - <a class="reference external" href="http://www.gnu.org/software/libc/">the GNU C library</a>, where for x64 ELF it lives in the file <tt class="docutils literal">sysdeps/x86_64/start.S</tt> <a class="footnote-reference" href="how-statically-linked-programs-run-on-linux.html#id7" id="id3">[3]</a>. Its goal is to prepare the arguments for a function named <tt class="docutils literal">__libc_start_main</tt> and call it. This function is also part of glibc and lives in <tt class="docutils literal"><span class="pre">csu/libc-start.c</span></tt>. Here is its signature, formatted for clarity, with added comments to explain what each argument means:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">int</span> __libc_start_main(
+         <span style="color: #007f00">/* Pointer to the program&#39;s main function */</span>
+         (<span style="color: #00007f; font-weight: bold">int</span> (*main) (<span style="color: #00007f; font-weight: bold">int</span>, <span style="color: #00007f; font-weight: bold">char</span>**, <span style="color: #00007f; font-weight: bold">char</span>**),
+         <span style="color: #007f00">/* argc and argv */</span>
+         <span style="color: #00007f; font-weight: bold">int</span> argc, <span style="color: #00007f; font-weight: bold">char</span> **argv,
+         <span style="color: #007f00">/* Pointers to initialization and finalization functions */</span>
+         __typeof (main) init, <span style="color: #00007f; font-weight: bold">void</span> (*fini) (<span style="color: #00007f; font-weight: bold">void</span>),
+         <span style="color: #007f00">/* Finalization function for the dynamic linker */</span>
+         <span style="color: #00007f; font-weight: bold">void</span> (*rtld_fini) (<span style="color: #00007f; font-weight: bold">void</span>),
+         <span style="color: #007f00">/* End of stack */</span>
+         <span style="color: #00007f; font-weight: bold">void</span>* stack_end)
+</pre></div>
+<p>Anyway, with this signature and the <a class="reference external" href="http://en.wikipedia.org/wiki/X86_calling_conventions#System_V_AMD64_ABI">AMD64 ABI</a> in hand, we can map the arguments passed to <tt class="docutils literal">__libc_start_main</tt> from <tt class="docutils literal">_start</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">main:      rdi &lt;-- $0x4004d4
+argc:      rsi &lt;-- [RSP]
+argv:      rdx &lt;-- [RSP + 0x8]
+init:      rcx &lt;-- $0x400e90
+fini:      r8  &lt;-- $0x400f20
+rdld_fini: r9  &lt;-- rdx on entry
+stack_end: on stack &lt;-- RSP
+</pre></div>
+<p>You'll also notice that the stack is aligned to 16 bytes and some garbage is pushed on top of it (<tt class="docutils literal">rax</tt>) before pushing <tt class="docutils literal">rsp</tt> itself. This is to conform to the AMD64 ABI. Also note the <tt class="docutils literal">hlt</tt> instruction at address <tt class="docutils literal">0x4003e9</tt>. It's a safeguard in case <tt class="docutils literal">__libc_start_main</tt> did not exit (as we'll see, it should). <tt class="docutils literal">hlt</tt> can't be executed in user mode, so this will raise an exception and crash the process.</p>
+<p>Examining the disassembly, it's easy to verify that <tt class="docutils literal">0x4004d4</tt> is indeed <tt class="docutils literal">main</tt>, <tt class="docutils literal">0x400e90</tt> is <tt class="docutils literal">__libc_csu_init</tt> and <tt class="docutils literal">0x400f20</tt> is <tt class="docutils literal">__libc_csu_fini</tt>. There's another argument the kernel passes <tt class="docutils literal">_start</tt> - a finish function for shared libraries to use (in <tt class="docutils literal">rdx</tt>). We'll ignore it in this article.</p>
+</div>
+<div class="section" id="the-c-library-start-function">
+<h3>The C library start function</h3>
+<p>Now that we understood how it's being called, what does <tt class="docutils literal">__libc_start_main</tt> actually <em>do</em>? Ignoring some details that are probably too specialized to be interesting in the scope of this article, here's a list of things that it does for a statically linked program:</p>
+<ol class="arabic simple">
+<li>Figure out where the environment variables are on the stack.</li>
+<li>Prepare the <a class="reference external" href="http://www.gnu.org/software/libc/manual/html_node/Auxiliary-Vector.html">auxiliary vector</a>, if required.</li>
+<li>Initialize thread-specific functionality (pthreads, <a class="reference external" href="http://en.wikipedia.org/wiki/Thread-local_storage">TLS</a>, etc.)</li>
+<li>Perform some security-related bookkeeping (this is not really a separate step, but is trickled all through the function).</li>
+<li>Initialize libc itself.</li>
+<li>Call the program initialization function through the passed pointer (<tt class="docutils literal">init</tt>).</li>
+<li>Register the program finalization function (<tt class="docutils literal">fini</tt>) for execution on exit.</li>
+<li>Call <tt class="docutils literal">main(argc, argv, envp)</tt></li>
+<li>Call <tt class="docutils literal">exit</tt> with the result of <tt class="docutils literal">main</tt> as the exit code.</li>
+</ol>
+</div>
+<div class="section" id="digression-init-and-fini">
+<h3>Digression: init and fini</h3>
+<p>Some programming environments (most notably C++, to construct and destruct static and global objects) require running custom code before and after <tt class="docutils literal">main</tt>. This is implemented by means of cooperation between the compiler/linker and the C library. For example, the <tt class="docutils literal">__libc_csu_init</tt> (which, as you can see above, is called before the user's <tt class="docutils literal">main</tt>) calls into special code that's inserted by the linker. The same goes for <tt class="docutils literal">__libc_csu_fini</tt> and finalization.</p>
+<p>You can also ask the compiler to register your function to be executed as one of the constructors or destructors. For example <a class="footnote-reference" href="how-statically-linked-programs-run-on-linux.html#id8" id="id4">[4]</a>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">#include &lt;stdio.h&gt;</span>
+
+<span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">main</span>() {
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">43</span>;
+}
+
+__attribute__((constructor))
+<span style="color: #00007f; font-weight: bold">void</span> myconstructor() {
+    printf(<span style="color: #7f007f">&quot;myconstructor\n&quot;</span>);
+}
+</pre></div>
+<p><tt class="docutils literal">myconstructor</tt> will run <em>before main</em>. The linker places its address in a special array of constructors located in the <tt class="docutils literal">.ctors</tt> section. <tt class="docutils literal">__libc_csu_init</tt> goes over this array and calls all functions listed in it.</p>
+</div>
+<div class="section" id="conclusion">
+<h3>Conclusion</h3>
+<p>This article demonstrates how a statically linked program is set up to actually run on Linux. In my opinion, this is a very interesting topic to study because it demonstrates how several large components of the Linux eco-system cooperate to enable the program execution process. In this case, the Linux kernel, the compiler and linker, and the C library are involved. In a future article I will present the more complex case of a dynamically linked program, where another agent joins the game - the dynamic linker. Stay tuned.</p>
+<img class="align-center" src="../../../images/hline.jpg" style="width: 320px; height: 5px;" />
+<table class="docutils footnote" frame="void" id="id5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="how-statically-linked-programs-run-on-linux.html#id1">[1]</a></td><td>Or just read the source, if you're brave.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id6" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="how-statically-linked-programs-run-on-linux.html#id2">[2]</a></td><td>Note that due to our static linking of the C runtime into <tt class="docutils literal">c_rc</tt>, it's quite large (800 KB on my 64-bit Ubuntu system). Therefore we can't just easily look at the disassembly and have to use some <tt class="docutils literal">grep</tt>-fu.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id7" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="how-statically-linked-programs-run-on-linux.html#id3">[3]</a></td><td>This is true for glibc 2.16.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id8" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="how-statically-linked-programs-run-on-linux.html#id4">[4]</a></td><td>Note that the constructor executes <tt class="docutils literal">printf</tt>. Is this safe? If you look at the initialization sequence of <tt class="docutils literal">__libc_start_main</tt>, you'll see that the C library is initialized before the user's constructors are called, so yes, it's safe.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="how-statically-linked-programs-run-on-linux.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

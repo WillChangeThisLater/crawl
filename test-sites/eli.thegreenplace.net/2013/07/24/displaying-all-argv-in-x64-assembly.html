@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Displaying all argv in x64 assembly - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="displaying-all-argv-in-x64-assembly.html"
+                       rel="bookmark"
+                       title="Permalink to Displaying all argv in x64 assembly">
+                        Displaying all argv in x64 assembly
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> July 24, 2013 at 05:53</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/assembly.html">Assembly</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>Recently I've been doing some x64 assembly hacking, and something I had to Google a bit and collect from a few places is how to go over all command-line arguments (colloquially known as <tt class="docutils literal">argv</tt> from C) and do something with them.</p>
+<p>I already discussed how arguments get passed into a program <a class="reference external" href="../../../2012/08/13/how-statically-linked-programs-run-on-linux/index.html">in the past</a> (not the C <tt class="docutils literal">main</tt>, mind you, but rather the real entry point of a program - <tt class="docutils literal">_start</tt>), so what was left is just a small matter of implementation. Here it is, in GNU Assembly (<tt class="docutils literal">gas</tt>) syntax for Linux. This is pure assembly code - it does not use the C standard library or runtime at all. It demonstrates a lot of interesting concepts such as reading command-line arguments, issuing Linux system calls and string processing.</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">#---------------- DATA ----------------#
+    .data
+    # We need buf_for_itoa to be large enough to contain a 64-bit integer.
+    # endbuf_for_itoa will point to the end of buf_for_itoa and is useful
+    # for passing to itoa.
+    .set BUFLEN, 32
+buf_for_itoa:
+    .space BUFLEN, 0x0
+    .set endbuf_for_itoa, buf_for_itoa + BUFLEN - 1
+newline_str:
+    .asciz &quot;\n&quot;
+argc_str:
+    .asciz &quot;argc: &quot;
+
+
+#---------------- CODE ----------------#
+    .globl _start
+    .text
+_start:
+    # On entry to _start, argc is in (%rsp), argv[0] in 8(%rsp),
+    # argv[1] in 16(%rsp) and so on.
+    lea argc_str, %rdi
+    call print_cstring
+
+    mov (%rsp), %r12               # save argc in r12
+
+    # Convert the argc value to a string and print it out
+    mov %r12, %rdi
+    lea endbuf_for_itoa, %rsi
+    call itoa
+    mov %rax, %rdi
+    call print_cstring
+    lea newline_str, %rdi
+    call print_cstring
+
+    # In a loop, pick argv[n] for 0 &lt;= n &lt; argc and print it out,
+    # followed by a newline. r13 holds n.
+    xor %r13, %r13
+
+.L_argv_loop:
+    mov 8(%rsp, %r13, 8), %rdi      # argv[n] is in (rsp + 8 + 8*n)
+    call print_cstring
+    lea newline_str, %rdi
+    call print_cstring
+    inc %r13
+    cmp %r12, %r13
+    jl .L_argv_loop
+
+    # exit(0)
+    mov $60, %rax
+    mov $0, %rdi
+    syscall
+</pre></div>
+<p>This code uses a couple of support functions. The first is <tt class="docutils literal">print_cstring</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"># Function print_cstring
+#   Print a null-terminated string to stdout.
+# Arguments:
+#   rdi     address of string
+# Returns: void
+print_cstring:
+    # Find the terminating null
+    mov %rdi, %r10
+.L_find_null:
+    cmpb $0, (%r10)
+    je .L_end_find_null
+    inc %r10
+    jmp .L_find_null
+.L_end_find_null:
+    # r10 points to the terminating null. so r10-rdi is the length
+    sub %rdi, %r10
+
+    # Now that we have the length, we can call sys_write
+    # sys_write(unsigned fd, char* buf, size_t count)
+    mov $1, %rax
+    # Populate address of string into rsi first, because the later
+    # assignment of fd clobbers rdi.
+    mov %rdi, %rsi
+    mov $1, %rdi
+    mov %r10, %rdx
+    syscall
+    ret
+</pre></div>
+<p>More interestingly, here is <tt class="docutils literal">itoa</tt>. It's a bit more general than what I actually use in the main program because it also supports negative numbers. It can convert any number that fits into a 64-bit register. Note the unusual API for receiving and returning the place where the actual string is written. Since it's very natural for an <tt class="docutils literal">itoa</tt> implementation to emit the digits in reverse, I wanted to avoid actual string reversing by writing the digits into a buffer from the end towards the beginning.</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"># Function itoa
+#   Convert an integer to a null-terminated string in memory.
+#   Assumes that there is enough space allocated in the target
+#   buffer for the representation of the integer. Since the number itself
+#   is accepted in the register, its value is bounded.
+# Arguments:
+#   rdi:    the integer
+#   rsi:    address of the *last* byte in the target buffer
+# Returns:
+#   rax:    address of the first byte in the target string that
+#           contains valid information.
+itoa:
+    movb $0, (%rsi)        # Write the terminating null and advance.
+
+    # If the input number is negative, we mark it by placing 1 into r9
+    # and negate it. In the end we check if r9 is 1 and add a &#39;-&#39; in front.
+    mov $0, %r9
+    cmp $0, %rdi
+    jge .L_input_positive
+    neg %rdi
+    mov $1, %r9
+.L_input_positive:
+
+    mov %rdi, %rax          # Place the number into rax for the division.
+    mov $10, %r8            # The base is in r8
+
+.L_next_digit:
+    # Prepare rdx:rax for division by clearing rdx. rax remains from the
+    # previous div. rax will be rax / 10, rdx will be the next digit to
+    # write out.
+    xor %rdx, %rdx
+    div %r8
+    # Write the digit to the buffer, in ascii
+    dec %rsi
+    add $0x30, %dl
+    movb %dl, (%rsi)
+
+    cmp $0, %rax            # We&#39;re done when the quotient is 0.
+    jne .L_next_digit
+
+    # If we marked in r9 that the input is negative, it&#39;s time to add that
+    # &#39;-&#39; in front of the output.
+    cmp $1, %r9
+    jne .L_itoa_done
+    dec %rsi
+    movb $0x2d, (%rsi)
+
+.L_itoa_done:
+    mov %rsi, %rax          # rsi points to the first byte now; return it.
+    ret
+</pre></div>
+<p>Some notes about the code:</p>
+<ul class="simple">
+<li>GAS vs. Intel syntax: I used to believe the Intel syntax is better looking, but grew to tolerate GAS because it's the default used by tools on Linux. After a very short time you get used to it and don't really mind it any longer. Yes, even the weird indirect addressing syntax (<tt class="docutils literal">mov <span class="pre">8(%rsp,</span> %r13, 8), %rdi</tt>) grows on you. In other words, focus on the code, not syntax.</li>
+<li>I could pick any representation for strings, but ended up going with the C-like null-terminated strings. If you look carefully at <tt class="docutils literal">print_cstring</tt> you'll notice that a length-prefix representation could be better since the <tt class="docutils literal">write</tt> system call doesn't care about the null and wants the length passed explicitly. However, since real life assembly code often does have to inter-operate with C, null-terminated strings make more sense.</li>
+<li>Even though my own functions could use any calling convention, I'm sticking with the System V AMD64 ABI. It's natural because system calls use it as well w.r.t. argument and return value passing. AFAIU they can also clobber scratch registers so care must be taken to preserve information in registers around system calls.</li>
+</ul>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="displaying-all-argv-in-x64-assembly.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

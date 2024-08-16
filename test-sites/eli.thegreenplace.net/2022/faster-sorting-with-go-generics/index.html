@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Faster sorting with Go generics - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Faster sorting with Go generics">
+                        Faster sorting with Go generics
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> April 02, 2022 at 06:12</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/compilation.html">Compilation</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>Recently, a new set of sorting functions <a class="reference external" href="https://go-review.googlesource.com/c/exp/+/378134">has landed</a> in Go's
+<a class="reference external" href="https://pkg.go.dev/golang.org/x/exp/slices">golang.org/x/exp/slices</a> package
+<a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>. These functions leverage Go generics to provide a more ergonomic API for
+sorting (without requiring users to implement <a class="reference external" href="https://pkg.go.dev/sort#Interface">sort.Interface</a>), and also deliver a nice performance
+improvement, as the CL demonstrates.</p>
+<p>In this post, I'll dive deep into <em>why</em> these generic functions are faster than
+the existing ones in the <tt class="docutils literal">sort</tt> package, even though they use precisely
+the same algorithm and loop structure. This should hopefully be an interesting
+peek into how Go generics are implemented, in comparison to the existing
+dynamic dispatch mechanism (interfaces).</p>
+<p>To decouple our discussion from the messy specifics of the Go standard library
+and experimental repositories, and to be able to focus on a smaller, simpler
+code sample, I've reimplemented this comparison on a simpler sorting algorithm,
+where the performance difference also manifests <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.</p>
+<div class="section" id="bubble-sort">
+<h2>Bubble sort</h2>
+<p>Let's implement good old <a class="reference external" href="https://en.wikipedia.org/wiki/Bubble_sort">bubble sort</a>!</p>
+<img alt="Bubblesort animation from Wikipedia" class="align-center" src="../../images/2022/bubblesort-wikipedia-animation.gif" />
+<p>The full code for this post, along with tests and benchmarks is
+<a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2022/genericsort">available on GitHub</a>.
+Here's a simple bubble sort implementation using a Go interface for
+customization:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">bubbleSortInterface</span><span class="p">(</span><span class="nx">x</span><span class="w"> </span><span class="nx">sort</span><span class="p">.</span><span class="nx">Interface</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">n</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">x</span><span class="p">.</span><span class="nx">Len</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">swapped</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="kc">false</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="nx">n</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">x</span><span class="p">.</span><span class="nx">Less</span><span class="p">(</span><span class="nx">i</span><span class="p">,</span><span class="w"> </span><span class="nx">i</span><span class="o">-</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">x</span><span class="p">.</span><span class="nx">Swap</span><span class="p">(</span><span class="nx">i</span><span class="p">,</span><span class="w"> </span><span class="nx">i</span><span class="o">-</span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="nx">swapped</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">!</span><span class="nx">swapped</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>As a reminder, <a class="reference external" href="https://pkg.go.dev/sort#Interface">sort.Interface</a> is an
+interface defined in Go's <tt class="docutils literal">sort</tt> package, and looks like this:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">Interface</span><span class="w"> </span><span class="kd">interface</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Len</span><span class="p">()</span><span class="w"> </span><span class="kt">int</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Less</span><span class="p">(</span><span class="nx">i</span><span class="p">,</span><span class="w"> </span><span class="nx">j</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Swap</span><span class="p">(</span><span class="nx">i</span><span class="p">,</span><span class="w"> </span><span class="nx">j</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The <tt class="docutils literal">sort</tt> package also provides useful type adapters to imbue
+<tt class="docutils literal">sort.Interface</tt> onto common slice types. For example, <tt class="docutils literal">sort.StringSlice</tt>
+makes a <tt class="docutils literal">[]string</tt> implement this interface in a way that sorts elements in
+ascending order, and we can write something like:</p>
+<div class="highlight"><pre><span></span><span class="kd">var</span><span class="w"> </span><span class="nx">ss</span><span class="w"> </span><span class="p">[]</span><span class="kt">string</span><span class="w"></span>
+<span class="c1">// ... code that populates ss</span><span class="w"></span>
+<span class="nx">bubbleSortInterface</span><span class="p">(</span><span class="nx">sort</span><span class="p">.</span><span class="nx">StringSlice</span><span class="p">(</span><span class="nx">ss</span><span class="p">))</span><span class="w"></span>
+</pre></div>
+</div>
+<div class="section" id="generic-bubble-sort">
+<h2>Generic bubble sort</h2>
+<p>Here's a generic bubble sort, for a slice of types that implement
+<a class="reference external" href="https://pkg.go.dev/golang.org/x/exp/constraints#Ordered">constraints.Ordered</a>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">bubbleSortGeneric</span><span class="p">[</span><span class="nx">T</span><span class="w"> </span><span class="nx">constraints</span><span class="p">.</span><span class="nx">Ordered</span><span class="p">](</span><span class="nx">x</span><span class="w"> </span><span class="p">[]</span><span class="nx">T</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">n</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">x</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">swapped</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="kc">false</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="nx">n</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">x</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="nx">x</span><span class="p">[</span><span class="nx">i</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">x</span><span class="p">[</span><span class="nx">i</span><span class="o">-</span><span class="mi">1</span><span class="p">],</span><span class="w"> </span><span class="nx">x</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">x</span><span class="p">[</span><span class="nx">i</span><span class="p">],</span><span class="w"> </span><span class="nx">x</span><span class="p">[</span><span class="nx">i</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="w"></span>
+<span class="w">        </span><span class="nx">swapped</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">!</span><span class="nx">swapped</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>As you can see, the code is exactly the same except that we can use <tt class="docutils literal">len</tt>,
+<tt class="docutils literal">&lt;</tt> and swapping with multiple assignment directly instead of deferring to
+interface methods. This is possible because the function knows important things
+about what it's sorting: that it's a slice and also that it implements
+<tt class="docutils literal">Ordered</tt>.</p>
+</div>
+<div class="section" id="benchmarking">
+<h2>Benchmarking</h2>
+<p>I've benchmarked these two implementations against each other by sorting a
+randomly-generated slice of 1000 strings; here are the results on my machine:</p>
+<div class="highlight"><pre><span></span>$ go test -bench=.
+goos: linux
+goarch: amd64
+pkg: example.com
+cpu: Intel(R) Core(TM) i7-4771 CPU @ 3.50GHz
+BenchmarkSortStringInterface-8             124           9599141 ns/op
+BenchmarkSortStringGeneric-8               158           7433097 ns/op
+</pre></div>
+<p>The generic version is over 20% faster. This is great news, overall. Go
+generics not only delivers a convenient way to write code that acts on multiple
+types, but can also provide performance benefits!</p>
+<p>In the rest of this post, we'll discuss <em>why</em> generics is faster here.</p>
+</div>
+<div class="section" id="analyzing-the-interface-version">
+<h2>Analyzing the interface version</h2>
+<p>In the <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2022/genericsort">code accompanying this post</a>, I
+have a standalone runner program that's useful for profiling. It creates a large
+slice and sorts it using one of the methods provided on the command-line; it
+also enables pprof-based CPU profiling. Let's see how this looks for our
+interface-based bubble sort:</p>
+<div class="highlight"><pre><span></span>$ ./bubble.out -cpuprofile cpui.out -kind strinterface
+$ go tool pprof -list bubbleSortInterface ./bubble.out cpui.out
+&lt;...&gt;
+ROUTINE ======================== main.bubbleSortInterface
+     350ms      1.10s (flat, cum)   100% of Total
+         .          .     26:
+         .          .     27:func bubbleSortInterface(x sort.Interface) {
+         .          .     28: n := x.Len()
+         .          .     29: for {
+         .          .     30:         swapped := false
+      70ms       70ms     31:         for i := 1; i &lt; n; i++ {
+     160ms      830ms     32:                 if x.Less(i, i-1) {
+      20ms      100ms     33:                         x.Swap(i, i-1)
+         .          .     34:                         swapped = true
+         .          .     35:                 }
+         .          .     36:         }
+     100ms      100ms     37:         if !swapped {
+         .          .     38:                 return
+         .          .     39:         }
+         .          .     40: }
+         .          .     41:}
+         .          .     42:
+</pre></div>
+<p>As expected, the program spends most of its time in the inner loop doing
+comparisons and swaps, but mostly just comparisons. Bubble sort does O(N^2)
+comparisons for a sequence of length N.</p>
+<p>If the majority of the time is spent on comparisons, it's interesting to examine
+what that actually entails; what instructions does the CPU execute while
+calling <tt class="docutils literal">x.Less</tt> in this code? Luckily, I've recently written <a class="reference external" href="../interface-method-calls-with-the-go-register-abi/index.html">another blog
+post on exactly this topic</a>!
+I recommend that you at least skim it, but the important part for our purpose
+is that calling <tt class="docutils literal">x.Less</tt> means this sequence of instructions:</p>
+<div class="highlight"><pre><span></span>MOVQ  0x48(SP), DX
+MOVQ  0x20(DX), SI
+LEAQ  -0x1(CX), DI
+MOVQ  DI, 0x30(SP)
+MOVQ  0x50(SP), AX
+MOVQ  CX, BX
+MOVQ  DI, CX
+NOPL
+CALL  SI
+</pre></div>
+<p>In our code, we're running <tt class="docutils literal">bubbleSortInterface(sort.StringSlice(ss))</tt>, so we
+have to turn to <tt class="docutils literal">sort.StringSlice</tt> for the definition of the actual <tt class="docutils literal">Less</tt>
+method that's going to be invoked:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">x</span><span class="w"> </span><span class="nx">StringSlice</span><span class="p">)</span><span class="w"> </span><span class="nx">Less</span><span class="p">(</span><span class="nx">i</span><span class="p">,</span><span class="w"> </span><span class="nx">j</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">x</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="nx">x</span><span class="p">[</span><span class="nx">j</span><span class="p">]</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>In assembly, it looks like this:</p>
+<div class="highlight"><pre><span></span>CMPQ  0x10(R14), SP
+JBE   0x4664d1
+SUBQ  $0x28, SP
+MOVQ  BP, 0x20(SP)
+LEAQ  0x20(SP), BP
+MOVQ  AX, 0x30(SP)
+CMPQ  DI, BX
+JBE   0x4664c5
+SHLQ  $0x4, DI
+MOVQ  0(DI)(AX*1), DX
+MOVQ  0x8(DI)(AX*1), R8
+CMPQ  SI, BX
+JBE   0x4664b8
+SHLQ  $0x4, SI
+MOVQ  0(AX)(SI*1), CX
+MOVQ  0x8(AX)(SI*1), DI
+MOVQ  DX, AX
+MOVQ  R8, BX
+CALL  runtime.cmpstring(SB)
+TESTQ AX, AX
+SETL  AL
+MOVQ  0x20(SP), BP
+ADDQ  $0x28, SP
+RET
+</pre></div>
+<p>If this looks longer than you've expected, it's because slice indexing in Go is
+protected against out-of-bounds access, and the comparisons we see at the
+beginning of the function are precisely that - jumping to a portion of the code
+(which I didn't include, for brevity) that invokes <tt class="docutils literal">runtime.panicIndex</tt>. At
+last, the actual string comparison is performed with a call to
+<tt class="docutils literal">runtime.cmpstring</tt>; this, on its own, is a pretty interesting function that's
+implemented in assembly for the common architectures (<a class="reference external" href="https://cs.opensource.google/go/go/+/master:src/internal/bytealg/compare_amd64.s;l=19?q=cmpstring&amp;ss=go%2Fgo&amp;start=11">for example AMD64</a>),
+but let's stop the rabbit hole here, since this part will be shared across both
+the implementations we're comparing.</p>
+<p>Now we should have a fairly comprehensive understanding of where the CPU spends
+its time when running bubble sort using the interface dispatch version. Let's
+turn our attention to the generic version.</p>
+</div>
+<div class="section" id="detour-how-generics-are-implemented-in-go-1-18">
+<h2>Detour: how generics are implemented in Go 1.18</h2>
+<p>Russ Cox has a short and excellent blog post titled <a class="reference external" href="https://research.swtch.com/generic">The Generic Dilemma</a>. Its main claim is that when a language
+decides on whether to have generics and how to implement them, it faces the
+following decision:</p>
+<blockquote>
+do you want slow programmers, slow compilers and bloated binaries, or slow
+execution times?</blockquote>
+<p>&quot;Slow compilers and bloated binaries&quot; refers to the C++ approach of implementing
+templates by <a class="reference external" href="https://en.wikipedia.org/wiki/Monomorphization">full monomorphization</a> - each template invocation
+is treated a bit like a macro expansion with its full code copy-pasted with the
+right types.</p>
+<p>&quot;Slow execution times&quot; refers to the Java approach of boxing, or to dynamic
+languages where code is trivially generic due to transparent dynamic dispatch
+on every call.</p>
+<p>Please note that none of these descriptions are meant to be denigratory; these
+are all real tradeoffs language designers face, Go included.</p>
+<p>Specifically, Go has seriously considered both monomorphization (called
+&quot;stenciling&quot; in the Go world) and dynamic dispatch (called &quot;dictionaries&quot; in the
+Go world):</p>
+<ul class="simple">
+<li><a class="reference external" href="https://go.googlesource.com/proposal/+/refs/heads/master/design/generics-implementation-stenciling.md">Generics implementation - Stenciling design doc</a></li>
+<li><a class="reference external" href="https://go.googlesource.com/proposal/+/refs/heads/master/design/generics-implementation-dictionaries.md">Generics implementation - Dictionaries design doc</a></li>
+</ul>
+<p>Neither approach is perfect on its own, due to the reasons stated above.
+Therefore, another design was proposed:</p>
+<ul class="simple">
+<li><a class="reference external" href="https://github.com/golang/proposal/blob/master/design/generics-implementation-gcshape.md">Generics implementation - GC Shape Stenciling</a></li>
+</ul>
+<p>This &quot;GC shape&quot; approach is a compromise between the two extremes of stenciling
+and dictionaries. Depending on the instantiated type we either monomorphize or
+use dynamic dispatch. There is a <a class="reference external" href="https://github.com/golang/proposal/blob/master/design/generics-implementation-dictionaries-go1.18.md">more up-to-date document</a>
+that describes how Go 1.18 does this in detail.</p>
+<p>Specifically, different underlying types like <tt class="docutils literal">int</tt>s and <tt class="docutils literal">string</tt>s will
+get their own GC shape, meaning that a different function will be generated for
+each, with the types hard-coded (so this is monomorphization). On the other
+hand, all pointer types will be grouped in the same GC shape and will use
+dynamic dispatch.</p>
+<p>Note that this is the state of the world in Go 1.18; it may, and most likely
+<em>will</em> change in the future, as the Go team is teaming up with the community
+to learn what works best for real-life workloads.</p>
+</div>
+<div class="section" id="analyzing-the-generic-version">
+<h2>Analyzing the generic version</h2>
+<p>If we use pprof to analyze the generic version, we'll see that it also spends
+the majority of its time in comparisons, but overall less time than the
+interface version.</p>
+<p>As discussed in the previous section, a <tt class="docutils literal">string</tt> type will get its own GC
+shape and therefore its own function hard-coded for the <tt class="docutils literal">string</tt> type. Let's
+see how this looks in the assembly.</p>
+<p>First, rummaging through the debug information of the binary we'll find the
+symbol <tt class="docutils literal">bubbleSortGeneric[go.shape.string_0]</tt> which represents the stenciled
+version of <tt class="docutils literal">bubbleSortGeneric</tt> for the GC shape that <tt class="docutils literal">string</tt> is currently
+the only member of. We won't find it as a standalone function to call, though,
+since it's inlined into its call site. This inlining does not affect performance
+in any way, so we'll just focus on the instructions for the inner loop that,
+to remind you, does this:</p>
+<div class="highlight"><pre><span></span><span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="nx">n</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">x</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="nx">x</span><span class="p">[</span><span class="nx">i</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">x</span><span class="p">[</span><span class="nx">i</span><span class="o">-</span><span class="mi">1</span><span class="p">],</span><span class="w"> </span><span class="nx">x</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">x</span><span class="p">[</span><span class="nx">i</span><span class="p">],</span><span class="w"> </span><span class="nx">x</span><span class="p">[</span><span class="nx">i</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="w"></span>
+<span class="w">    </span><span class="nx">swapped</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>And it translates to this assembly:</p>
+<div class="highlight"><pre><span></span>MOVQ  0x80(SP), R8
+INCQ  R8
+MOVQ  0x70(SP), CX
+MOVQ  0x78(SP), BX
+MOVQ  R8, DX
+MOVL  AX, SI
+MOVQ  0xb0(SP), AX
+CMPQ  DX, BX
+JLE   0x4aef20
+MOVQ  DX, 0x80(SP)
+MOVB  SI, 0x3d(SP)
+MOVQ  DX, SI
+SHLQ  $0x4, DX
+MOVQ  DX, 0x90(SP)
+MOVQ  0(DX)(AX*1), R8
+MOVQ  0x8(DX)(AX*1), BX
+LEAQ  -0x1(SI), R9
+SHLQ  $0x4, R9
+MOVQ  R9, 0x88(SP)
+MOVQ  0(R9)(AX*1), CX
+MOVQ  0x8(R9)(AX*1), DI
+MOVQ  R8, AX
+CALL  runtime.cmpstring(SB)
+MOVQ  0xb0(SP), DX
+MOVQ  0x90(SP), SI
+LEAQ  0(SI)(DX*1), DI
+MOVQ  0x88(SP), R8
+LEAQ  0(R8)(DX*1), R9
+TESTQ AX, AX
+JGE   0x4af01a
+</pre></div>
+<p>The first thing to note is that there is no dynamic dispatch to the <tt class="docutils literal">Less</tt>
+method. Each loop iteration invokes <tt class="docutils literal">cmpstring</tt> directly. Second, the latter
+part of the assembly resembles the code of <tt class="docutils literal">Less</tt> shown earlier, with one
+crucial difference - there are no bounds checks! Go includes a
+<a class="reference external" href="https://go101.org/article/bounds-check-elimination.html">bounds-check elimination (BCE) pass</a>
+which can get rid of the bounds checks for the comparison:</p>
+<div class="highlight"><pre><span></span><span class="c1">// ... earlier we had n := len(x)</span><span class="w"></span>
+<span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="nx">n</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">x</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="nx">x</span><span class="p">[</span><span class="nx">i</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+</pre></div>
+<p>The compiler knows that <tt class="docutils literal">i</tt> is between 1 and <tt class="docutils literal">len(x)</tt> at all times (by
+looking at the loop description and the fact that <tt class="docutils literal">i</tt> is not otherwise
+modified <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>) and hence that <tt class="docutils literal">x[i]</tt> and <tt class="docutils literal"><span class="pre">x[i-1]</span></tt> are both safely accessing
+the slice in-bounds.</p>
+<p>In the interface version, the compiler does not eliminate
+the bounds checks from <tt class="docutils literal">Less</tt>; the function is defined like this:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">x</span><span class="w"> </span><span class="nx">StringSlice</span><span class="p">)</span><span class="w"> </span><span class="nx">Less</span><span class="p">(</span><span class="nx">i</span><span class="p">,</span><span class="w"> </span><span class="nx">j</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">x</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="nx">x</span><span class="p">[</span><span class="nx">j</span><span class="p">]</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>And who knows what indices are passed in! Moreover, because of the dynamic
+dispatch this function is not inlined its caller, where the compiler could
+perhaps have more insight into what's going on. The Go compiler has some
+devurtualization capabilities, but they don't kick in here. This is
+an additional interesting area of compiler improvements.</p>
+</div>
+<div class="section" id="generic-sort-with-a-custom-comparison-function">
+<h2>Generic sort with a custom comparison function</h2>
+<p>To verify some of the observations described earlier, I've implemented another
+version of the generic bubble sort; this time, without relying on
+<tt class="docutils literal">constraints.Ordered</tt> but using a comparison function instead:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">bubbleSortFunc</span><span class="p">[</span><span class="nx">T</span><span class="w"> </span><span class="kt">any</span><span class="p">](</span><span class="nx">x</span><span class="w"> </span><span class="p">[]</span><span class="nx">T</span><span class="p">,</span><span class="w"> </span><span class="nx">less</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">a</span><span class="p">,</span><span class="w"> </span><span class="nx">b</span><span class="w"> </span><span class="nx">T</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">n</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">x</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">swapped</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="kc">false</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="nx">n</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">less</span><span class="p">(</span><span class="nx">x</span><span class="p">[</span><span class="nx">i</span><span class="p">],</span><span class="w"> </span><span class="nx">x</span><span class="p">[</span><span class="nx">i</span><span class="o">-</span><span class="mi">1</span><span class="p">])</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">x</span><span class="p">[</span><span class="nx">i</span><span class="o">-</span><span class="mi">1</span><span class="p">],</span><span class="w"> </span><span class="nx">x</span><span class="p">[</span><span class="nx">i</span><span class="p">]</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">x</span><span class="p">[</span><span class="nx">i</span><span class="p">],</span><span class="w"> </span><span class="nx">x</span><span class="p">[</span><span class="nx">i</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="w"></span>
+<span class="w">        </span><span class="nx">swapped</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">!</span><span class="nx">swapped</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>We can use this function to sort strings as follows:</p>
+<div class="highlight"><pre><span></span><span class="nx">bubbleSortFunc</span><span class="p">(</span><span class="nx">ss</span><span class="p">,</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">a</span><span class="p">,</span><span class="w"> </span><span class="nx">b</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="nx">a</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="nx">b</span><span class="w"> </span><span class="p">})</span><span class="w"></span>
+</pre></div>
+<p>Before reading what follows, can you guess how well this approach does in
+the benchmarks compared to the generic sort that uses <tt class="docutils literal">&lt;</tt> and compared
+to the interface-based sort?</p>
+<div class="highlight"><pre><span></span>$ go test -bench=.
+goos: linux
+goarch: amd64
+pkg: example.com
+cpu: Intel(R) Core(TM) i7-4771 CPU @ 3.50GHz
+BenchmarkSortStringInterface-8             124           9599141 ns/op
+BenchmarkSortStringGeneric-8               158           7433097 ns/op
+BenchmarkSortStringFunc-8                  138           8584866 ns/op
+</pre></div>
+<p>It's about in the middle! 14% slower than the other generic function, but 10%
+faster than the interface-based version.</p>
+<p>When looking at its assembly code, it's easy to see why. While the
+function-based version does not avoid the function call for each comparison (it
+has to call a function provided as an argument), it <em>does</em> avoid the bounds
+checks, because the access to <tt class="docutils literal">x[i]</tt> and <tt class="docutils literal"><span class="pre">x[i-1]</span></tt> happens within the body of
+the function (and not in a function it invokes). So we get a partial win.</p>
+<p>This comparison has interesting real-life implications because <tt class="docutils literal">SortFunc</tt> is
+also a variant that was added to the <tt class="docutils literal">golang.org/exp/slices</tt>, to provide more
+general sorting capabilities (for types that are unconstrained). This version
+also provides a speedup against <tt class="docutils literal">sort.Sort</tt>.</p>
+<p>Another implication is for sorting pointer types; as mentioned earlier, the Go
+compiler in 1.18 will group all pointer types into a single GC shape, meaning
+that it will need to pass a dictionary around for dynamic dispatch. This may
+make the code slower, though BCE should still kick in - so not <em>much</em> slower. I
+have a benchmark demonstrating this in <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2022/genericsort">the repository</a>.</p>
+<p>Finally, as a simple exercise - take the bubble sort functions shown here and
+benchmark sorting a large slice of integers using the generic function vs. the
+interface-based one. You'll likely see a <em>massive</em> speedup with generics, more
+than for strings. Can you figure out why?</p>
+</div>
+<div class="section" id="parting-words">
+<h2>Parting words</h2>
+<p>While this post was about 2/3 of the way through its draft process, <a class="reference external" href="https://planetscale.com/blog/generics-can-make-your-go-code-slower">this
+article written by Planetscale engineers</a> was
+published. It describes some scenarios in which converting monomorphized code to
+generics makes it significantly slower. It's a very good article, and is worth a
+read (and I <em>love</em> the disassembly widget).</p>
+<p>It's worth saying that generics in Go are <em>very new</em>. What we're playing with
+now is the initial implementation that was published literally 2 weeks ago! The
+first release focused on making generics work at all, with a large effort
+spent on correctness for many tricky corner cases. <a class="reference external" href="https://wiki.c2.com/?MakeItWorkMakeItRightMakeItFast">Making it fast</a> is also planned, but
+it's not the highest priority right now.</p>
+<p>That said, the implementation is in flux and being improved all the time; for
+example, <a class="reference external" href="https://go-review.googlesource.com/c/go/+/385274">this Go change</a>
+which will make it into Go 1.19 already fixes some of the issues discussed in
+the Planetscale article. On the other hand, due to the reasons discussed in
+<em>The Generic Dilemma</em>, it's unlikely that Go's generics will ever be &quot;zero-cost&quot;
+in all possible scenarios. Go places a strong priority on fast compile times
+and compact binary sizes, so it has to make a certain set of tradeoffs with
+any design.</p>
+<p>Give generics a ride for your use cases! Play, explore, try things out. Peek
+under the hood (hopefully my post helps with that), report issues that you find
+with correctness <em>or</em> performance. This is just the beginning for Go generics.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td><p class="first">This package was created to incubate some new, generics-based
+functionality for Go slices with the 1.18 release, and will likely join
+the Go standard library in some future release.</p>
+<p class="last"><strong>Update (2023-06-03)</strong>: this code is moving into the Go standard
+library as package <tt class="docutils literal">slices</tt> in Go 1.21; before 1.21 is released, you
+can try it with <a class="reference external" href="https://pkg.go.dev/golang.org/dl/gotip">gotip</a>.</p>
+</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td><p class="first">The standard library uses a variation of quicksort which is split over
+several functions and is more difficult to follow in a blog post due to
+its large code size and relative complexity.</p>
+<p class="last">It's worth noting that there are proposals to implement more
+sophisticated sorting algorithms in the standard library; the algorithm
+itself would be mostly orthogonal to the implementation considerations
+described in this post, however.</p>
+</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>This is a gross oversimplification of how the compiler works! In reality
+the Go backend uses SSA form, which is perfect for optimizations like
+this.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

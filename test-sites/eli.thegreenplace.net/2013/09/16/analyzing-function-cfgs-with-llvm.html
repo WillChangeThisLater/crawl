@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Analyzing function CFGs with LLVM - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="analyzing-function-cfgs-with-llvm.html"
+                       rel="bookmark"
+                       title="Permalink to Analyzing function CFGs with LLVM">
+                        Analyzing function CFGs with LLVM
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> September 16, 2013 at 07:16</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/compilation.html">Compilation</a>
+        ,
+    <a href="../../../tag/llvm-clang.html">LLVM & Clang</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>A common question about LLVM that comes up on Stack Overflow is how to build the  control-flow graph (CFG) of a function and then topologically sort it, or some variation of this. To save myself answering time in the future, I figured I'll just throw a quick post together that shows off a number of capabilities LLVM provides in this domain.</p>
+<p>First of all, people asking this question often miss the fact that basic blocks (BBs) are already organized in a CFG, and there's no need to build a new graph in order to run interesting analyses.</p>
+<p>Each BB has a list of <em>successors</em> - BBs to which control-flow may transfer from this BB. It can be easily obtained by looking at the terminator instruction of the BB (by definition, a BB has a single terminator):</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">// BB is a BasicBlock*</span>
+<span style="color: #007f00">// ...</span>
+<span style="color: #00007f; font-weight: bold">const</span> TerminatorInst *TInst = BB-&gt;getTerminator();
+<span style="color: #00007f; font-weight: bold">for</span> (<span style="color: #00007f; font-weight: bold">unsigned</span> I = <span style="color: #007f7f">0</span>, NSucc = TInst-&gt;getNumSuccessors(); I &lt; NSucc; ++I) {
+  BasicBlock *Succ = TInst-&gt;getSuccessor(I);
+  <span style="color: #007f00">// Do stuff with Succ</span>
+}
+</pre></div>
+<p>This interlinking of BBs constitutes a graph we can traverse in any way we see fit. For example, here is an implementation of topological sorting:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">TopoSorter</span> {
+<span style="color: #00007f; font-weight: bold">public</span>:
+  <span style="color: #00007f; font-weight: bold">void</span> runToposort(<span style="color: #00007f; font-weight: bold">const</span> Function &amp;F) {
+    outs() &lt;&lt; <span style="color: #7f007f">&quot;Topological sort of &quot;</span> &lt;&lt; F.getName() &lt;&lt; <span style="color: #7f007f">&quot;:\n&quot;</span>;
+    <span style="color: #007f00">// Initialize the color map by marking all the vertices white.</span>
+    <span style="color: #00007f; font-weight: bold">for</span> (Function::const_iterator I = F.begin(), IE = F.end(); I != IE; ++I) {
+      ColorMap[I] = TopoSorter::WHITE;
+    }
+
+    <span style="color: #007f00">// The BB graph has a single entry vertex from which the other BBs should</span>
+    <span style="color: #007f00">// be discoverable - the function entry block.</span>
+    <span style="color: #00007f; font-weight: bold">bool</span> success = recursiveDFSToposort(&amp;F.getEntryBlock());
+    <span style="color: #00007f; font-weight: bold">if</span> (success) {
+      <span style="color: #007f00">// Now we have all the BBs inside SortedBBs in reverse topological order.</span>
+      <span style="color: #00007f; font-weight: bold">for</span> (BBVector::const_reverse_iterator RI = SortedBBs.rbegin(),
+                                            RE = SortedBBs.rend();
+                                            RI != RE; ++RI) {
+        outs() &lt;&lt; <span style="color: #7f007f">&quot; &quot;</span> &lt;&lt; (*RI)-&gt;getName() &lt;&lt; <span style="color: #7f007f">&quot;\n&quot;</span>;
+      }
+    } <span style="color: #00007f; font-weight: bold">else</span> {
+      outs() &lt;&lt; <span style="color: #7f007f">&quot; Sorting failed\n&quot;</span>;
+    }
+  }
+<span style="color: #00007f; font-weight: bold">private</span>:
+  <span style="color: #00007f; font-weight: bold">enum</span> Color {WHITE, GREY, BLACK};
+  <span style="color: #007f00">// Color marks per vertex (BB).</span>
+  <span style="color: #00007f; font-weight: bold">typedef</span> DenseMap&lt;<span style="color: #00007f; font-weight: bold">const</span> BasicBlock *, Color&gt; BBColorMap;
+  <span style="color: #007f00">// Collects vertices (BBs) in &quot;finish&quot; order. The first finished vertex is</span>
+  <span style="color: #007f00">// first, and so on.</span>
+  <span style="color: #00007f; font-weight: bold">typedef</span> SmallVector&lt;<span style="color: #00007f; font-weight: bold">const</span> BasicBlock *, <span style="color: #007f7f">32</span>&gt; BBVector;
+  BBColorMap ColorMap;
+  BBVector SortedBBs;
+
+  <span style="color: #007f00">// Helper function to recursively run topological sort from a given BB.</span>
+  <span style="color: #007f00">// Returns true if the sort succeeded and false otherwise; topological sort</span>
+  <span style="color: #007f00">// may fail if, for example, the graph is not a DAG (detected a cycle).</span>
+  <span style="color: #00007f; font-weight: bold">bool</span> recursiveDFSToposort(<span style="color: #00007f; font-weight: bold">const</span> BasicBlock *BB) {
+    ColorMap[BB] = TopoSorter::GREY;
+    <span style="color: #007f00">// For demonstration, using the lowest-level APIs here. A BB&#39;s successors</span>
+    <span style="color: #007f00">// are determined by looking at its terminator instruction.</span>
+    <span style="color: #00007f; font-weight: bold">const</span> TerminatorInst *TInst = BB-&gt;getTerminator();
+    <span style="color: #00007f; font-weight: bold">for</span> (<span style="color: #00007f; font-weight: bold">unsigned</span> I = <span style="color: #007f7f">0</span>, NSucc = TInst-&gt;getNumSuccessors(); I &lt; NSucc; ++I) {
+      BasicBlock *Succ = TInst-&gt;getSuccessor(I);
+      Color SuccColor = ColorMap[Succ];
+      <span style="color: #00007f; font-weight: bold">if</span> (SuccColor == TopoSorter::WHITE) {
+        <span style="color: #00007f; font-weight: bold">if</span> (!recursiveDFSToposort(Succ))
+          <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f; font-weight: bold">false</span>;
+      } <span style="color: #00007f; font-weight: bold">else</span> <span style="color: #00007f; font-weight: bold">if</span> (SuccColor == TopoSorter::GREY) {
+        <span style="color: #007f00">// This detects a cycle because grey vertices are all ancestors of the</span>
+        <span style="color: #007f00">// currently explored vertex (in other words, they&#39;re &quot;on the stack&quot;).</span>
+        outs() &lt;&lt; <span style="color: #7f007f">&quot; Detected cycle: edge from &quot;</span> &lt;&lt; BB-&gt;getName() &lt;&lt;
+                  <span style="color: #7f007f">&quot; to &quot;</span> &lt;&lt; Succ-&gt;getName() &lt;&lt; <span style="color: #7f007f">&quot;\n&quot;</span>;
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f; font-weight: bold">false</span>;
+      }
+    }
+    <span style="color: #007f00">// This BB is finished (fully explored), so we can add it to the vector.</span>
+    ColorMap[BB] = TopoSorter::BLACK;
+    SortedBBs.push_back(BB);
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f; font-weight: bold">true</span>;
+  }
+};
+</pre></div>
+<p>[The full code that also contains the other snippets in this post is <a class="reference external" href="https://github.com/eliben/llvm-clang-samples/blob/master/src_llvm/bb_toposort_sccs.cpp">available here</a>]</p>
+<p>It uses the simple recursive <a class="reference external" href="http://en.wikipedia.org/wiki/Depth-first_search">DFS</a> algorithm outlined in &quot;Introduction to Algorithms&quot; by Cormen et al. During the recursive search, vertices are marked &quot;grey&quot; when first encountered and &quot;black&quot; when they're <em>finished</em>. A finished vertex is one whose outgoing edges have all been explored. Topological sorting is the list of all vertices sorted by finish time, from last to first (this is also called &quot;reverse post-order&quot;). In our specific case, a BB is a vertex and links to its successors are edges.</p>
+<p>For this CFG:</p>
+<img class="align-center" src="../../../images/2013/09/diamond-cfg.png" />
+<p>We'll get:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">Topological sort of func:
+  AA
+  BB
+  CC
+  DD
+</pre></div>
+<p>There's an important caveat, however. Topological order is only defined for directed graphs without cycles (DAGs). While the basic block graph is directed, it's not necessarily cycle-free. In fact, any loop in the code translates to a cycle in the BB graph. The code above detects this and reports an error, refusing to provide a sort when a cycle is found.</p>
+<p>For example, consider this CFG with some loops in it:</p>
+<img class="align-center" src="../../../images/2013/09/loopy-cfg.png" />
+<p>The code will now complain:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">Topological sort of func:
+  Detected cycle: edge from BB4 to BB3
+  Sorting failed
+</pre></div>
+<p>Now that we know how to do it the hard way, let's see some of the useful tools LLVM has in its coffers. The header <tt class="docutils literal">llvm/ADT/PostOrderIterator.h</tt> offers iterators for going over BBs inside a function in post-order traversal. Here's the complete usage snippet:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">outs() &lt;&lt; <span style="color: #7f007f">&quot;Basic blocks of &quot;</span> &lt;&lt; F.getName() &lt;&lt; <span style="color: #7f007f">&quot; in post-order:\n&quot;</span>;
+<span style="color: #00007f; font-weight: bold">for</span> (po_iterator&lt;BasicBlock *&gt; I = po_begin(&amp;F.getEntryBlock()),
+                               IE = po_end(&amp;F.getEntryBlock());
+                               I != IE; ++I) {
+  outs() &lt;&lt; <span style="color: #7f007f">&quot;  &quot;</span> &lt;&lt; (*I)-&gt;getName() &lt;&lt; <span style="color: #7f007f">&quot;\n&quot;</span>;
+}
+</pre></div>
+<p>Recall that topological sort is reverse post-order, though. So if it's really that order you need, consider the <tt class="docutils literal">ReversePostOrderTraversal</tt> class from the same header. Note that neither detects cycles, however. In the presence of cycles these iterators will produce some traversal, but it won't be the topological order because it's simply undefined in such cases. If you want a tool to detect cycles, there's <tt class="docutils literal">FindFunctionBackedges</tt> in <tt class="docutils literal">llvm/Analysis/CFG.h</tt>. It essentially runs the same DFS as I showed above, though using an iterative algorithm with an explicit stack instead of the recursion.</p>
+<p>One interesting thing to note about <tt class="docutils literal">po_iterator</tt> and its kin is that they can be used for <em>any</em> kind of graph, not just the graph of basic blocks. They can be used for graphs of functions in inter-procedural analysis, for nodes in an expression graph, and so on. This magic is achieved by means of the <tt class="docutils literal">GraphTraits</tt> mechanism (<tt class="docutils literal">llvm/ADT/GraphTraits.h</tt>), which lets us decouple graph representations from the actual algorithms that work on all kinds of graphs. The template specialization that makes this work for basic blocks can be found in <tt class="docutils literal">llvm/Support/CFG.h</tt> - in this header you can also find iterators for going over the successors (and predecessors) of BBs without manually querying the terminator instruction.</p>
+<p>Back to topological sort though. Since many interesting functions will have loops and thus cycles, what do we do about them? The answer is <a class="reference external" href="http://en.wikipedia.org/wiki/Strongly_connected_components">strongly-connected components</a> (SCCs). If we identify the SCCs of the BB graph, we can topologically sort these SCCs and still do interesting analyses. A loop would usually collapse into a single SCC, for example. So how do we go about implementing this?</p>
+<p>Luckily, LLVM already has a tool to help us. The header <tt class="docutils literal">llvm/ADT/SCCIterator.h</tt> defines <tt class="docutils literal">scc_iterator</tt> which iterates over the SCCs in a graph in post-order. This lets us topologically sort the SCCs similarly to the way we'd sort BBs in a cycle-less graph. In fact, in a cycle-less graph each BB is a SCC on its own, so the SCC approach is a generalization. Using <tt class="docutils literal">scc_iterator</tt> is easy:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">// Use LLVM&#39;s Strongly Connected Components (SCCs) iterator to produce</span>
+<span style="color: #007f00">// a reverse topological sort of SCCs.</span>
+outs() &lt;&lt; <span style="color: #7f007f">&quot;SCCs for &quot;</span> &lt;&lt; F.getName() &lt;&lt; <span style="color: #7f007f">&quot; in post-order:\n&quot;</span>;
+<span style="color: #00007f; font-weight: bold">for</span> (scc_iterator&lt;Function *&gt; I = scc_begin(&amp;F),
+                              IE = scc_end(&amp;F);
+                              I != IE; ++I) {
+  <span style="color: #007f00">// Obtain the vector of BBs in this SCC and print it out.</span>
+  <span style="color: #00007f; font-weight: bold">const</span> std::vector&lt;BasicBlock *&gt; &amp;SCCBBs = *I;
+  outs() &lt;&lt; <span style="color: #7f007f">&quot;  SCC: &quot;</span>;
+  <span style="color: #00007f; font-weight: bold">for</span> (std::vector&lt;BasicBlock *&gt;::const_iterator BBI = SCCBBs.begin(),
+                                                 BBIE = SCCBBs.end();
+                                                 BBI != BBIE; ++BBI) {
+    outs() &lt;&lt; (*BBI)-&gt;getName() &lt;&lt; <span style="color: #7f007f">&quot;  &quot;</span>;
+  }
+  outs() &lt;&lt; <span style="color: #7f007f">&quot;\n&quot;</span>;
+}
+</pre></div>
+<p>For the loopy CFG shown above, this code will print:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">SCCs for func in post-order:
+  SCC: DD
+  SCC: CC2  CC1  CC
+  SCC: BB4  BB3
+  SCC: BB2  BB1  BB
+  SCC: AA
+</pre></div>
+<p>[Note that this is post-order, not reverse post-order; hence the topological sort is showing in the list from the bottom up.]</p>
+<p>I hope this was a useful peek into the CFG analysis capabilities of LLVM. I've given a lot of pointers into the code and these can serve as starting points for some serious code-reading. It's pretty cool to see how many different tools LLVM has for this purpose, and especially nice to see that most of them apply to any kind of graph, thanks to the <tt class="docutils literal">GraphTraits</tt> mechanism.</p>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="analyzing-function-cfgs-with-llvm.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

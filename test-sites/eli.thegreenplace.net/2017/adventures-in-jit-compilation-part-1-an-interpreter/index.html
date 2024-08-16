@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Adventures in JIT compilation: Part 1 - an interpreter - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Adventures in JIT compilation: Part 1 - an interpreter">
+                        Adventures in JIT compilation: Part 1 - an interpreter
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> March 20, 2017 at 06:25</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/compilation.html">Compilation</a>
+        ,
+    <a href="../../tag/code-generation.html">Code generation</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This is the first post in a series about JIT compilers. The plan is to take a
+simple input language and develop some interpreters and JITs for it, in roughtly
+increasing degree of complexity. It's my hope that by the end of the series
+readers will have a good understanding of what it takes to develop a JIT
+compiler and what are some of the tools available to assist with the task.</p>
+<p>The input language will be <a class="reference external" href="https://en.wikipedia.org/wiki/Brainfuck">Brainfuck</a>, or BF as I'll be referring to it
+from now and throughout the series. I think it's a good language for the purpose
+since it really boils programmability down to the essentials. Even though it's
+very tedious to program in, BF is fairly &quot;mainstream&quot; as far as programming
+languages go, with some concepts like memory pointers and loops mapping directly
+to familiar C constructs.</p>
+<p>As the implementation language I'll be using C++. This is, perhaps, not the most
+commonly used &quot;starter&quot; language; that said, most compilers I know are written
+in C++ (or C), and hence many of the most popular low-level code-generation
+libraries in existence are in these languages. In later parts of this series
+we'll be using some C++ libraries, and this is by far easiest to do from C++
+itself. Besides, I try to keep my code straightforward throughout the series -
+there is very little use of advanced C++ features here.</p>
+<div class="section" id="the-bf-language">
+<h2>The BF language</h2>
+<p>The BF language is simple to describe, but I don't do this here. Please take a
+look at <a class="reference external" href="https://esolangs.org/wiki/Brainfuck">the spec</a>, read the Wikipedia
+page, or one of the other existing resources. An in-browser interpreter such as
+<a class="reference external" href="https://copy.sh/brainfuck/">this one</a> can be very useful.</p>
+<p>I'll just give an example to develop a taste for the language. The following BF
+program prints the numbers 1 to 5 to the screen:</p>
+<div class="highlight"><pre><span></span>++++++++ ++++++++ ++++++++ ++++++++ ++++++++ ++++++++
+&gt;+++++
+[&lt;+.&gt;-]
+</pre></div>
+<p>Here's what it does:</p>
+<ul class="simple">
+<li>Line 1 initializes memory cell 0 to the value 48, which happens to be the
+ASCII code for <tt class="docutils literal">0</tt>.</li>
+<li>Line 2 initializes memory cell 1 to 5, which is our loop counter.</li>
+<li>Line 3 is a loop that, at each iteration, increments cell 0 and prints its
+value out, then decrements cell 1 and checks if it has reached the value 0.</li>
+</ul>
+</div>
+<div class="section" id="a-simple-interpreter">
+<h2>A simple interpreter</h2>
+<p>To get an initial feel for the language and to have a reliable reference
+implementation, we'll start with a simple interpreter that processes one BF
+character at a time and does what's necessary to &quot;execute&quot; it.</p>
+<p>One of the reasons for my choosing BF as the source language is its simplicity.
+You'll find a lot of tutorials online that purport to develop interpreters or
+compilers but end up focusing 90% of their time on writing the parser. I think
+the later stages of compilation are much more interesting, so my &quot;parser&quot; for BF
+looks like this:</p>
+<div class="highlight"><pre><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">Program</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">instructions</span><span class="p">;</span><span class="w"></span>
+<span class="p">};</span><span class="w"></span>
+
+<span class="n">Program</span><span class="w"> </span><span class="nf">parse_from_stream</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">istream</span><span class="o">&amp;</span><span class="w"> </span><span class="n">stream</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">Program</span><span class="w"> </span><span class="n">program</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">line</span><span class="p">;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">getline</span><span class="p">(</span><span class="n">stream</span><span class="p">,</span><span class="w"> </span><span class="n">line</span><span class="p">);)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="w"> </span><span class="n">c</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">line</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">c</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;&gt;&#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">c</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;&lt;&#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">c</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;+&#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">c</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;-&#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">c</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;.&#39;</span><span class="w"> </span><span class="o">||</span><span class="w"></span>
+<span class="w">          </span><span class="n">c</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;,&#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">c</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;[&#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">c</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;]&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">program</span><span class="p">.</span><span class="n">instructions</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">c</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">program</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Note that this is a valid implementation according to the <a class="reference external" href="https://esolangs.org/wiki/Brainfuck">BF spec</a>: all characters except the 8 supported
+ones are to be treated as comments and ignored <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>. This parser is going to
+serve us throughout the series.</p>
+<p>With that out of the way, here's the actual interpreter:</p>
+<div class="highlight"><pre><span></span><span class="k">constexpr</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">MEMORY_SIZE</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">30000</span><span class="p">;</span><span class="w"></span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">simpleinterp</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">Program</span><span class="o">&amp;</span><span class="w"> </span><span class="n">p</span><span class="p">,</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="n">verbose</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Initialize state.</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">uint8_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">memory</span><span class="p">(</span><span class="n">MEMORY_SIZE</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">pc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">dataptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">pc</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">p</span><span class="p">.</span><span class="n">instructions</span><span class="p">.</span><span class="n">size</span><span class="p">())</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="n">instruction</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p</span><span class="p">.</span><span class="n">instructions</span><span class="p">[</span><span class="n">pc</span><span class="p">];</span><span class="w"></span>
+<span class="w">    </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">instruction</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;&gt;&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="n">dataptr</span><span class="o">++</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;&lt;&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="n">dataptr</span><span class="o">--</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;+&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="n">memory</span><span class="p">[</span><span class="n">dataptr</span><span class="p">]</span><span class="o">++</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;-&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="n">memory</span><span class="p">[</span><span class="n">dataptr</span><span class="p">]</span><span class="o">--</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;.&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="p">.</span><span class="n">put</span><span class="p">(</span><span class="n">memory</span><span class="p">[</span><span class="n">dataptr</span><span class="p">]);</span><span class="w"></span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;,&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="n">memory</span><span class="p">[</span><span class="n">dataptr</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">cin</span><span class="p">.</span><span class="n">get</span><span class="p">();</span><span class="w"></span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// [...]</span>
+</pre></div>
+<p>All these cases are rather trivial. The more interesting ones are the control
+flow ops - <tt class="docutils literal">[</tt> and <tt class="docutils literal">]</tt>. We'll start with <tt class="docutils literal">[</tt> - jump forward if the current
+data location is zero. This op makes it possible to skip a loop or implement a
+simple <tt class="docutils literal">if</tt>-like condition.</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;[&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">memory</span><span class="p">[</span><span class="n">dataptr</span><span class="p">]</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">bracket_nesting</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="kt">size_t</span><span class="w"> </span><span class="n">saved_pc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pc</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">bracket_nesting</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">++</span><span class="n">pc</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">p</span><span class="p">.</span><span class="n">instructions</span><span class="p">.</span><span class="n">size</span><span class="p">())</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="p">.</span><span class="n">instructions</span><span class="p">[</span><span class="n">pc</span><span class="p">]</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;]&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">bracket_nesting</span><span class="o">--</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="p">.</span><span class="n">instructions</span><span class="p">[</span><span class="n">pc</span><span class="p">]</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;[&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">bracket_nesting</span><span class="o">++</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">bracket_nesting</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">DIE</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;unmatched &#39;[&#39; at pc=&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">saved_pc</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+</pre></div>
+<p>The most important thing to note here is that the <tt class="docutils literal">[</tt> and <tt class="docutils literal">]</tt> brackets in BF
+can be nested; therefore, when figuring out where to jump, we have to find the
+matching bracket. If this seems like something wasteful to do at run-time,
+you're right - keep reading!</p>
+<p>For <tt class="docutils literal">]</tt> we do something very similar. In BF, <tt class="docutils literal">]</tt> is jumping to an earlier
+<tt class="docutils literal">[</tt> if the current data location is not zero. This is how loops advance to the
+next iteration (or stop).</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;]&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">memory</span><span class="p">[</span><span class="n">dataptr</span><span class="p">]</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">bracket_nesting</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="kt">size_t</span><span class="w"> </span><span class="n">saved_pc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pc</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">bracket_nesting</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">pc</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">pc</span><span class="o">--</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="p">.</span><span class="n">instructions</span><span class="p">[</span><span class="n">pc</span><span class="p">]</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;[&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">bracket_nesting</span><span class="o">--</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="p">.</span><span class="n">instructions</span><span class="p">[</span><span class="n">pc</span><span class="p">]</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;]&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">bracket_nesting</span><span class="o">++</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">bracket_nesting</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">DIE</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;unmatched &#39;]&#39; at pc=&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">saved_pc</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+</pre></div>
+<p>And that's it! The interpreter loop concludes with:</p>
+<div class="highlight"><pre><span></span><span class="w">  </span><span class="k">default</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">DIE</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;bad char &#39;&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">instruction</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;&#39; at pc=&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">pc</span><span class="p">;</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">pc</span><span class="o">++</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The full code for this simple interpreter can be found in
+<a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/bfjit/simpleinterp.cpp">simpleinterp.cpp</a>.</p>
+</div>
+<div class="section" id="measuring-the-performance-of-bf-programs">
+<h2>Measuring the performance of BF programs</h2>
+<p>Whenever we develop something like an interpreter or compiler, execution speed
+is a paramount concern. Therefore, it's common for compiler writers to have
+benchmark suites they refer to for measurements. For BF, I'll be using a couple
+of programs throughout the series to measure how fast our implementation is. One
+is a <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/bfjit/bf-programs/mandelbrot.bf">Mandelbrot generator</a>;
+another is a <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/bfjit/tests/testcases/factor.bf">factorization program</a>
+invoked on the large-ish prime 179424691 <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.</p>
+<p>The simple interpreter shown above takes 38.6 seconds on <tt class="docutils literal">mandelbrot</tt> and 16.5
+seconds on <tt class="docutils literal">factor</tt> <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>. Now let's see how we can <em>greatly</em> improve these
+numbers.</p>
+</div>
+<div class="section" id="optimized-interpreter-take-1">
+<h2>Optimized interpreter - take 1</h2>
+<p>The most obvious optimization opportunity for the simple interpreter is to avoid
+laboriously looking for the matching bracket every time a <tt class="docutils literal">[</tt> or <tt class="docutils literal">]</tt> is
+encountered. Imagine a realistic program with a hot inner loop (by &quot;hot&quot; here I
+mean it runs many, many - possibly billions - of times throughtout the execution
+of the program). Is it really necessary to scan the source to find the matching
+bracket <em>every single time</em>? Of course not. We can just precompute these jump
+destinations ahead of time, since the BF program doesn't change throughout its
+execution.</p>
+<p>This is the idea behind <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/bfjit/optinterp.cpp">optinterp.cpp</a>
+- our first optimized
+interpreter. Much of the code is the same as for the simple interpreter, so I'll
+just highlight the differences. A crucial addition is this function, which is
+run before the actual interpretation happens:</p>
+<div class="highlight"><pre><span></span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">compute_jumptable</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">Program</span><span class="o">&amp;</span><span class="w"> </span><span class="n">p</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">pc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">program_size</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p</span><span class="p">.</span><span class="n">instructions</span><span class="p">.</span><span class="n">size</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">jumptable</span><span class="p">(</span><span class="n">program_size</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">pc</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">program_size</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="n">instruction</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p</span><span class="p">.</span><span class="n">instructions</span><span class="p">[</span><span class="n">pc</span><span class="p">];</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">instruction</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;[&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="kt">int</span><span class="w"> </span><span class="n">bracket_nesting</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="kt">size_t</span><span class="w"> </span><span class="n">seek</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pc</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">      </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">bracket_nesting</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">++</span><span class="n">seek</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">program_size</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="p">.</span><span class="n">instructions</span><span class="p">[</span><span class="n">seek</span><span class="p">]</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;]&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="n">bracket_nesting</span><span class="o">--</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">p</span><span class="p">.</span><span class="n">instructions</span><span class="p">[</span><span class="n">seek</span><span class="p">]</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;[&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="n">bracket_nesting</span><span class="o">++</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">bracket_nesting</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">jumptable</span><span class="p">[</span><span class="n">pc</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">seek</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="n">jumptable</span><span class="p">[</span><span class="n">seek</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pc</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">DIE</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;unmatched &#39;[&#39; at pc=&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">pc</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="n">pc</span><span class="o">++</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">jumptable</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It computes the jump destinations for all the <tt class="docutils literal">[</tt> and <tt class="docutils literal">]</tt> ops in the
+program. Its operation is essentially identical to the scanning forward /
+backward for a matching bracket in the main loop of the simple interpreter. The
+result is the vector <tt class="docutils literal">jumptable</tt>, where for every <tt class="docutils literal">[</tt> and <tt class="docutils literal">]</tt> at offset
+<tt class="docutils literal">i</tt> in the program, <tt class="docutils literal">jumptable[i]</tt> holds the offset of the matching bracket.
+For any other op at offset <tt class="docutils literal">i</tt>, <tt class="docutils literal">jumptable[i]</tt> is simply 0.</p>
+<p>The actual main loop of <tt class="docutils literal">optinterp</tt> is the same as in <tt class="docutils literal">simpleinterp</tt>, except
+for the clauses for brackets, which become simply:</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;[&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">memory</span><span class="p">[</span><span class="n">dataptr</span><span class="p">]</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">pc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">jumptable</span><span class="p">[</span><span class="n">pc</span><span class="p">];</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="k">case</span><span class="w"> </span><span class="sc">&#39;]&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">memory</span><span class="p">[</span><span class="n">dataptr</span><span class="p">]</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">pc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">jumptable</span><span class="p">[</span><span class="n">pc</span><span class="p">];</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+</pre></div>
+<p>As you'd expect, <tt class="docutils literal">optinterp</tt> is quite a bit faster; it takes only 18.4 seconds
+to run <tt class="docutils literal">mandelbrot</tt> and 6.7 seconds to run <tt class="docutils literal">factor</tt> - more than a factor of
+2 improvement!</p>
+<img alt="BF interpreter runtime plot" class="align-center" src="../../images/2017/bf-runtime-vs-opt.png" />
+</div>
+<div class="section" id="optimized-interpreter-take-2">
+<h2>Optimized interpreter - take 2</h2>
+<p>The optimization applied in the previous section was very beneficial, but it's
+also fairly trivial - we avoid completely unnecessary work at run-time, if we
+can just precompute it at compile time. To make our interpreter even faster,
+we'll have to get more creative.</p>
+<p>The first step in optimizing anything is measuring and profiling the current
+code. Some past experience helps avoid needless steps in this process. For
+example, it's fairly clear that almost 100% of the run-time of the interpreter
+will be spent in the single function that interprets the program; therefore,
+function/call profiling won't be of much help.</p>
+<p>The main loop is fairly small, however, and there doesn't appear to be much to
+optimize at first glance (disregarding micro-optimizaitons which I won't worry
+about here). Well, except that this loop runs for every BF instruction
+encountered in the source program, so it can run <em>tons</em> of times. So what we'll
+do is get a breakdown of the ops that execute during a typical program run. The
+code for <tt class="docutils literal">optinterp</tt> already has this tracing included - it's protected with
+the <tt class="docutils literal">BFTRACE</tt> preprocessor macro because it's costly and we want to avoid
+doing it in &quot;real&quot; runs.</p>
+<p>Here's the execution profile we get from a typical run of the <tt class="docutils literal">factor</tt>
+benchmark on the prime 179424691. On the left is the operation, and on the right
+the number of times it was executed by the interpreter for the program at hand:</p>
+<div class="highlight"><pre><span></span>.  --&gt;  21
+,  --&gt;  10
++  --&gt;  212,428,900
+]  --&gt;  242,695,606
+&lt;  --&gt;  1,220,387,704
+-  --&gt;  212,328,376
+&gt;  --&gt;  1,220,387,724
+[  --&gt;  118,341,127
+.. Total: 3,226,569,468
+</pre></div>
+<p>A couple of immediate observations:</p>
+<ol class="arabic simple">
+<li>The total number of operations is <em>huge</em>: over 3 billion times around the
+main interpreter loop. It's a good thing we're using C++ for the interpreter
+- running 3 billion iterations of anything in a higher level language would
+be painful!</li>
+<li>The ratio of pointer movement instructions to loops is suspiciously high.
+There's something like 242 million loop iterations executed (the count for
+<tt class="docutils literal">]</tt>) but a total of 2.4 billion pointer moves: <tt class="docutils literal">&lt;</tt> and <tt class="docutils literal">&gt;</tt>.</li>
+</ol>
+<p>We'd expect and hope for the hot loops to be short and tight - why is every loop
+doing so much?</p>
+<p>A cursory glance at the source of <tt class="docutils literal">factor.bf</tt> provides a clue. Here's a
+representative snippet:</p>
+<div class="highlight"><pre><span></span>  &lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;[&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;]&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;
+  [&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;[-]&lt;&lt;[-&gt;+&lt;]&lt;[-&gt;&gt;&gt;+&lt;&lt;&lt;]&gt;&gt;&gt;&gt;&gt;]&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;
+  [+&gt;&gt;&gt;&gt;&gt;&gt;&gt;[-&lt;&lt;&lt;&lt;&lt;&lt;&lt;+&gt;&gt;&gt;&gt;&gt;&gt;&gt;[-&lt;&lt;&lt;&lt;&lt;&lt;&lt;-&gt;&gt;&gt;&gt;&gt;&gt;+&gt;
+           [-&lt;&lt;&lt;&lt;&lt;&lt;&lt;+&gt;&gt;&gt;&gt;&gt;&gt;&gt;[-&lt;&lt;&lt;&lt;&lt;&lt;&lt;-&gt;&gt;&gt;&gt;&gt;&gt;+&gt;
+           [-&lt;&lt;&lt;&lt;&lt;&lt;&lt;+&gt;&gt;&gt;&gt;&gt;&gt;&gt;[-&lt;&lt;&lt;&lt;&lt;&lt;&lt;-&gt;&gt;&gt;&gt;&gt;&gt;+&gt;
+           [-&lt;&lt;&lt;&lt;&lt;&lt;&lt;+&gt;&gt;&gt;&gt;&gt;&gt;&gt;[-&lt;&lt;&lt;&lt;&lt;&lt;&lt;-&gt;&gt;&gt;&gt;&gt;&gt;+&gt;
+           [-&lt;&lt;&lt;&lt;&lt;&lt;&lt;+&gt;&gt;&gt;&gt;&gt;&gt;&gt;]]]]]]]]]&lt;&lt;&lt;&lt;&lt;&lt;&lt;
+           [-&gt;&gt;&gt;&gt;&gt;&gt;&gt;+&lt;&lt;&lt;&lt;&lt;&lt;&lt;]-&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;]
+  &gt;&gt;&gt;&gt;&gt;&gt;&gt;
+  [-&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;+&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;]
+    &gt;&gt;&gt;[&gt;&gt;&gt;&gt;&gt;&gt;&gt;[-&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;+++++&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;]&gt;&gt;&gt;]&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;
+  [+&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;[-&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;+&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;[-&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;-&gt;&gt;&gt;&gt;&gt;+&gt;&gt;&gt;
+            [-&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;+&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;[-&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;-&gt;&gt;&gt;&gt;&gt;+&gt;&gt;&gt;
+            [-&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;+&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;[-&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;-&gt;&gt;&gt;&gt;&gt;+&gt;&gt;&gt;
+            [-&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;+&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;[-&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;-&gt;&gt;&gt;&gt;&gt;+&gt;&gt;&gt;
+            [-&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;+&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;]]]]]]]]]&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;
+            [-&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;+&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;]-&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;]
+  &gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;[-&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;+&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;]&gt;&gt;
+  [&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;[-&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;+++++&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;]&gt;&gt;]&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;
+  [&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;]&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;
+  &gt;&gt;&gt;&gt;&gt;&gt;
+]
+&lt;&lt;&lt;&lt;&lt;&lt;
+</pre></div>
+<p>Note the fairly long sequences of <tt class="docutils literal"><span class="pre">&lt;&lt;&lt;&lt;&lt;&lt;&lt;</span></tt>, <tt class="docutils literal"><span class="pre">&gt;&gt;&gt;&gt;&gt;&gt;&gt;</span></tt>. Just a bit of thought
+about the semantics of BF makes this clear - these are necessary to get anything
+done because we want to be able to get from cell to cell to update data.</p>
+<p>Now let's think what it means to execute a sequence such as <tt class="docutils literal"><span class="pre">&lt;&lt;&lt;&lt;&lt;&lt;&lt;</span></tt> in our
+interpreter. Our main loop executes 7 times, each time doing:</p>
+<ol class="arabic simple">
+<li>Advance <tt class="docutils literal">pc</tt> and compare it to program size.</li>
+<li>Grab the instruction at <tt class="docutils literal">pc</tt>.</li>
+<li>Switch on the value of the instruction to the right <tt class="docutils literal">case</tt>.</li>
+<li>Execute the case.</li>
+</ol>
+<p>That's quite expensive. What if we could compress all the long sequences of
+<tt class="docutils literal"><span class="pre">&lt;&lt;&lt;&lt;&lt;&lt;&lt;</span></tt>? After all, what we do for a single <tt class="docutils literal">&lt;</tt> is:</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;&lt;&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="n">dataptr</span><span class="o">--</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+</pre></div>
+<p>So for seven <tt class="docutils literal">&lt;</tt>s we could do:</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="p">...</span><span class="w"> </span><span class="no">something</span><span class="w"> </span><span class="no">representing</span><span class="w"> </span><span class="mi">7</span><span class="w"> </span><span class="o">&lt;</span><span class="no">s</span><span class="w"> </span><span class="p">...:</span><span class="w"></span>
+<span class="w">  </span><span class="n">dataptr</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="mi">7</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+</pre></div>
+<p>This is easy to generalize. We can detect any consecutive sequence in the BF
+source and encode it as a pair: the operation, and the repetition count. Then
+at execution time we simply repeat the op the required number of times.</p>
+<p>The full code for this interpreter is <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/bfjit/optinterp2.cpp">optinterp2.cpp</a>.
+Previously, we kept a separate jump table correlated to the <tt class="docutils literal">[</tt> and <tt class="docutils literal">]</tt>
+instructions in the input program. Now we need extra information for every BF
+instruction, so we'll just translate the <tt class="docutils literal">Program</tt> into a sequences of ops of
+the type:</p>
+<div class="highlight"><pre><span></span><span class="k">enum</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">BfOpKind</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">INVALID_OP</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">INC_PTR</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">DEC_PTR</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">INC_DATA</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">DEC_DATA</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">READ_STDIN</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">WRITE_STDOUT</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">JUMP_IF_DATA_ZERO</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">JUMP_IF_DATA_NOT_ZERO</span><span class="w"></span>
+<span class="p">};</span><span class="w"></span>
+
+<span class="c1">// Every op has a single numeric argument. For JUMP_* ops it&#39;s the offset to</span>
+<span class="c1">// which a jump should be made; for all other ops, it&#39;s the number of times the</span>
+<span class="c1">// op is to be repeated.</span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">BfOp</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">BfOp</span><span class="p">(</span><span class="n">BfOpKind</span><span class="w"> </span><span class="n">kind_param</span><span class="p">,</span><span class="w"> </span><span class="kt">size_t</span><span class="w"> </span><span class="n">argument_param</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="o">:</span><span class="w"> </span><span class="n">kind</span><span class="p">(</span><span class="n">kind_param</span><span class="p">),</span><span class="w"> </span><span class="n">argument</span><span class="p">(</span><span class="n">argument_param</span><span class="p">)</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">BfOpKind</span><span class="w"> </span><span class="n">kind</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">BfOpKind</span><span class="o">::</span><span class="n">INVALID_OP</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">argument</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="p">};</span><span class="w"></span>
+</pre></div>
+<p>The interpretation happens in two steps. First we run <tt class="docutils literal">translate_program</tt> to
+read the program and generate a <tt class="docutils literal"><span class="pre">std::vector&lt;BfOp&gt;</span></tt>. This translation is
+pretty straight-forward: it detects repetitions in ops like <tt class="docutils literal">&lt;</tt> and encodes
+them in the <tt class="docutils literal">argument</tt> field. A slightly tricky aspect here is handling the
+jumps, since the offsets of all ops in the program change (a run of seven
+consecutive <tt class="docutils literal">&lt;</tt>s turns into a single <tt class="docutils literal">DEC_PTR</tt>, for example). Take a look
+at the code for the full details.</p>
+<p>As planned, the main interpreter loop becomes:</p>
+<div class="highlight"><pre><span></span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">kind</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">case</span><span class="w"> </span><span class="no">BfOpKind</span><span class="o">::</span><span class="no">INC_PTR</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="n">dataptr</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">op</span><span class="p">.</span><span class="n">argument</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="k">case</span><span class="w"> </span><span class="no">BfOpKind</span><span class="o">::</span><span class="no">DEC_PTR</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="n">dataptr</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="n">op</span><span class="p">.</span><span class="n">argument</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="k">case</span><span class="w"> </span><span class="no">BfOpKind</span><span class="o">::</span><span class="no">INC_DATA</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="n">memory</span><span class="p">[</span><span class="n">dataptr</span><span class="p">]</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">op</span><span class="p">.</span><span class="n">argument</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="k">case</span><span class="w"> </span><span class="no">BfOpKind</span><span class="o">::</span><span class="no">DEC_DATA</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="n">memory</span><span class="p">[</span><span class="n">dataptr</span><span class="p">]</span><span class="w"> </span><span class="o">-=</span><span class="w"> </span><span class="n">op</span><span class="p">.</span><span class="n">argument</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="c1">// [...] etc.</span>
+</pre></div>
+<p>How fast is it? The <tt class="docutils literal">mandelbrot</tt> benchmark now takes 11.9 seconds, and
+<tt class="docutils literal">factor</tt> takes 3.7 seconds; another 40% reduction in run-time.</p>
+<img alt="BF interpreter runtime plot with opt2" class="align-center" src="../../images/2017/bf-runtime-vs-opt2.png" />
+</div>
+<div class="section" id="optimized-interpreter-take-3">
+<h2>Optimized interpreter - take 3</h2>
+<p>Our optimized interpreter now runs the <tt class="docutils literal">mandelbrot</tt> benchmark more than 3x
+faster than the original, naive interpreter. Can we do even better?</p>
+<p>First, let's take a look at instruction tracing for <tt class="docutils literal">optinterp2</tt>, repeating
+the previous experiment:</p>
+<div class="highlight"><pre><span></span>.  --&gt;  21
+]  --&gt;  242,695,606
+,  --&gt;  10
++  --&gt;  191,440,613
+&lt;  --&gt;  214,595,790
+-  --&gt;  205,040,514
+&gt;  --&gt;  270,123,690
+[  --&gt;  118,341,127
+.. Total: 1,242,237,371
+</pre></div>
+<p>The total instruction count went down almost 3x. Also, now the number of BF loop
+executions is more comparable to the number of other instructions, meaning that
+we don't do <em>too much</em> work in every iteration. This was our goal with the
+optimization of repetitions, after all.</p>
+<p>In fact, this execution profile is annoyingly flat. Performance gurus don't like
+flat profiles because there's nothing in particular sticking out that one could
+optimize. This usually means we should measure / trace something else as well.</p>
+<p>An interesting question worth answering is - what is every BF loop doing. In
+other words, what are the hottest loops we are running, and can we spend some
+more specialized effort to optimize them? This would require more sophisticated
+tracing machinery, which I've already included in the code of
+<tt class="docutils literal">optinterp2</tt>. This machinery traces loops and records the instruction
+sequence executed by each loop iteration in the program. It then sorts them by
+the number of appearances and shows the most common (hottest) loops. Here is
+the result for the <tt class="docutils literal">factor</tt> benchmark:</p>
+<div class="highlight"><pre><span></span>-1&lt;10+1&gt;10      --&gt; 32,276,219
+-1              --&gt; 28,538,377
+-1&lt;4+1&gt;4        --&gt; 15,701,515
+-1&gt;3+1&gt;1+1&lt;4    --&gt; 12,581,941
+-1&gt;3+1&gt;2+1&lt;5    --&gt; 9,579,970
+-1&lt;3+1&gt;3        --&gt; 9,004,028
+&gt;3              --&gt; 8,911,600
+-1&lt;1-1&gt;1        --&gt; 6,093,976
+-1&gt;3+1&lt;3        --&gt; 6,085,735
+-1&lt;1+1&lt;3+1&gt;4    --&gt; 5,853,530
+-1&gt;3+2&lt;3        --&gt; 5,586,229
+&gt;2              --&gt; 5,416,630
+-1&gt;1+1&lt;1        --&gt; 5,104,333
+</pre></div>
+<p>What do these traces mean? The first, most common one says:</p>
+<ol class="arabic simple">
+<li>Decrement current memory cell</li>
+<li>Move 10 cells to the left</li>
+<li>Increment current memory cell</li>
+<li>Move 10 cells to the right</li>
+</ol>
+<p>The loop doing this was executed 32 million times! Similarly, a loop doing the
+simple &quot;decrement the current cell&quot; was executed 28 million times. If you look
+in the source of <tt class="docutils literal">factor.bf</tt>, these loops are easy to spot. The first one is
+<tt class="docutils literal"><span class="pre">[-&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;+&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;]</span></tt>; the second one is just <tt class="docutils literal"><span class="pre">[-]</span></tt>.</p>
+<p>What if we could optimize these loops entirely away? After all, they are doing
+something that is much easier to express in a higher-level language. <tt class="docutils literal"><span class="pre">[-]</span></tt>
+merely sets the current memory cell to 0. <tt class="docutils literal"><span class="pre">[-&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;&lt;+&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;&gt;]</span></tt> is more
+involved, but not much more: all it does is add the value of the current memory
+cell 10 cells to the left. The trace shown above features many loops of this
+kind, along with another; loops like <tt class="docutils literal"><span class="pre">[&gt;&gt;&gt;]</span></tt> move to the right in jumps of 3
+until encountering a non-zero cell.</p>
+<p>In <tt class="docutils literal">optinterp2</tt> we've added higher-level ops to the interpreter. We can add
+some even higher-level ops to optimize away these loops.
+<a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/bfjit/optinterp3.cpp">optinterp3.cpp</a> does
+just that. It adds a few more operation kinds for encoding common loops:</p>
+<div class="highlight"><pre><span></span><span class="k">enum</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">BfOpKind</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">INVALID_OP</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">INC_PTR</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">DEC_PTR</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">INC_DATA</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">DEC_DATA</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">READ_STDIN</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">WRITE_STDOUT</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">LOOP_SET_TO_ZERO</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">LOOP_MOVE_PTR</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">LOOP_MOVE_DATA</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">JUMP_IF_DATA_ZERO</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">JUMP_IF_DATA_NOT_ZERO</span><span class="w"></span>
+<span class="p">};</span><span class="w"></span>
+</pre></div>
+<p>The new ops are <tt class="docutils literal">LOOP_SET_TO_ZERO</tt> which replaces <tt class="docutils literal"><span class="pre">[-]</span></tt>, <tt class="docutils literal">LOOP_MOVE_PTR</tt>
+for loops like <tt class="docutils literal"><span class="pre">[&gt;&gt;&gt;]</span></tt> and <tt class="docutils literal">LOOP_MOVE_DATA</tt> for loops like <tt class="docutils literal"><span class="pre">[-&lt;&lt;&lt;+&gt;&gt;&gt;]</span></tt>.
+We'll now need a slightly more sophisticated translation step that detects these
+loops in the input program and emits the proper <tt class="docutils literal">LOOP_*</tt> ops. For an example
+of how it's done, here's the translation for <tt class="docutils literal"><span class="pre">[-]</span></tt>:</p>
+<div class="highlight"><pre><span></span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">BfOp</span><span class="o">&gt;</span><span class="w"> </span><span class="n">optimize_loop</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">BfOp</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">ops</span><span class="p">,</span><span class="w"></span>
+<span class="w">                                </span><span class="kt">size_t</span><span class="w"> </span><span class="n">loop_start</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">BfOp</span><span class="o">&gt;</span><span class="w"> </span><span class="n">new_ops</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">ops</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">loop_start</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">BfOp</span><span class="w"> </span><span class="n">repeated_op</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ops</span><span class="p">[</span><span class="n">loop_start</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">];</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">repeated_op</span><span class="p">.</span><span class="n">kind</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">BfOpKind</span><span class="o">::</span><span class="n">INC_DATA</span><span class="w"> </span><span class="o">||</span><span class="w"></span>
+<span class="w">        </span><span class="n">repeated_op</span><span class="p">.</span><span class="n">kind</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">BfOpKind</span><span class="o">::</span><span class="n">DEC_DATA</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">new_ops</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">BfOp</span><span class="p">(</span><span class="n">BfOpKind</span><span class="o">::</span><span class="n">LOOP_SET_TO_ZERO</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">));</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// [...]</span>
+</pre></div>
+<p>This function is called when translating the BF program to a sequence of ops.
+<tt class="docutils literal">loop_start</tt> is the index in <tt class="docutils literal">ops</tt> where the most recent loop starts. The
+code shown above detects the case where the only contents of the loop is a
+single <tt class="docutils literal">-</tt> (or <tt class="docutils literal">+</tt> since in BF memory cells hold unsigned values with
+wrap-around). In such cases, a <tt class="docutils literal">LOOP_SET_TO_ZERO</tt> op is emitted. When the
+interpreter itself runs into a <tt class="docutils literal">LOOP_SET_TO_ZERO</tt>, it does just what you'd
+expect:</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="no">BfOpKind</span><span class="o">::</span><span class="no">LOOP_SET_TO_ZERO</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="n">memory</span><span class="p">[</span><span class="n">dataptr</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+</pre></div>
+<p>The other loop optimizations are a tiny bit more involved, but all follow the
+same basic idea.</p>
+<p>We expect this optimization to be very significant - we've just taken some of
+the hottest loops the program runs and folded them into a single, efficient
+instruction (or a sequence of efficient instructions for pointer-movement
+loops). And indeed, <tt class="docutils literal">optinterp3</tt> is very fast: 3.9 seconds on <tt class="docutils literal">mandelbrot</tt>
+and 1.97 seconds on <tt class="docutils literal">factor</tt>.</p>
+<img alt="BF interpreter runtime plot with opt3" class="align-center" src="../../images/2017/bf-runtime-vs-opt3.png" />
+<p>The overall speedup is dramatic. <tt class="docutils literal">optinterp3</tt> is almost 10x faster than
+<tt class="docutils literal">simpleinterp</tt> on our benchmarks. While we could certainly make it even
+faster, I think these optimizations are sufficient for our needs; let's talk
+about what we can learn from them instead.</p>
+</div>
+<div class="section" id="on-compilers-bytecode-and-tracing-jits">
+<h2>On compilers, bytecode and tracing JITs</h2>
+<p>It turns out there's a surprising amount of insight to be gained from the
+exercise this post went through.</p>
+<p>First, let's start with the distinction between compilers and interpreters.
+According <a class="reference external" href="https://en.wikipedia.org/wiki/Compiler">to Wikipedia</a>, a compiler
+is:</p>
+<blockquote>
+a computer program (or a set of programs) that transforms source code written
+in a programming language (the source language) into another computer
+language (the target language), with the latter often having a binary form
+known as object code.</blockquote>
+<p><tt class="docutils literal">gcc</tt> would be the canonical example of this: it transforms source code
+written in C (or C++) into assembly language for, say, Intel CPUs. But there
+are many other kinds of compilers: <a class="reference external" href="https://www.call-cc.org/">Chicken</a>
+compiles Scheme into C; <a class="reference external" href="https://en.wikipedia.org/wiki/Rhino_(JavaScript_engine)">Rhino</a>
+compiles Javascript to JVM bytecode; the <a class="reference external" href="https://clang.llvm.org/">Clang frontend</a> compiles C++ to LLVM IR. CPython, the canonical
+Python implementation compiles Python source code <a class="reference external" href="../../2010/06/30/python-internals-adding-a-new-statement-to-python.html">to bytecode</a>,
+and so on. In general, the term <a class="reference external" href="https://en.wikipedia.org/wiki/Bytecode">Bytecode</a> refers to any intermediate
+representation / virtual instruction set designed for efficient interpretation.</p>
+<p>Based on this definition, while <tt class="docutils literal">simpleinterp</tt> is indeed just a BF
+interpreter, the optimized interpreters described here are more like compilers +
+bytecode interpreters. Consider <tt class="docutils literal">optinterp3</tt> for example. The source language
+is BF; the target language is bytecode with the following instruction set:</p>
+<div class="highlight"><pre><span></span><span class="k">enum</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">BfOpKind</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">INVALID_OP</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">INC_PTR</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">DEC_PTR</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">INC_DATA</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">DEC_DATA</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">READ_STDIN</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">WRITE_STDOUT</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">LOOP_SET_TO_ZERO</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">LOOP_MOVE_PTR</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">LOOP_MOVE_DATA</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">JUMP_IF_DATA_ZERO</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">JUMP_IF_DATA_NOT_ZERO</span><span class="w"></span>
+<span class="p">};</span><span class="w"></span>
+</pre></div>
+<p>... where each instruction has a single argument. <tt class="docutils literal">optinterp3</tt> first
+<em>compiles</em> BF to this bytecode, and only then executes the bytecode. So if we
+squint a bit, there's a JIT compiler here already - with the caveat that the
+compilation target is not executable machine code but rather this specialized
+bytecode. Worry not - we'll get to a <em>real</em> JIT in the next part of the series.</p>
+<p>Finally, I'd like to point out that the loop optimizations performed in
+<tt class="docutils literal">optinterp3</tt> are the static version of a <a class="reference external" href="https://en.wikipedia.org/wiki/Tracing_just-in-time_compilation">tracing JIT</a>. We used
+tracing to observe which loops occur most commonly in our benchmarks, and
+optimized these loops. While the loops we optimized were very generic and surely
+appear in most large BF programs, we could take it further. We could optimize
+even more of the hottest loops, but with time we'd get into more specialized
+paths in our particular benchmarks.</p>
+<p>To be fully generic, we'd have to defer this optimization to run-time, which is
+what a tracing JIT does. A tracing JIT interprets code in the source language
+and keeps track of the hottest loops (and for dynamic languages, of the <em>actual</em>
+run-time types of values flowing through the loops). When the same loop goes
+over some threshold (say, invoked more than a million times) the loop is
+optimized and compiled into efficient machine code.</p>
+</div>
+<div class="section" id="parting-words-for-part-1">
+<h2>Parting words for part 1</h2>
+<p>In this post, we've seen an interpreter for BF being gradually refined from a
+naive approach to a compile-to-optimized-bytecode approach, speeding it up 10x
+in the process. Hopefully this provides a good feel for the source language, as
+well as some of the tradeoffs involved in optimizing for it.</p>
+<p>In the next part of the series I'll present an actual JIT for BF - compiling BF
+into tight x64 machine code and invoking it, all at run-time. I'll show how to
+construct such a JIT compiler entirely from scratch (using nothing but the
+standard system libraries) and also how to use assembly encoding libraries for
+easier development. Stay tuned - it's going to be fun!</p>
+<hr class="docutils" />
+<p>Links to all posts in this series:</p>
+<ul class="simple">
+<li><a class="reference external" href="index.html">Part 1 - an interpreter</a></li>
+<li><a class="reference external" href="../adventures-in-jit-compilation-part-2-an-x64-jit/index.html">Part 2 - an x64 JIT</a></li>
+<li><a class="reference external" href="../adventures-in-jit-compilation-part-3-llvm/index.html">Part 3 - LLVM</a></li>
+<li><a class="reference external" href="../adventures-in-jit-compilation-part-4-in-python/index.html">Part 4 - Python</a></li>
+</ul>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>An observant reader will note I could have used a switch statement or
+a lookup table here for more efficiency. I'm an avid adherent to the
+&quot;until you've measured it, it ain't slow&quot; philosophy. The parsing stage
+of BF takes negligible time for any realistic program, so it's hardly
+important to optimize this part. On my machine, the largest BF program I
+could find (Mandelbrot) is ~11,000 instructions and takes 360
+<em>microseconds</em> to parse, most of which is almost certainly dominated by
+the file read time.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td><p class="first">I'm using two different programs to prevent overfitting for one
+particular benchmark. Naturally it would be more professional to use a
+whole suite of benchmarks, but this is just a hobby blog post so let's
+not overdo it B-)</p>
+<p class="last">In fact, even real-world benchmark suites for large projects tend to be
+<a class="reference external" href="https://v8project.blogspot.com/2016/12/how-v8-measures-real-world-performance.html">poor approximations for the real world</a>.</p>
+</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td><p class="first">All the performance numbers for this series were collected on my Haswell
+Linux (Ubuntu 14.04) box; the C++ code was compiled with the default gcc
+4.8.4. I got slightly different results with Clang in some cases, but
+this series is not about comparing host C++ compilers, so I'll just use
+gcc throughout.</p>
+<p class="last">It's also worth noting these execution times are end-to-end for the whole
+binary and include loading the interpreter binary, reading the BF file,
+doing any pre-processing / optimization / code emission and actually
+running the benchmark. For any run time beyond ~100 ms, all
+secondary factors are negligible compared to the actual benchmark
+run-time (the time it took to execute the BF program at hand).</p>
+</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

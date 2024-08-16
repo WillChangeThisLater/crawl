@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Basic source-to-source transformation with Clang - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../../index.html" class="navbar-brand">
+                <img src="../../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="../basic-source-to-source-transformation-with-clang.html"
+                       rel="bookmark"
+                       title="Permalink to Basic source-to-source transformation with Clang">
+                        Basic source-to-source transformation with Clang
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> June 08, 2012 at 07:38</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../../../tag/compilation.html">Compilation</a>
+        ,
+    <a href="../../../../tag/llvm-clang.html">LLVM & Clang</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p><strong>Note (01.05.2014)</strong>: take a look at <a href="../../../../2014/05/01/modern-source-to-source-transformation-with-clang-and-libtooling/index.html">an updated version of this post</a> that uses libTooling to achieve the same goal.</p>
+<p><strong>Note (25.12.2013)</strong>: this code doesn't work with the newest Clang. For up-to-date code, check out my <a class="reference external" href="https://github.com/eliben/llvm-clang-samples">llvm-clang-samples repository</a>.</p>
+<p>Source-to-source transformation of C/C++ code is known to be a <a class="reference external" href="http://www.spinellis.gr/pubs/jrnl/2003-TSE-Refactor/html/Spi03r.html">hard problem</a>. And yet, with the recent maturity of <a class="reference external" href="http://clang.llvm.org/">Clang</a> as a powerful and library-friendly C++ compiler, I think there may finally be some light at the end of the tunnel.</p>
+<p>This post serves as a demonstration of basic source-to-source transformations with Clang. Specifically, it builds a simple program that links to Clang's libraries (statically) and directly operates on Clang's C++ API to achieve its goals. The C++ API of Clang is a moving target, so there's a good chance this code will require modifications with next versions of Clang. At this point I verified that it works with release 3.1 and today's trunk.</p>
+<p>The transformation itself done here is trivial and not really interesting - the program just adds comments in a few places (before and after function definitions, and inside <tt class="docutils literal">if</tt> statements). The main goal here is to show how to set up the whole Clang machinery to enable this, and how to build the thing so it compiles and links correctly.</p>
+<div class="section" id="the-code">
+<h3>The code</h3>
+<p>This is <tt class="docutils literal">rewritersample.cpp</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">//-------------------------------------------------------------------------</span>
+<span style="color: #007f00">//</span>
+<span style="color: #007f00">// rewritersample.cpp: Source-to-source transformation sample with Clang,</span>
+<span style="color: #007f00">// using Rewriter - the code rewriting interface.</span>
+<span style="color: #007f00">//</span>
+<span style="color: #007f00">// Eli Bendersky (eliben@gmail.com)</span>
+<span style="color: #007f00">// This code is in the public domain</span>
+<span style="color: #007f00">//</span>
+<span style="color: #007f00">#include &lt;cstdio&gt;</span>
+<span style="color: #007f00">#include &lt;string&gt;</span>
+<span style="color: #007f00">#include &lt;sstream&gt;</span>
+
+<span style="color: #007f00">#include &quot;clang/AST/ASTConsumer.h&quot;</span>
+<span style="color: #007f00">#include &quot;clang/AST/RecursiveASTVisitor.h&quot;</span>
+<span style="color: #007f00">#include &quot;clang/Basic/Diagnostic.h&quot;</span>
+<span style="color: #007f00">#include &quot;clang/Basic/FileManager.h&quot;</span>
+<span style="color: #007f00">#include &quot;clang/Basic/SourceManager.h&quot;</span>
+<span style="color: #007f00">#include &quot;clang/Basic/TargetOptions.h&quot;</span>
+<span style="color: #007f00">#include &quot;clang/Basic/TargetInfo.h&quot;</span>
+<span style="color: #007f00">#include &quot;clang/Frontend/CompilerInstance.h&quot;</span>
+<span style="color: #007f00">#include &quot;clang/Lex/Preprocessor.h&quot;</span>
+<span style="color: #007f00">#include &quot;clang/Parse/ParseAST.h&quot;</span>
+<span style="color: #007f00">#include &quot;clang/Rewrite/Rewriter.h&quot;</span>
+<span style="color: #007f00">#include &quot;clang/Rewrite/Rewriters.h&quot;</span>
+<span style="color: #007f00">#include &quot;llvm/Support/Host.h&quot;</span>
+<span style="color: #007f00">#include &quot;llvm/Support/raw_ostream.h&quot;</span>
+
+<span style="color: #00007f; font-weight: bold">using</span> <span style="color: #00007f; font-weight: bold">namespace</span> clang;
+<span style="color: #00007f; font-weight: bold">using</span> <span style="color: #00007f; font-weight: bold">namespace</span> std;
+
+
+<span style="color: #007f00">// By implementing RecursiveASTVisitor, we can specify which AST nodes</span>
+<span style="color: #007f00">// we&#39;re interested in by overriding relevant methods.</span>
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">MyASTVisitor</span> : <span style="color: #00007f; font-weight: bold">public</span> RecursiveASTVisitor&lt;MyASTVisitor&gt;
+{
+<span style="color: #00007f; font-weight: bold">public</span>:
+    MyASTVisitor(Rewriter &amp;R)
+        : TheRewriter(R)
+    {}
+
+    <span style="color: #00007f; font-weight: bold">bool</span> VisitStmt(Stmt *s) {
+        <span style="color: #007f00">// Only care about If statements.</span>
+        <span style="color: #00007f; font-weight: bold">if</span> (isa&lt;IfStmt&gt;(s)) {
+            IfStmt *IfStatement = cast&lt;IfStmt&gt;(s);
+            Stmt *Then = IfStatement-&gt;getThen();
+
+            TheRewriter.InsertText(Then-&gt;getLocStart(),
+                                   <span style="color: #7f007f">&quot;// the &#39;if&#39; part\n&quot;</span>,
+                                   <span style="color: #00007f; font-weight: bold">true</span>, <span style="color: #00007f; font-weight: bold">true</span>);
+
+            Stmt *Else = IfStatement-&gt;getElse();
+            <span style="color: #00007f; font-weight: bold">if</span> (Else)
+                TheRewriter.InsertText(Else-&gt;getLocStart(),
+                                       <span style="color: #7f007f">&quot;// the &#39;else&#39; part\n&quot;</span>,
+                                       <span style="color: #00007f; font-weight: bold">true</span>, <span style="color: #00007f; font-weight: bold">true</span>);
+        }
+
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f; font-weight: bold">true</span>;
+    }
+
+    <span style="color: #00007f; font-weight: bold">bool</span> VisitFunctionDecl(FunctionDecl *f) {
+        <span style="color: #007f00">// Only function definitions (with bodies), not declarations.</span>
+        <span style="color: #00007f; font-weight: bold">if</span> (f-&gt;hasBody()) {
+            Stmt *FuncBody = f-&gt;getBody();
+
+            <span style="color: #007f00">// Type name as string</span>
+            QualType QT = f-&gt;getResultType();
+            string TypeStr = QT.getAsString();
+
+            <span style="color: #007f00">// Function name</span>
+            DeclarationName DeclName = f-&gt;getNameInfo().getName();
+            string FuncName = DeclName.getAsString();
+
+            <span style="color: #007f00">// Add comment before</span>
+            stringstream SSBefore;
+            SSBefore &lt;&lt; <span style="color: #7f007f">&quot;// Begin function &quot;</span> &lt;&lt; FuncName &lt;&lt; <span style="color: #7f007f">&quot; returning &quot;</span>
+                     &lt;&lt; TypeStr &lt;&lt; <span style="color: #7f007f">&quot;\n&quot;</span>;
+            SourceLocation ST = f-&gt;getSourceRange().getBegin();
+            TheRewriter.InsertText(ST, SSBefore.str(), <span style="color: #00007f; font-weight: bold">true</span>, <span style="color: #00007f; font-weight: bold">true</span>);
+
+            <span style="color: #007f00">// And after</span>
+            stringstream SSAfter;
+            SSAfter &lt;&lt; <span style="color: #7f007f">&quot;\n// End function &quot;</span> &lt;&lt; FuncName &lt;&lt; <span style="color: #7f007f">&quot;\n&quot;</span>;
+            ST = FuncBody-&gt;getLocEnd().getLocWithOffset(<span style="color: #007f7f">1</span>);
+            TheRewriter.InsertText(ST, SSAfter.str(), <span style="color: #00007f; font-weight: bold">true</span>, <span style="color: #00007f; font-weight: bold">true</span>);
+        }
+
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f; font-weight: bold">true</span>;
+    }
+
+<span style="color: #00007f; font-weight: bold">private</span>:
+    <span style="color: #00007f; font-weight: bold">void</span> AddBraces(Stmt *s);
+
+    Rewriter &amp;TheRewriter;
+};
+
+
+<span style="color: #007f00">// Implementation of the ASTConsumer interface for reading an AST produced</span>
+<span style="color: #007f00">// by the Clang parser.</span>
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">MyASTConsumer</span> : <span style="color: #00007f; font-weight: bold">public</span> ASTConsumer
+{
+<span style="color: #00007f; font-weight: bold">public</span>:
+    MyASTConsumer(Rewriter &amp;R)
+        : Visitor(R)
+    {}
+
+    <span style="color: #007f00">// Override the method that gets called for each parsed top-level</span>
+    <span style="color: #007f00">// declaration.</span>
+    <span style="color: #00007f; font-weight: bold">virtual</span> <span style="color: #00007f; font-weight: bold">bool</span> HandleTopLevelDecl(DeclGroupRef DR) {
+        <span style="color: #00007f; font-weight: bold">for</span> (DeclGroupRef::iterator b = DR.begin(), e = DR.end();
+             b != e; ++b)
+            <span style="color: #007f00">// Traverse the declaration using our AST visitor.</span>
+            Visitor.TraverseDecl(*b);
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f; font-weight: bold">true</span>;
+    }
+
+<span style="color: #00007f; font-weight: bold">private</span>:
+    MyASTVisitor Visitor;
+};
+
+
+<span style="color: #00007f; font-weight: bold">int</span> main(<span style="color: #00007f; font-weight: bold">int</span> argc, <span style="color: #00007f; font-weight: bold">char</span> *argv[])
+{
+    <span style="color: #00007f; font-weight: bold">if</span> (argc != <span style="color: #007f7f">2</span>) {
+        llvm::errs() &lt;&lt; <span style="color: #7f007f">&quot;Usage: rewritersample &lt;filename&gt;\n&quot;</span>;
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">1</span>;
+    }
+
+    <span style="color: #007f00">// CompilerInstance will hold the instance of the Clang compiler for us,</span>
+    <span style="color: #007f00">// managing the various objects needed to run the compiler.</span>
+    CompilerInstance TheCompInst;
+    TheCompInst.createDiagnostics(<span style="color: #007f7f">0</span>, <span style="color: #007f7f">0</span>);
+
+    <span style="color: #007f00">// Initialize target info with the default triple for our platform.</span>
+    TargetOptions TO;
+    TO.Triple = llvm::sys::getDefaultTargetTriple();
+    TargetInfo *TI = TargetInfo::CreateTargetInfo(
+        TheCompInst.getDiagnostics(), TO);
+    TheCompInst.setTarget(TI);
+
+    TheCompInst.createFileManager();
+    FileManager &amp;FileMgr = TheCompInst.getFileManager();
+    TheCompInst.createSourceManager(FileMgr);
+    SourceManager &amp;SourceMgr = TheCompInst.getSourceManager();
+    TheCompInst.createPreprocessor();
+    TheCompInst.createASTContext();
+
+    <span style="color: #007f00">// A Rewriter helps us manage the code rewriting task.</span>
+    Rewriter TheRewriter;
+    TheRewriter.setSourceMgr(SourceMgr, TheCompInst.getLangOpts());
+
+    <span style="color: #007f00">// Set the main file handled by the source manager to the input file.</span>
+    <span style="color: #00007f; font-weight: bold">const</span> FileEntry *FileIn = FileMgr.getFile(argv[<span style="color: #007f7f">1</span>]);
+    SourceMgr.createMainFileID(FileIn);
+    TheCompInst.getDiagnosticClient().BeginSourceFile(
+        TheCompInst.getLangOpts(),
+        &amp;TheCompInst.getPreprocessor());
+
+    <span style="color: #007f00">// Create an AST consumer instance which is going to get called by</span>
+    <span style="color: #007f00">// ParseAST.</span>
+    MyASTConsumer TheConsumer(TheRewriter);
+
+    <span style="color: #007f00">// Parse the file to AST, registering our consumer as the AST consumer.</span>
+    ParseAST(TheCompInst.getPreprocessor(), &amp;TheConsumer,
+             TheCompInst.getASTContext());
+
+    <span style="color: #007f00">// At this point the rewriter&#39;s buffer should be full with the rewritten</span>
+    <span style="color: #007f00">// file contents.</span>
+    <span style="color: #00007f; font-weight: bold">const</span> RewriteBuffer *RewriteBuf =
+        TheRewriter.getRewriteBufferFor(SourceMgr.getMainFileID());
+    llvm::outs() &lt;&lt; string(RewriteBuf-&gt;begin(), RewriteBuf-&gt;end());
+
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">0</span>;
+}
+</pre></div>
+</div>
+<div class="section" id="the-makefile">
+<h3>The makefile</h3>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">CXX = g++
+CFLAGS = -fno-rtti
+
+LLVM_SRC_PATH = ___PATH-TO-LLVM-SOURCE-DIR___
+LLVM_BUILD_PATH = ___PATH-TO-LLVM-BUILD-DIR___
+
+LLVM_BIN_PATH = <span style="color: #00007f; font-weight: bold">$(</span>LLVM_BUILD_PATH<span style="color: #00007f; font-weight: bold">)</span>/Debug+Asserts/bin
+LLVM_LIBS=core mc
+LLVM_CONFIG_COMMAND = <span style="color: #00007f; font-weight: bold">$(</span>LLVM_BIN_PATH<span style="color: #00007f; font-weight: bold">)</span>/llvm-config --cxxflags --ldflags <span style="color: #7f007f">\</span>
+                                        --libs <span style="color: #00007f; font-weight: bold">$(</span>LLVM_LIBS<span style="color: #00007f; font-weight: bold">)</span>
+CLANG_BUILD_FLAGS = -I<span style="color: #00007f; font-weight: bold">$(</span>LLVM_SRC_PATH<span style="color: #00007f; font-weight: bold">)</span>/tools/clang/include <span style="color: #7f007f">\</span>
+                                      -I<span style="color: #00007f; font-weight: bold">$(</span>LLVM_BUILD_PATH<span style="color: #00007f; font-weight: bold">)</span>/tools/clang/include
+
+CLANGLIBS = <span style="color: #7f007f">\</span>
+  -lclangFrontendTool -lclangFrontend -lclangDriver <span style="color: #7f007f">\</span>
+  -lclangSerialization -lclangCodeGen -lclangParse <span style="color: #7f007f">\</span>
+  -lclangSema -lclangStaticAnalyzerFrontend <span style="color: #7f007f">\</span>
+  -lclangStaticAnalyzerCheckers -lclangStaticAnalyzerCore <span style="color: #7f007f">\</span>
+  -lclangAnalysis -lclangARCMigrate -lclangRewrite <span style="color: #7f007f">\</span>
+  -lclangEdit -lclangAST -lclangLex -lclangBasic
+
+all: rewritersample
+
+rewritersample: rewritersample.cpp
+      <span style="color: #00007f; font-weight: bold">$(</span>CXX<span style="color: #00007f; font-weight: bold">)</span> rewritersample.cpp <span style="color: #00007f; font-weight: bold">$(</span>CFLAGS<span style="color: #00007f; font-weight: bold">)</span> -o rewritersample <span style="color: #7f007f">\</span>
+              <span style="color: #00007f; font-weight: bold">$(</span>CLANG_BUILD_FLAGS<span style="color: #00007f; font-weight: bold">)</span> <span style="color: #00007f; font-weight: bold">$(</span>CLANGLIBS<span style="color: #00007f; font-weight: bold">)</span> <span style="color: #7f007f">`<code>__abENT__lt;__abENT__#8260;span__abENT__gt;__abENT__lt;span style=__abENT__quot;color: #00007f; font-weight: bold__abENT__quot;__abENT__gt;$(__abENT__lt;__abENT__#8260;span__abENT__gt;LLVM_CONFIG_COMMAND__abENT__lt;span style=__abENT__quot;color: #00007f; font-weight: bold__abENT__quot;__abENT__gt;)__abENT__lt;__abENT__#8260;span__abENT__gt;__abENT__lt;span style=__abENT__quot;color: #7f007f__abENT__quot;__abENT__gt;</code>`</span>
+
+clean:
+      rm -rf *.o *.ll rewritersample
+</pre></div>
+<p>First, let's discuss the makefile and what's important to look for.</p>
+<p>You must replace <tt class="docutils literal"><span class="pre">__PATH_TO...</span></tt> with the correct paths. The SRC path is where LLVM source root lives. BUILD path is where it was built. Note that this implies a source checkout and build with <tt class="docutils literal">configure</tt>. If you use a <tt class="docutils literal">CMake</tt> build, or build against binaries, you may have to fiddle with the paths a bit (including <tt class="docutils literal">LLVM_BIN_PATH</tt>).</p>
+<p><tt class="docutils literal"><span class="pre">llvm-config</span></tt> does a great job of figuring out the compile and link flags needed for LLVM and Clang. However, it currently only handles LLVM libs, and Clang libs have to be specified explicitly. The problem with this is that linkers, being sensitive to the order of libraries, are fickle, and it's easy to get link errors if the libs are not specified in the correct order. A good place to see the up-to-date library list for Clang is <tt class="docutils literal">tools/driver/Makefile</tt> - the makefile for the main Clang driver.</p>
+<p>Note also that the include dirs have to be speficied explicitly for Clang. This is important - if you have some version of Clang <em>installed</em> and these are not specified explicitly, you may get nasty linking errors (complaining about things like <tt class="docutils literal">classof</tt>).</p>
+</div>
+<div class="section" id="what-the-code-does-general">
+<h3>What the code does - general</h3>
+<p>Now, back to the source code. Our goal is to set up the Clang libraries to parse some source code into an AST, and then let us somehow traverse the AST and modify the source code.</p>
+<p>A major challenge in writing a tool using Clang as a library is setting everything up. The Clang frontend is a complex beast and consists of many parts. For the sake of modularity and testability, these parts are decoupled and hence take some work to set up. Fortunately, the Clang developers have provided a convenience class named <tt class="docutils literal">CompilerInstance</tt> that helps with this task by collecting together everything needed to set up a functional Clang-based frontend. The bulk of the <tt class="docutils literal">main</tt> function in my sample deals with setting up a <tt class="docutils literal">CompilerInstance</tt>.</p>
+<p>The key call in <tt class="docutils literal">main</tt> is to <tt class="docutils literal">ParseAST</tt>. This function parses the input into an AST, and passes this AST to an implementation of the <tt class="docutils literal">ASTConsumer</tt> interface, which represents some entity consuming the AST and acting upon it.</p>
+</div>
+<div class="section" id="astconsumer">
+<h3>ASTConsumer</h3>
+<p>My implementation of <tt class="docutils literal">ASTConsumer</tt> is <tt class="docutils literal">MyASTConsumer</tt>. It's a very simple class that only implements one method of the interface - <tt class="docutils literal">HandleTopLevelDecl</tt>. This gets called by Clang whenever a top-level declaration (which also counts function definitions) is completed.</p>
+</div>
+<div class="section" id="recursiveastvisitor">
+<h3>RecursiveASTVisitor</h3>
+<p>The main work-horse of AST traversal is <tt class="docutils literal">MyASTVisitor</tt>, an implementation of <tt class="docutils literal">RecursiveASTVisitor</tt>. This is the classical visitor pattern, with a method per interesting AST node. My code defines only a couple of visitor methods - to handle statements and function declarations. Note how the class itself is defined - this is a nice example of the curiously recurring template pattern (and actually the one I used in my <a class="reference external" href="../../../../2011/05/17/the-curiously-recurring-template-pattern-in-c/index.html">earlier article on CRTP</a>).</p>
+</div>
+<div class="section" id="rewriter">
+<h3>Rewriter</h3>
+<p>The <tt class="docutils literal">Rewriter</tt> is a key component in the source-to-source transformation scheme implemented by this code. Instead of handling every possible AST node to spit back code from the AST, the approach taken here is to surgically change the original code at key places to perform the transformation. The <tt class="docutils literal">Rewriter</tt> class is crucial for this. It's a sophisticated buffer manager that uses a <a class="reference external" href="http://en.wikipedia.org/wiki/Rope_%28computer_science%29">rope data structure</a> to enable efficient slicing-and-dicing of the source. Coupled with Clang's excellent preservation of source locations for all AST nodes, <tt class="docutils literal">Rewriter</tt> enables to remove and insert code very accurately. Read its source code for more insights.</p>
+</div>
+<div class="section" id="other-resources">
+<h3>Other resources</h3>
+<p>Many thanks for the maintainers of the <a class="reference external" href="https://github.com/loarabia/Clang-tutorial">Clang-tutorial</a> repository - my code is based on one of the examples taken from there.</p>
+<p>Another source of information is the &quot;tooling&quot; library that's starting to emerge in Clang (<tt class="docutils literal">include/clang/Tooling</tt>). It's being developed by members of the Clang community that are writing in-house refactoring and code-transformation tools based on Clang as a library, so it's a relevant source.</p>
+<p>Finally, due to the scarcity of Clang's external documentation, the best source of information remains the code itself. While at first somewhat formidable, Clang's code is actually very well organized and is readable enough.</p>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../../theme/js/count.js"></script>
+</body>
+</html>

@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Programmatic access to the call stack in C++ - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Programmatic access to the call stack in C++">
+                        Programmatic access to the call stack in C++
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> July 15, 2015 at 05:33</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/debuggers.html">Debuggers</a>
+        ,
+    <a href="../../tag/c-c.html">C & C++</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>Sometimes when working on a large project, I find it useful to figure out all
+the places from which some function or method is called. Moreover, more often
+than not I don't just want the immediate caller, but the whole call stack. This
+is most useful in two scenarios - when debugging and when trying to figure out
+how some code works.</p>
+<p>One possible solution is to use a debugger - run the program within a debugger,
+place a breakpoint in the interesting place, examine call stack when stopped.
+While this works and can sometimes be very useful, I personally prefer a more
+programmatic approach. I want to change the code in a way that will print
+out the call stack in every place I find interesting. Then I can use grepping
+and more sophisticated tools to analyze the call logs and thus gain a better
+understanding of the workings of some piece of code.</p>
+<p>In this post, I want to present a relatively simple method to do this. It's
+aimed mainly at Linux, but should work with little modification on other Unixes
+(including OS X).</p>
+<div class="section" id="obtaining-the-backtrace-libunwind">
+<h2>Obtaining the backtrace - libunwind</h2>
+<p>I'm aware of three reasonably well-known methods of accessing the call stack
+programmatically:</p>
+<ol class="arabic simple">
+<li>The gcc builtin macro <tt class="docutils literal">__builtin_return_address</tt>: very crude, low-level
+approach. This obtains the return address of the function on each frame on
+the stack. Note: just the address, not the function name. So extra processing
+is required to obtain the function name.</li>
+<li>glibc's <tt class="docutils literal">backtrace</tt> and <tt class="docutils literal">backtrace_symbols</tt>: can obtain the actual symbol
+names for the functions on the call stack.</li>
+<li><tt class="docutils literal">libunwind</tt></li>
+</ol>
+<p>Between the three, I strongly prefer <tt class="docutils literal">libunwind</tt>, as it's the most modern,
+widespread and portable solution. It's also more flexible than <tt class="docutils literal">backtrace</tt>,
+being able to provide extra information such as values of CPU registers at each
+stack frame.</p>
+<p>Moreover, in the zoo of system programming, <tt class="docutils literal">libunwind</tt> is the closest to the
+&quot;official word&quot; you can get these days. For example, gcc can use <tt class="docutils literal">libunwind</tt>
+for implementing zero-cost C++ exceptions (which requires stack unwinding when
+an exception is actually thrown) <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>. LLVM also has a re-implementation of the
+<tt class="docutils literal">libunwind</tt> interface in <a class="reference external" href="http://libcxx.llvm.org">libc++</a>, which is used for
+unwinding in LLVM toolchains based on this library.</p>
+</div>
+<div class="section" id="code-sample">
+<h2>Code sample</h2>
+<p>Here's a complete code sample for using <tt class="docutils literal">libunwind</tt> to obtain the backtrace
+from an arbitrary point in the execution of a program. Refer to the <a class="reference external" href="http://www.nongnu.org/libunwind/docs.html">libunwind
+documentation</a> for more details
+about the API functions invoked here:</p>
+<div class="highlight"><pre><span></span><span class="cp">#define UNW_LOCAL_ONLY</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;libunwind.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;stdio.h&gt;</span><span class="cp"></span>
+
+<span class="c1">// Call this function to get a backtrace.</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">backtrace</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">unw_cursor_t</span><span class="w"> </span><span class="n">cursor</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">unw_context_t</span><span class="w"> </span><span class="n">context</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Initialize cursor to current frame for local unwinding.</span>
+<span class="w">  </span><span class="n">unw_getcontext</span><span class="p">(</span><span class="o">&amp;</span><span class="n">context</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">unw_init_local</span><span class="p">(</span><span class="o">&amp;</span><span class="n">cursor</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">context</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Unwind frames one by one, going up the frame stack.</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">unw_step</span><span class="p">(</span><span class="o">&amp;</span><span class="n">cursor</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">unw_word_t</span><span class="w"> </span><span class="n">offset</span><span class="p">,</span><span class="w"> </span><span class="n">pc</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">unw_get_reg</span><span class="p">(</span><span class="o">&amp;</span><span class="n">cursor</span><span class="p">,</span><span class="w"> </span><span class="n">UNW_REG_IP</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">pc</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">pc</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;0x%lx:&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">pc</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="n">sym</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">unw_get_proc_name</span><span class="p">(</span><span class="o">&amp;</span><span class="n">cursor</span><span class="p">,</span><span class="w"> </span><span class="n">sym</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">sym</span><span class="p">),</span><span class="w"> </span><span class="o">&amp;</span><span class="n">offset</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot; (%s+0x%lx)</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">sym</span><span class="p">,</span><span class="w"> </span><span class="n">offset</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot; -- error: unable to obtain symbol name for this frame</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">foo</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">backtrace</span><span class="p">();</span><span class="w"> </span><span class="c1">// &lt;-------- backtrace here!</span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">bar</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">foo</span><span class="p">();</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="w"> </span><span class="o">**</span><span class="n">argv</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">bar</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p><tt class="docutils literal">libunwind</tt> is easy to install from source or as a package. I just built it
+from source with the usual <tt class="docutils literal">configure</tt>, <tt class="docutils literal">make</tt> and <tt class="docutils literal">make install</tt> sequence
+and placed it into <tt class="docutils literal">/usr/local/lib</tt>.</p>
+<p>Once you have <tt class="docutils literal">libunwind</tt> installed in a place the compiler can find <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>,
+compile the code snippet with:</p>
+<div class="highlight"><pre><span></span>gcc -o libunwind_backtrace -Wall -g libunwind_backtrace.c -lunwind
+</pre></div>
+<p>Finally, run:</p>
+<div class="highlight"><pre><span></span>$ LD_LIBRARY_PATH=/usr/local/lib ./libunwind_backtrace
+0x400958: (foo+0xe)
+0x400968: (bar+0xe)
+0x400983: (main+0x19)
+0x7f6046b99ec5: (__libc_start_main+0xf5)
+0x400779: (_start+0x29)
+</pre></div>
+<p>So we get the complete call stack at the point where <tt class="docutils literal">backtrace</tt> is called. We
+can obtain the function symbol names and the address of the instruction where
+the call was made (more precisely, the return address which is the next
+instruction).</p>
+<p>Sometimes, however, we want not only the caller's name, but also the call
+location (source file name + line number). This is useful when one function
+calls another from multiple locations and we want to pinpoint which one is
+actually part of a given call stack. <tt class="docutils literal">libunwind</tt> gives us the call address,
+but nothing beyond. Fortunately, it's all in the DWARF information of the
+binary, and given the address we can extract the exact call location in a number
+of ways. The simplest is probably to call <tt class="docutils literal">addr2line</tt>:</p>
+<div class="highlight"><pre><span></span>$ addr2line 0x400968 -e libunwind_backtrace
+libunwind_backtrace.c:37
+</pre></div>
+<p>We pass the PC address to the left of the <tt class="docutils literal">bar</tt> frame to <tt class="docutils literal">addr2line</tt> and
+get the file name and line number.</p>
+<p>Alternatively, we can use the <a class="reference external" href="https://github.com/eliben/pyelftools/blob/main/examples/dwarf_decode_address.py">dwarf_decode_address example</a>
+from pyelftools to obtain the same information:</p>
+<div class="highlight"><pre><span></span>$ python &lt;path&gt;/dwarf_decode_address.py 0x400968 libunwind_backtrace
+Processing file: libunwind_backtrace
+Function: bar
+File: libunwind_backtrace.c
+Line: 37
+</pre></div>
+<p>If printing out the exact locations is important for you during the backtrace
+call, you can also go fully programmatic by using <tt class="docutils literal">libdwarf</tt> to open the
+executable and read this information from it, in the <tt class="docutils literal">backtrace</tt> call. There's
+a section and a code sample about a very similar task in <a class="reference external" href="../../2011/02/07/how-debuggers-work-part-3-debugging-information.html">my blog post on
+debuggers</a>.</p>
+</div>
+<div class="section" id="c-and-mangled-function-names">
+<h2>C++ and mangled function names</h2>
+<p>The code sample above works well, but these days one is most likely writing C++
+code and not C, so there's a slight problem. In C++, names of functions and
+methods are <a class="reference external" href="https://en.wikipedia.org/wiki/Name_mangling">mangled</a>. This is
+essential to make C++ features like function overloading, namespaces and
+templates work. Let's say the actual call sequence is:</p>
+<div class="highlight"><pre><span></span><span class="k">namespace</span><span class="w"> </span><span class="nn">ns</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">T</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">U</span><span class="o">&gt;</span><span class="w"></span>
+<span class="kt">void</span><span class="w"> </span><span class="n">foo</span><span class="p">(</span><span class="n">T</span><span class="w"> </span><span class="n">t</span><span class="p">,</span><span class="w"> </span><span class="n">U</span><span class="w"> </span><span class="n">u</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">backtrace</span><span class="p">();</span><span class="w"> </span><span class="c1">// &lt;-------- backtrace here!</span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="p">}</span><span class="w">  </span><span class="c1">// namespace ns</span>
+
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">T</span><span class="o">&gt;</span><span class="w"></span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">Klass</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">T</span><span class="w"> </span><span class="n">t</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">bar</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">ns</span><span class="o">::</span><span class="n">foo</span><span class="p">(</span><span class="n">t</span><span class="p">,</span><span class="w"> </span><span class="nb">true</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">};</span><span class="w"></span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="o">**</span><span class="w"> </span><span class="n">argv</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">Klass</span><span class="o">&lt;</span><span class="kt">double</span><span class="o">&gt;</span><span class="w"> </span><span class="n">k</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">k</span><span class="p">.</span><span class="n">bar</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The backtrace printed will then be:</p>
+<div class="highlight"><pre><span></span>0x400b3d: (_ZN2ns3fooIdbEEvT_T0_+0x17)
+0x400b24: (_ZN5KlassIdE3barEv+0x26)
+0x400af6: (main+0x1b)
+0x7fc02c0c4ec5: (__libc_start_main+0xf5)
+0x4008b9: (_start+0x29)
+</pre></div>
+<p>Oops, that's not nice. While some seasoned C++ veterans can usually make sense
+of simple mangled names (kinda like system programmers who can read text from
+hex ASCII), when the code is heavily templated this can get ugly very
+quickly.</p>
+<p>One solution is to use a command-line tool - <tt class="docutils literal"><span class="pre">c++filt</span></tt>:</p>
+<div class="highlight"><pre><span></span>$ c++filt _ZN2ns3fooIdbEEvT_T0_
+void ns::foo&lt;double, bool&gt;(double, bool)
+</pre></div>
+<p>However, it would be nicer if our backtrace dumper would print the demangled
+name directly. Luckily, this is pretty easy to do, using the <tt class="docutils literal">cxxabi.h</tt> API
+that's part of libstdc++ (more precisely, libsupc++). libc++ also provides it in
+the low-level <a class="reference external" href="http://libcxxabi.llvm.org/">libc++abi</a>. All we need to do is
+call <tt class="docutils literal"><span class="pre">abi::__cxa_demangle</span></tt>. Here's a complete example:</p>
+<div class="highlight"><pre><span></span><span class="cp">#define UNW_LOCAL_ONLY</span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;cxxabi.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;libunwind.h&gt;</span><span class="cp"></span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;cstdio&gt;</span><span class="cp"></span>
+<span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;cstdlib&gt;</span><span class="cp"></span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">backtrace</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">unw_cursor_t</span><span class="w"> </span><span class="n">cursor</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">unw_context_t</span><span class="w"> </span><span class="n">context</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Initialize cursor to current frame for local unwinding.</span>
+<span class="w">  </span><span class="n">unw_getcontext</span><span class="p">(</span><span class="o">&amp;</span><span class="n">context</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">unw_init_local</span><span class="p">(</span><span class="o">&amp;</span><span class="n">cursor</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">context</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Unwind frames one by one, going up the frame stack.</span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="n">unw_step</span><span class="p">(</span><span class="o">&amp;</span><span class="n">cursor</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">unw_word_t</span><span class="w"> </span><span class="n">offset</span><span class="p">,</span><span class="w"> </span><span class="n">pc</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">unw_get_reg</span><span class="p">(</span><span class="o">&amp;</span><span class="n">cursor</span><span class="p">,</span><span class="w"> </span><span class="n">UNW_REG_IP</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">pc</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">pc</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;0x%lx:&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">pc</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="kt">char</span><span class="w"> </span><span class="n">sym</span><span class="p">[</span><span class="mi">256</span><span class="p">];</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">unw_get_proc_name</span><span class="p">(</span><span class="o">&amp;</span><span class="n">cursor</span><span class="p">,</span><span class="w"> </span><span class="n">sym</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">sym</span><span class="p">),</span><span class="w"> </span><span class="o">&amp;</span><span class="n">offset</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">nameptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">sym</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="kt">int</span><span class="w"> </span><span class="n">status</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">demangled</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">abi</span><span class="o">::</span><span class="n">__cxa_demangle</span><span class="p">(</span><span class="n">sym</span><span class="p">,</span><span class="w"> </span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span><span class="k">nullptr</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">status</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">status</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">nameptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">demangled</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">printf</span><span class="p">(</span><span class="s">&quot; (%s+0x%lx)</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">nameptr</span><span class="p">,</span><span class="w"> </span><span class="n">offset</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">free</span><span class="p">(</span><span class="n">demangled</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">printf</span><span class="p">(</span><span class="s">&quot; -- error: unable to obtain symbol name for this frame</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">namespace</span><span class="w"> </span><span class="nn">ns</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">T</span><span class="p">,</span><span class="w"> </span><span class="k">typename</span><span class="w"> </span><span class="nc">U</span><span class="o">&gt;</span><span class="w"></span>
+<span class="kt">void</span><span class="w"> </span><span class="n">foo</span><span class="p">(</span><span class="n">T</span><span class="w"> </span><span class="n">t</span><span class="p">,</span><span class="w"> </span><span class="n">U</span><span class="w"> </span><span class="n">u</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">backtrace</span><span class="p">();</span><span class="w"> </span><span class="c1">// &lt;-------- backtrace here!</span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="p">}</span><span class="w">  </span><span class="c1">// namespace ns</span>
+
+<span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">T</span><span class="o">&gt;</span><span class="w"></span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">Klass</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">T</span><span class="w"> </span><span class="n">t</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="nf">bar</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">ns</span><span class="o">::</span><span class="n">foo</span><span class="p">(</span><span class="n">t</span><span class="p">,</span><span class="w"> </span><span class="nb">true</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">};</span><span class="w"></span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="o">**</span><span class="w"> </span><span class="n">argv</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">Klass</span><span class="o">&lt;</span><span class="kt">double</span><span class="o">&gt;</span><span class="w"> </span><span class="n">k</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">k</span><span class="p">.</span><span class="n">bar</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This time, the backtrace is printed with all names nicely demangled:</p>
+<div class="highlight"><pre><span></span>$ LD_LIBRARY_PATH=/usr/local/lib ./libunwind_backtrace_demangle
+0x400b59: (void ns::foo&lt;double, bool&gt;(double, bool)+0x17)
+0x400b40: (Klass&lt;double&gt;::bar()+0x26)
+0x400b12: (main+0x1b)
+0x7f6337475ec5: (__libc_start_main+0xf5)
+0x4008b9: (_start+0x29)
+</pre></div>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>AFAIK, gcc indeed uses <tt class="docutils literal">libunwind</tt> by default on some architectures,
+though it uses an alternative unwinder on others. Please correct me if
+I'm missing something here.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>If your <tt class="docutils literal">libunwind</tt> is in a non-standard location, you'll need to
+provide additional <tt class="docutils literal"><span class="pre">-I</span></tt> and <tt class="docutils literal"><span class="pre">-L</span></tt> flags.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

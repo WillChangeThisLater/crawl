@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Distributed computing in Python with multiprocessing - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="distributed-computing-in-python-with-multiprocessing.html"
+                       rel="bookmark"
+                       title="Permalink to Distributed computing in Python with multiprocessing">
+                        Distributed computing in Python with multiprocessing
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> January 24, 2012 at 05:23</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/python.html">Python</a>
+        ,
+    <a href="../../../tag/network-programming.html">Network Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>In the <a class="reference external" href="../16/python-parallelizing-cpu-bound-tasks-with-multiprocessing/index.html">previous post</a>, I discussed how the <tt class="docutils literal">multiprocessing</tt> package can be used to run CPU-bound computation tasks in parallel on a multi-core machine. But the utility of <tt class="docutils literal">multiprocessing</tt> doesn't end here. It can also be used to run computations distributed over <em>several machines</em>.</p>
+<p>This enters the exciting domain of distributed computing. There are <a class="reference external" href="http://www.zeromq.org/">many</a> <a class="reference external" href="http://celeryproject.org/">tools</a> available for addressing various aspects of this domain, but here I want to specifically focus on what Python offers right in the standard library, with <tt class="docutils literal">multiprocessing</tt>. The part of the package that makes distributed computing possible is called &quot;managers&quot;.</p>
+<p>The documentation of <tt class="docutils literal">multiprocessing.managers</tt> leaves something to be desired. It's not entirely clear what the full capabilities of this tool are from just skimming the docs. For example, it starts by saying:</p>
+<blockquote>
+Managers provide a way to create data which can be shared between different processes. A manager object controls a server process which manages shared objects. Other processes can access the shared objects by using proxies.</blockquote>
+<p>Which is somewhat confusing, since <tt class="docutils literal">multiprocessing</tt> already has synchronization primitives available without using managers (for example <tt class="docutils literal">Value</tt> and <tt class="docutils literal">Lock</tt>). So why are managers needed?</p>
+<p>For two main reasons:</p>
+<ol class="arabic simple">
+<li>Managers provide additional synchronization tools, such as a list or a dictionary that can be shared between processes.</li>
+<li>Managers allow their synchronized objects to be used between processes running across a network, and not just on the same machine. This is why, for example, managers also provide a <tt class="docutils literal">Lock</tt>, which at first sight appears to be a duplication of the <tt class="docutils literal">multiprocessing.Lock</tt>. It isn't a duplication, because <tt class="docutils literal">multiprocessing.Lock</tt> is only available for processes running on the same machine, while the <tt class="docutils literal">multiprocessing.SyncManager.Lock</tt> can be shared across machines (which is why it's also slower).</li>
+</ol>
+<p>I don't want to delve too far into the synchronization primitives, and instead focus on the distributing computing made possible by managers.</p>
+<p>The task will be the same <a class="reference external" href="../16/python-parallelizing-cpu-bound-tasks-with-multiprocessing/index.html">as before</a> - factoring lists of numbers. The worker function is:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">factorizer_worker</span>(job_q, result_q):
+    <span style="color: #7f007f">&quot;&quot;&quot; A worker function to be launched in a separate process. Takes jobs from</span>
+<span style="color: #7f007f">        job_q - each job a list of numbers to factorize. When the job is done,</span>
+<span style="color: #7f007f">        the result (dict mapping number -&gt; list of factors) is placed into</span>
+<span style="color: #7f007f">        result_q. Runs until job_q is empty.</span>
+<span style="color: #7f007f">    &quot;&quot;&quot;</span>
+    <span style="color: #00007f; font-weight: bold">while</span> <span style="color: #00007f">True</span>:
+        <span style="color: #00007f; font-weight: bold">try</span>:
+            job = job_q.get_nowait()
+            outdict = {n: factorize_naive(n) <span style="color: #00007f; font-weight: bold">for</span> n <span style="color: #0000aa">in</span> job}
+            result_q.put(outdict)
+        <span style="color: #00007f; font-weight: bold">except</span> Queue.Empty:
+            <span style="color: #00007f; font-weight: bold">return</span>
+</pre></div>
+<p>This worker runs in a single process on some machine. All it cares about is that it has a queue of &quot;jobs&quot; to look at, and a queue of results to write into. Each job in the queue is a list of numbers to factorize. Once the worker has finished factoring these numbers, it puts a result dict into the result queue. The worker stops and returns when it notices that the job queue is empty. That's it.</p>
+<p>Adding an abstraction level, here's how this worker can be used:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">mp_factorizer</span>(shared_job_q, shared_result_q, nprocs):
+    <span style="color: #7f007f">&quot;&quot;&quot; Split the work with jobs in shared_job_q and results in</span>
+<span style="color: #7f007f">        shared_result_q into several processes. Launch each process with</span>
+<span style="color: #7f007f">        factorizer_worker as the worker function, and wait until all are</span>
+<span style="color: #7f007f">        finished.</span>
+<span style="color: #7f007f">    &quot;&quot;&quot;</span>
+    procs = []
+    <span style="color: #00007f; font-weight: bold">for</span> i <span style="color: #0000aa">in</span> <span style="color: #00007f">range</span>(nprocs):
+        p = multiprocessing.Process(
+                target=factorizer_worker,
+                args=(shared_job_q, shared_result_q))
+        procs.append(p)
+        p.start()
+
+    <span style="color: #00007f; font-weight: bold">for</span> p <span style="color: #0000aa">in</span> procs:
+        p.join()
+</pre></div>
+<p><tt class="docutils literal">mp_factorizer</tt> takes the same pair of queues and the number of processes to create. It then uses <tt class="docutils literal">multiprocessing.Process</tt> to spawn several workers, each into a process of its own. When all the workers are done, <tt class="docutils literal">mp_factorizer</tt> exits. Note how this code is still independent of where it actually executes - its interface with the world is via the job and result queues.</p>
+<p>There's nothing really new here, so let's get to the interesting stuff - starting a server that manages the shared queues:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">runserver</span>():
+    <span style="color: #007f00"># Start a shared manager server and access its queues</span>
+    manager = make_server_manager(PORTNUM, AUTHKEY)
+    shared_job_q = manager.get_job_q()
+    shared_result_q = manager.get_result_q()
+
+    N = <span style="color: #007f7f">999</span>
+    nums = make_nums(N)
+
+    <span style="color: #007f00"># The numbers are split into chunks. Each chunk is pushed into the job</span>
+    <span style="color: #007f00"># queue.</span>
+    chunksize = <span style="color: #007f7f">43</span>
+    <span style="color: #00007f; font-weight: bold">for</span> i <span style="color: #0000aa">in</span> <span style="color: #00007f">range</span>(<span style="color: #007f7f">0</span>, <span style="color: #00007f">len</span>(nums), chunksize):
+        shared_job_q.put(nums[i:i + chunksize])
+
+    <span style="color: #007f00"># Wait until all results are ready in shared_result_q</span>
+    numresults = <span style="color: #007f7f">0</span>
+    resultdict = {}
+    <span style="color: #00007f; font-weight: bold">while</span> numresults &lt; N:
+        outdict = shared_result_q.get()
+        resultdict.update(outdict)
+        numresults += <span style="color: #00007f">len</span>(outdict)
+
+    <span style="color: #007f00"># Sleep a bit before shutting down the server - to give clients time to</span>
+    <span style="color: #007f00"># realize the job queue is empty and exit in an orderly way.</span>
+    time.sleep(<span style="color: #007f7f">2</span>)
+    manager.shutdown()
+</pre></div>
+<p>What this code does is:</p>
+<ol class="arabic simple">
+<li>Create the manager (which actually starts the server running in the background) - more on this step later</li>
+<li>Generate some input numbers and break them to chunks</li>
+<li>Feed the job queue with chunks of numbers for the workers to churn on</li>
+<li>Wait until the expected amount of results has been placed in the result queue</li>
+<li>Shut down the server and exit</li>
+</ol>
+<p>Note that no computation is actually performed in the server - it just manages the sharing for clients. And this is <tt class="docutils literal">make_server_manager</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">make_server_manager</span>(port, authkey):
+    <span style="color: #7f007f">&quot;&quot;&quot; Create a manager for the server, listening on the given port.</span>
+<span style="color: #7f007f">        Return a manager object with get_job_q and get_result_q methods.</span>
+<span style="color: #7f007f">    &quot;&quot;&quot;</span>
+    job_q = Queue.Queue()
+    result_q = Queue.Queue()
+
+    <span style="color: #007f00"># This is based on the examples in the official docs of multiprocessing.</span>
+    <span style="color: #007f00"># get_{job|result}_q return synchronized proxies for the actual Queue</span>
+    <span style="color: #007f00"># objects.</span>
+    <span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">JobQueueManager</span>(SyncManager):
+        <span style="color: #00007f; font-weight: bold">pass</span>
+
+    JobQueueManager.register(<span style="color: #7f007f">&#39;get_job_q&#39;</span>, <span style="color: #00007f">callable</span>=<span style="color: #00007f; font-weight: bold">lambda</span>: job_q)
+    JobQueueManager.register(<span style="color: #7f007f">&#39;get_result_q&#39;</span>, <span style="color: #00007f">callable</span>=<span style="color: #00007f; font-weight: bold">lambda</span>: result_q)
+
+    manager = JobQueueManager(address=(<span style="color: #7f007f">&#39;&#39;</span>, port), authkey=authkey)
+    manager.start()
+    <span style="color: #00007f; font-weight: bold">print</span> <span style="color: #7f007f">&#39;Server started at port %s&#39;</span> % port
+    <span style="color: #00007f; font-weight: bold">return</span> manager
+</pre></div>
+<p>I won't explain what each line of this code does - it's all available in the documentation page of <tt class="docutils literal">multiprocessing</tt>. I'll just note that the manager starts a TCP server at the given port, running in the background, and uses this server to let clients access its internal objects - in this case a couple of queues.</p>
+<p>Finally, to complete the puzzle here's the <tt class="docutils literal">make_nums</tt> utility function. Nothing smart about it:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">make_nums</span>(N):
+    <span style="color: #7f007f">&quot;&quot;&quot; Create N large numbers to factorize.</span>
+<span style="color: #7f007f">    &quot;&quot;&quot;</span>
+    nums = [<span style="color: #007f7f">999999999999</span>]
+    <span style="color: #00007f; font-weight: bold">for</span> i <span style="color: #0000aa">in</span> <span style="color: #00007f">xrange</span>(N):
+        nums.append(nums[-<span style="color: #007f7f">1</span>] + <span style="color: #007f7f">2</span>)
+    <span style="color: #00007f; font-weight: bold">return</span> nums
+</pre></div>
+<p>Alright, so this is the server. It will run, put input into the job queue and then wait for results to start trickling into the result queue. How would they get there though? From clients. Here's a simple client:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">runclient</span>():
+    manager = make_client_manager(IP, PORTNUM, AUTHKEY)
+    job_q = manager.get_job_q()
+    result_q = manager.get_result_q()
+    mp_factorizer(job_q, result_q, <span style="color: #007f7f">4</span>)
+</pre></div>
+<p>The client accesses the server by means of another manager object. It then asks for the queues and just runs <tt class="docutils literal">mp_factorizer</tt> (with <tt class="docutils literal">nprocs=4</tt>). The client's manager is this:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">make_client_manager</span>(ip, port, authkey):
+    <span style="color: #7f007f">&quot;&quot;&quot; Create a manager for a client. This manager connects to a server on the</span>
+<span style="color: #7f007f">        given address and exposes the get_job_q and get_result_q methods for</span>
+<span style="color: #7f007f">        accessing the shared queues from the server.</span>
+<span style="color: #7f007f">        Return a manager object.</span>
+<span style="color: #7f007f">    &quot;&quot;&quot;</span>
+    <span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">ServerQueueManager</span>(SyncManager):
+        <span style="color: #00007f; font-weight: bold">pass</span>
+
+    ServerQueueManager.register(<span style="color: #7f007f">&#39;get_job_q&#39;</span>)
+    ServerQueueManager.register(<span style="color: #7f007f">&#39;get_result_q&#39;</span>)
+
+    manager = ServerQueueManager(address=(ip, port), authkey=authkey)
+    manager.connect()
+
+    <span style="color: #00007f; font-weight: bold">print</span> <span style="color: #7f007f">&#39;Client connected to %s:%s&#39;</span> % (ip, port)
+    <span style="color: #00007f; font-weight: bold">return</span> manager
+</pre></div>
+<p>This manager is simpler. Instead of starting a server, it connects to one (given an IP address, port and authorization key). A similar method has to be used to register the <tt class="docutils literal">get_*_q</tt> methods, just to let the manager know they are part of the protocol. Think of it as a kind of RPC.</p>
+<p>This client can be executed on the same machine with the server, or on a different machine, which can be located anywhere as long as it can reach the server by IP address. It will connect to the server and start pulling work from the job queue, placing results into the result queue. Theoretically, any amount of clients can connect simultaneously. The beauty of this method is that it only uses the Python standard library, so the code is very much platform independent. I had a Windows client machine connecting a Linux server, which also had a client running, happily sharing the work between them. It just works.</p>
+<p>To summarize, I want to stress once again the goal of this post. Lest there be any misunderstanding, I'm not claiming this is the best way to do distributed programming in Python. It wouldn't be easy to find the &quot;best way&quot;, since it's a complex problem domain with many tradeoffs, and many solutions that optimize for different things.</p>
+<p>However, it is useful to know that such capabilities exist in the Python standard library. The <tt class="docutils literal">multiprocessing</tt> package provides many useful building blocks. These can be used together or separately to implement all kinds of interesting solutions both for paralellizing work across multiple processes and distributing it across different machines. All of this, as you saw above, without writing too much code.</p>
+<h3>Code</h3>
+<p>
+The code for this post is <a href="https://github.com/eliben/code-for-blog/tree/main/2012/parallel_python_multiprocessing">available on GitHub</a>.
+</p>
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="distributed-computing-in-python-with-multiprocessing.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

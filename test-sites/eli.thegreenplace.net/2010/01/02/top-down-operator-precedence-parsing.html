@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Top-Down operator precedence (Pratt) parsing - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="top-down-operator-precedence-parsing.html"
+                       rel="bookmark"
+                       title="Permalink to Top-Down operator precedence (Pratt) parsing">
+                        Top-Down operator precedence (Pratt) parsing
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> January 02, 2010 at 17:08</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/compilation.html">Compilation</a>
+        ,
+    <a href="../../../tag/recursive-descent-parsing.html">Recursive descent parsing</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <div class="section" id="introduction">
+<h3>Introduction</h3>
+<p>Recursive-descent parsers have always interested me, and in the past year and a half I wrote a few articles on the topic. Here they are in chronological order:</p>
+<ul class="simple">
+<li><a class="reference external" href="../../../2008/09/26/recursive-descent-ll-and-predictive-parsers/index.html">Recursive descent, LL and predictive parsers</a></li>
+<li><a class="reference external" href="../../../2009/03/14/some-problems-of-recursive-descent-parsers/index.html">Some problems of recursive descent parsers</a></li>
+<li><a class="reference external" href="../../../2009/03/20/a-recursive-descent-parser-with-an-infix-expression-evaluator/index.html">A recursive descent parser with an infix expression evaluator</a></li>
+</ul>
+<p>The third article describes a method that combines RD parsing with a different algorithm for parsing expressions to achieve better results. This method is actually used in the real-world, for example in GCC and Parrot (<a class="reference external" href="http://en.wikipedia.org/wiki/Operator-precedence_parser">source</a>).</p>
+<p>An alternative parsing algorithm was discovered by <a class="reference external" href="http://en.wikipedia.org/wiki/Vaughan_Pratt">Vaughan Pratt</a> in 1973. Called <em>Top Down Operator Precedence</em>, it shares some features with the modified RD parser, but promises to simplify the code, as well as provide better performance. Recently it was popularized again by Douglas Crockford in <a class="reference external" href="http://javascript.crockford.com/tdop/tdop.html">his article</a>, and employed by him in <a class="reference external" href="http://www.jslint.com/">JSLint</a> to parse Javascript.</p>
+<p>I encountered Crockford's article in the <a class="reference external" href="../../../2007/09/28/book-review-beautiful-code-edited-by-andy-oram-greg-wilson/index.html">Beautiful Code</a> book, but found it hard to understand. I could follow the code, but had a hard time grasping <em>why</em> the thing works. Recently I became interested in the topic again, tried to read the article once more, and again was stumped. Finally, by reading Pratt's original paper and Fredrik Lundh's excellent <a class="reference external" href="http://effbot.org/zone/simple-top-down-parsing.htm">Python-based piece</a> <a class="footnote-reference" href="top-down-operator-precedence-parsing.html#id7" id="id1">[1]</a>, I understood the algorithm.</p>
+<p>So this article is my usual attempt to explain the topic to myself, making sure that when I forget how it works in a couple of months, I will have a simple way of remembering.</p>
+</div>
+<div class="section" id="the-fundamentals">
+<h3>The fundamentals</h3>
+<p>Top down operator precedence parsing (TDOP from now on) is based on a few fundamental principles:</p>
+<ul class="simple">
+<li>A &quot;binding power&quot; mechanism to handle precedence levels</li>
+<li>A means of implementing different functionality of tokens depending on their position relative to their neighbors - prefix or infix.</li>
+<li>As opposed to classic RD, where semantic actions are associated with grammar rules (BNF), TDOP associates them with tokens.</li>
+</ul>
+<div class="section" id="binding-power">
+<h4>Binding power</h4>
+<p>Operator precedence and associativity is a fundamental topic to be handled by parsing techniques. TDOP handles this issue by assigning a &quot;binding power&quot; to each token it parses.</p>
+<p>Consider a substring AEB where A takes a right argument, B a left, and E is an expression. Does E associate with A or with B? We define a numeric <strong>binding power</strong> for each operator. <strong>The operator with the higher binding power &quot;wins&quot; - gets E associated with it</strong>. Let's examine the expression:</p>
+<div class="highlight"><pre>1 + 2 * 4
+</pre></div>
+<p>Here it is once again with A, E, B identified:</p>
+<div class="highlight"><pre>1 + 2 * 4
+  ^ ^ ^
+  A E B
+</pre></div>
+<p>If we want to express the convention of multiplication having a higher precedence than addition, let's define the binding power (<tt class="docutils literal"><span class="pre">bp</span></tt>) of * to be 20 and that of + to be 10 (the numbers are arbitrary, what's important is that <tt class="docutils literal"><span class="pre">bp(*)</span> <span class="pre">&gt;</span> <span class="pre">bp(+)</span></tt>). Thus, by the definition we've made above, the 2 will be associated with <tt class="docutils literal"><span class="pre">*</span></tt>, since its binding power is higher than that of <tt class="docutils literal"><span class="pre">+</span></tt>.</p>
+</div>
+<div class="section" id="prefix-and-infix-operators">
+<h4>Prefix and infix operators</h4>
+<p>To parse the traditional <a class="reference external" href="http://en.wikipedia.org/wiki/Infix_notation">infix-notation</a> expression languages <a class="footnote-reference" href="top-down-operator-precedence-parsing.html#id8" id="id2">[2]</a>, we have to differentiate between the prefix form and infix form of tokens. The best example is the minus operator (<tt class="docutils literal"><span class="pre">-</span></tt>). In its infix form it is subtraction:</p>
+<div class="highlight"><pre>a = b - c  <span style="color: #007f00"># a is b minus c</span>
+</pre></div>
+<p>In its prefix form, it is negation:</p>
+<div class="highlight"><pre>a = -b   <span style="color: #007f00"># b has a&#39;s magnitude but an opposite sign</span>
+</pre></div>
+<p>To accommodate this difference, TDOP allows for different treatment of tokens in prefix and infix contexts. In TDOP terminology the handler of a token as prefix is called <strong>nud</strong> (for &quot;null denotation&quot;) and the handler of a token as infix is called <strong>led</strong> (for &quot;left denotation&quot;).</p>
+</div>
+</div>
+<div class="section" id="the-tdop-algorithm">
+<h3>The TDOP algorithm</h3>
+<p>Here's a basic TDOP parser:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">expression</span>(rbp=<span style="color: #007f7f">0</span>):
+    <span style="color: #00007f; font-weight: bold">global</span> token
+    t = token
+    token = next()
+    left = t.nud()
+    <span style="color: #00007f; font-weight: bold">while</span> rbp &lt; token.lbp:
+        t = token
+        token = next()
+        left = t.led(left)
+
+    <span style="color: #00007f; font-weight: bold">return</span> left
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">literal_token</span>(<span style="color: #00007f">object</span>):
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">__init__</span>(<span style="color: #00007f">self</span>, value):
+        <span style="color: #00007f">self</span>.value = <span style="color: #00007f">int</span>(value)
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">nud</span>(<span style="color: #00007f">self</span>):
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">self</span>.value
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">operator_add_token</span>(<span style="color: #00007f">object</span>):
+    lbp = <span style="color: #007f7f">10</span>
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">led</span>(<span style="color: #00007f">self</span>, left):
+        right = expression(<span style="color: #007f7f">10</span>)
+        <span style="color: #00007f; font-weight: bold">return</span> left + right
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">operator_mul_token</span>(<span style="color: #00007f">object</span>):
+    lbp = <span style="color: #007f7f">20</span>
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">led</span>(<span style="color: #00007f">self</span>, left):
+        <span style="color: #00007f; font-weight: bold">return</span> left * expression(<span style="color: #007f7f">20</span>)
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">end_token</span>(<span style="color: #00007f">object</span>):
+    lbp = <span style="color: #007f7f">0</span>
+</pre></div>
+<p>We only have to augment it with some support code consisting of a simple tokenizer <a class="footnote-reference" href="top-down-operator-precedence-parsing.html#id9" id="id3">[3]</a> and the parser driver:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">import</span> <span style="color: #00007f">re</span>
+token_pat = re.compile(<span style="color: #7f007f">&quot;\s*(?:(\d+)|(.))&quot;</span>)
+
+<span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">tokenize</span>(program):
+    <span style="color: #00007f; font-weight: bold">for</span> number, operator <span style="color: #0000aa">in</span> token_pat.findall(program):
+        <span style="color: #00007f; font-weight: bold">if</span> number:
+            <span style="color: #00007f; font-weight: bold">yield</span> literal_token(number)
+        <span style="color: #00007f; font-weight: bold">elif</span> operator == <span style="color: #7f007f">&quot;+&quot;</span>:
+            <span style="color: #00007f; font-weight: bold">yield</span> operator_add_token()
+        <span style="color: #00007f; font-weight: bold">elif</span> operator == <span style="color: #7f007f">&quot;*&quot;</span>:
+            <span style="color: #00007f; font-weight: bold">yield</span> operator_mul_token()
+        <span style="color: #00007f; font-weight: bold">else</span>:
+            <span style="color: #00007f; font-weight: bold">raise</span> SyntaxError(<span style="color: #7f007f">&#39;unknown operator: %s&#39;</span>, operator)
+    <span style="color: #00007f; font-weight: bold">yield</span> end_token()
+
+<span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">parse</span>(program):
+    <span style="color: #00007f; font-weight: bold">global</span> token, next
+    next = tokenize(program).next
+    token = next()
+    <span style="color: #00007f; font-weight: bold">return</span> expression()
+</pre></div>
+<p>And we have a complete parser and evaluator for arithmetic expressions involving addition and multiplication.</p>
+<p>Now let's figure out how it actually works. Note that the token classes have several attributes (not all classes have all kinds of attributes):</p>
+<ul class="simple">
+<li><tt class="docutils literal"><span class="pre">lbp</span></tt> - the left binding power of the operator. For an infix operator, it tells us how strongly the operator binds to the argument at its left.</li>
+<li><tt class="docutils literal"><span class="pre">nud</span></tt> - this is the prefix handler we talked about. In this simple parser it exists only for the literals (the numbers)</li>
+<li><tt class="docutils literal"><span class="pre">led</span></tt> - the infix handler.</li>
+</ul>
+<p>The key to enlightenment here is to notice how the <tt class="docutils literal"><span class="pre">expression</span></tt> function works, and how the operator handlers call it, passing in a binding power.</p>
+<p>When <tt class="docutils literal"><span class="pre">expression</span></tt> is called, it is provided the <tt class="docutils literal"><span class="pre">rbp</span></tt>  - right binding power of the operator that called it. It consumes tokens until it meets a token whose left binding power is equal or lower than <tt class="docutils literal"><span class="pre">rbp</span></tt>. Specifically, it means that it collects all tokens that bind together before returning to the operator that called it.</p>
+<p>Handlers of operators call <tt class="docutils literal"><span class="pre">expression</span></tt> to process their arguments, providing it with their binding power to make sure it gets just the right tokens from the input.</p>
+<p>Let's see, for example, how this parser handles the expression:</p>
+<div class="highlight"><pre>3 + 1 * 2 * 4 + 5
+</pre></div>
+<p>Here's the call trace of the parser's functions when parsing this expression:</p>
+<div class="highlight"><pre>&lt;&lt;expression with rbp 0&gt;&gt;
+    &lt;&lt;literal nud = 3&gt;&gt;
+    &lt;&lt;led of &quot;+&quot;&gt;&gt;
+    &lt;&lt;expression with rbp 10&gt;&gt;
+       &lt;&lt;literal nud = 1&gt;&gt;
+       &lt;&lt;led of &quot;*&quot;&gt;&gt;
+       &lt;&lt;expression with rbp 20&gt;&gt;
+          &lt;&lt;literal nud = 2&gt;&gt;
+       &lt;&lt;led of &quot;*&quot;&gt;&gt;
+       &lt;&lt;expression with rbp 20&gt;&gt;
+          &lt;&lt;literal nud = 4&gt;&gt;
+    &lt;&lt;led of &quot;+&quot;&gt;&gt;
+    &lt;&lt;expression with rbp 10&gt;&gt;
+       &lt;&lt;literal nud = 5&gt;&gt;
+</pre></div>
+<p>The following diagram shows the calls made to <tt class="docutils literal"><span class="pre">expression</span></tt> on various recursion levels:</p>
+<img src="../../../images/2010/01/tdop_expr1.png" />
+<p>The arrows show the tokens on which each execution of <tt class="docutils literal"><span class="pre">expression</span></tt> works, and the number above them is the <tt class="docutils literal"><span class="pre">rbp</span></tt> given to <tt class="docutils literal"><span class="pre">expression</span></tt> for this call.</p>
+<p>Apart from the initial call (with <tt class="docutils literal"><span class="pre">rbp=0</span></tt>) which spans the whole input, <tt class="docutils literal"><span class="pre">expression</span></tt> is called after each operator (by its <tt class="docutils literal"><span class="pre">led</span></tt> handler) to collect the right-side argument. As the diagram clearly shows, the binding power mechanism makes sure <tt class="docutils literal"><span class="pre">expression</span></tt> doesn't go &quot;too far&quot; - only as far as the precedence of the invoking operator allows. The best place to see it is the long arrow after the first <tt class="docutils literal"><span class="pre">+</span></tt>, that collects all the multiplication terms (they must be grouped together due to the higher precedence of <tt class="docutils literal"><span class="pre">*</span></tt>) and returns before the second <tt class="docutils literal"><span class="pre">+</span></tt> is encountered (when the precedence ceases being higher than its <tt class="docutils literal"><span class="pre">rbp</span></tt>).</p>
+<p>Another way to look at it: at any point in the execution of the parser, there's an instance of <tt class="docutils literal"><span class="pre">expression</span></tt> for each precedence level that is active at that moment. This instance awaits the results of the higher-precedence instance and keeps going, until it has to stop itself and return its result to its caller.</p>
+<p>If you understand this example, you understand TDOP parsing. All the rest is really just more of the same.</p>
+<div class="section" id="enhancing-the-parser">
+<h4>Enhancing the parser</h4>
+<p>The parser presented so far is very rudimentary, so let's enhance it to be more realistic. First of all, what about unary operators?</p>
+<p>As I've mentioned in the section on prefix and infix operators, TDOP makes an explicit distinction between the two, encoding it in the difference between the <tt class="docutils literal"><span class="pre">nud</span></tt> and <tt class="docutils literal"><span class="pre">led</span></tt> methods. Adding the subtraction operator handler <a class="footnote-reference" href="top-down-operator-precedence-parsing.html#id10" id="id4">[4]</a>:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">operator_sub_token</span>(<span style="color: #00007f">object</span>):
+    lbp = <span style="color: #007f7f">10</span>
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">nud</span>(<span style="color: #00007f">self</span>):
+        <span style="color: #00007f; font-weight: bold">return</span> -expression(<span style="color: #007f7f">100</span>)
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">led</span>(<span style="color: #00007f">self</span>, left):
+        <span style="color: #00007f; font-weight: bold">return</span> left - expression(<span style="color: #007f7f">10</span>)
+</pre></div>
+<p><tt class="docutils literal"><span class="pre">nud</span></tt> handles the unary (prefix) form of minus. It has no <tt class="docutils literal"><span class="pre">left</span></tt> argument (since it's prefix), and it negates its right argument. The binding power passed into <tt class="docutils literal"><span class="pre">expression</span></tt> is high, since unary minus has a high precedence (higher than multiplication). <tt class="docutils literal"><span class="pre">led</span></tt> handles the infix case similarly to the handlers of <tt class="docutils literal"><span class="pre">+</span></tt> and <tt class="docutils literal"><span class="pre">*</span></tt>.</p>
+<p>Now we can handle expressions like:</p>
+<div class="highlight"><pre>3 - 2 + 4 * -5
+</pre></div>
+<p>And get a correct result (-19).</p>
+<p>How about right-associative operators? Let's implement exponentiation (using the caret sign <tt class="docutils literal"><span class="pre">^</span></tt>). To make the operation right-associative, we want the parser to treat subsequent exponentiation operators as sub-expressions of the first one. We can do that by calling <tt class="docutils literal"><span class="pre">expression</span></tt> in the handler of exponentiation with a <tt class="docutils literal"><span class="pre">rbp</span></tt> lower than the <tt class="docutils literal"><span class="pre">lbp</span></tt> of exponentiation:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">operator_pow_token</span>(<span style="color: #00007f">object</span>):
+    lbp = <span style="color: #007f7f">30</span>
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">led</span>(<span style="color: #00007f">self</span>, left):
+        <span style="color: #00007f; font-weight: bold">return</span> left ** expression(<span style="color: #007f7f">30</span> - <span style="color: #007f7f">1</span>)
+</pre></div>
+<p>When <tt class="docutils literal"><span class="pre">expression</span></tt> gets to the next <tt class="docutils literal"><span class="pre">^</span></tt> in its loop, it will find that still <tt class="docutils literal"><span class="pre">rbp</span> <span class="pre">&lt;</span> <span class="pre">token.lbp</span></tt> and won't return the result right away, but will collect the value of the sub-expression first.</p>
+<p>And how about grouping with parentheses? Since each token can execute actions in TDOP, this can be easily handled by adding actions to the <tt class="docutils literal"><span class="pre">(</span></tt> token.</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">operator_lparen_token</span>(<span style="color: #00007f">object</span>):
+    lbp = <span style="color: #007f7f">0</span>
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">nud</span>(<span style="color: #00007f">self</span>):
+        expr = expression()
+        match(operator_rparen_token)
+        <span style="color: #00007f; font-weight: bold">return</span> expr
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">operator_rparen_token</span>(<span style="color: #00007f">object</span>):
+    lbp = <span style="color: #007f7f">0</span>
+</pre></div>
+<p>Where <tt class="docutils literal"><span class="pre">match</span></tt> is the usual RD primitive:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">match</span>(tok=<span style="color: #00007f">None</span>):
+    <span style="color: #00007f; font-weight: bold">global</span> token
+    <span style="color: #00007f; font-weight: bold">if</span> tok <span style="color: #0000aa">and</span> tok != <span style="color: #00007f">type</span>(token):
+        <span style="color: #00007f; font-weight: bold">raise</span> SyntaxError(<span style="color: #7f007f">&#39;Expected %s&#39;</span> % tok)
+    token = next()
+</pre></div>
+<p>Note that <tt class="docutils literal"><span class="pre">(</span></tt> has <tt class="docutils literal"><span class="pre">lbp=0</span></tt>, meaning that it doesn't bind to any token on its left. It is treated as a prefix, and its <tt class="docutils literal"><span class="pre">nud</span></tt> collects an expression after the <tt class="docutils literal"><span class="pre">(</span></tt>, right until <tt class="docutils literal"><span class="pre">)</span></tt> is encountered (which stops the expression parser since it also has <tt class="docutils literal"><span class="pre">lbp=0</span></tt>). Then it consumes the <tt class="docutils literal"><span class="pre">)</span></tt> itself and returns the result of the expression <a class="footnote-reference" href="top-down-operator-precedence-parsing.html#id11" id="id5">[5]</a>.</p>
+<p>Here's the code for the complete parser, handling addition, subtraction, multiplication, division, exponentiation and grouping by parentheses:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">import</span> <span style="color: #00007f">re</span>
+
+token_pat = re.compile(<span style="color: #7f007f">&quot;\s*(?:(\d+)|(.))&quot;</span>)
+
+<span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">tokenize</span>(program):
+    <span style="color: #00007f; font-weight: bold">for</span> number, operator <span style="color: #0000aa">in</span> token_pat.findall(program):
+        <span style="color: #00007f; font-weight: bold">if</span> number:
+            <span style="color: #00007f; font-weight: bold">yield</span> literal_token(number)
+        <span style="color: #00007f; font-weight: bold">elif</span> operator == <span style="color: #7f007f">&quot;+&quot;</span>:
+            <span style="color: #00007f; font-weight: bold">yield</span> operator_add_token()
+        <span style="color: #00007f; font-weight: bold">elif</span> operator == <span style="color: #7f007f">&quot;-&quot;</span>:
+            <span style="color: #00007f; font-weight: bold">yield</span> operator_sub_token()
+        <span style="color: #00007f; font-weight: bold">elif</span> operator == <span style="color: #7f007f">&quot;*&quot;</span>:
+            <span style="color: #00007f; font-weight: bold">yield</span> operator_mul_token()
+        <span style="color: #00007f; font-weight: bold">elif</span> operator == <span style="color: #7f007f">&quot;/&quot;</span>:
+            <span style="color: #00007f; font-weight: bold">yield</span> operator_div_token()
+        <span style="color: #00007f; font-weight: bold">elif</span> operator == <span style="color: #7f007f">&quot;^&quot;</span>:
+            <span style="color: #00007f; font-weight: bold">yield</span> operator_pow_token()
+        <span style="color: #00007f; font-weight: bold">elif</span> operator == <span style="color: #7f007f">&#39;(&#39;</span>:
+            <span style="color: #00007f; font-weight: bold">yield</span> operator_lparen_token()
+        <span style="color: #00007f; font-weight: bold">elif</span> operator == <span style="color: #7f007f">&#39;)&#39;</span>:
+            <span style="color: #00007f; font-weight: bold">yield</span> operator_rparen_token()
+        <span style="color: #00007f; font-weight: bold">else</span>:
+            <span style="color: #00007f; font-weight: bold">raise</span> SyntaxError(<span style="color: #7f007f">&#39;unknown operator: %s&#39;</span>, operator)
+    <span style="color: #00007f; font-weight: bold">yield</span> end_token()
+
+
+<span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">match</span>(tok=<span style="color: #00007f">None</span>):
+    <span style="color: #00007f; font-weight: bold">global</span> token
+    <span style="color: #00007f; font-weight: bold">if</span> tok <span style="color: #0000aa">and</span> tok != <span style="color: #00007f">type</span>(token):
+        <span style="color: #00007f; font-weight: bold">raise</span> SyntaxError(<span style="color: #7f007f">&#39;Expected %s&#39;</span> % tok)
+    token = next()
+
+
+<span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">parse</span>(program):
+    <span style="color: #00007f; font-weight: bold">global</span> token, next
+    next = tokenize(program).next
+    token = next()
+    <span style="color: #00007f; font-weight: bold">return</span> expression()
+
+
+<span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">expression</span>(rbp=<span style="color: #007f7f">0</span>):
+    <span style="color: #00007f; font-weight: bold">global</span> token
+    t = token
+    token = next()
+    left = t.nud()
+    <span style="color: #00007f; font-weight: bold">while</span> rbp &lt; token.lbp:
+        t = token
+        token = next()
+        left = t.led(left)
+    <span style="color: #00007f; font-weight: bold">return</span> left
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">literal_token</span>(<span style="color: #00007f">object</span>):
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">__init__</span>(<span style="color: #00007f">self</span>, value):
+        <span style="color: #00007f">self</span>.value = <span style="color: #00007f">int</span>(value)
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">nud</span>(<span style="color: #00007f">self</span>):
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">self</span>.value
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">operator_add_token</span>(<span style="color: #00007f">object</span>):
+    lbp = <span style="color: #007f7f">10</span>
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">nud</span>(<span style="color: #00007f">self</span>):
+        <span style="color: #00007f; font-weight: bold">return</span> expression(<span style="color: #007f7f">100</span>)
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">led</span>(<span style="color: #00007f">self</span>, left):
+        right = expression(<span style="color: #007f7f">10</span>)
+        <span style="color: #00007f; font-weight: bold">return</span> left + right
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">operator_sub_token</span>(<span style="color: #00007f">object</span>):
+    lbp = <span style="color: #007f7f">10</span>
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">nud</span>(<span style="color: #00007f">self</span>):
+        <span style="color: #00007f; font-weight: bold">return</span> -expression(<span style="color: #007f7f">100</span>)
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">led</span>(<span style="color: #00007f">self</span>, left):
+        <span style="color: #00007f; font-weight: bold">return</span> left - expression(<span style="color: #007f7f">10</span>)
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">operator_mul_token</span>(<span style="color: #00007f">object</span>):
+    lbp = <span style="color: #007f7f">20</span>
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">led</span>(<span style="color: #00007f">self</span>, left):
+        <span style="color: #00007f; font-weight: bold">return</span> left * expression(<span style="color: #007f7f">20</span>)
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">operator_div_token</span>(<span style="color: #00007f">object</span>):
+    lbp = <span style="color: #007f7f">20</span>
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">led</span>(<span style="color: #00007f">self</span>, left):
+        <span style="color: #00007f; font-weight: bold">return</span> left / expression(<span style="color: #007f7f">20</span>)
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">operator_pow_token</span>(<span style="color: #00007f">object</span>):
+    lbp = <span style="color: #007f7f">30</span>
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">led</span>(<span style="color: #00007f">self</span>, left):
+        <span style="color: #00007f; font-weight: bold">return</span> left ** expression(<span style="color: #007f7f">30</span> - <span style="color: #007f7f">1</span>)
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">operator_lparen_token</span>(<span style="color: #00007f">object</span>):
+    lbp = <span style="color: #007f7f">0</span>
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">nud</span>(<span style="color: #00007f">self</span>):
+        expr = expression()
+        match(operator_rparen_token)
+        <span style="color: #00007f; font-weight: bold">return</span> expr
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">operator_rparen_token</span>(<span style="color: #00007f">object</span>):
+    lbp = <span style="color: #007f7f">0</span>
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">end_token</span>(<span style="color: #00007f">object</span>):
+    lbp = <span style="color: #007f7f">0</span>
+</pre></div>
+<p>Sample usage:</p>
+<div class="highlight"><pre>&gt;&gt;&gt; parse(<span style="color: #7f007f">&#39;3 * (2 + -4) ^ 4&#39;</span>)
+<span style="color: #007f7f">48</span>
+</pre></div>
+</div>
+</div>
+<div class="section" id="closing-words">
+<h3>Closing words</h3>
+<p>When people consider parsing methods to implement, the debate usually goes between hand-coded RD parsers, auto-generated <tt class="docutils literal"><span class="pre">LL(k)</span></tt> parsers, or auto-generated <tt class="docutils literal"><span class="pre">LR</span></tt> parsers. TDOP is another alternative <a class="footnote-reference" href="top-down-operator-precedence-parsing.html#id12" id="id6">[6]</a>. It's an original and unusual parsing method that can handle complex grammars (not limited to expressions), relatively easy to code, and is quite fast.</p>
+<p>What makes TDOP fast is that it doesn't need deep recursive descents to parse expressions - only a couple of calls per token are required, no matter how the grammar looks. If you trace the token actions in the example parser I presented in this article, you'll notice that on average, <tt class="docutils literal"><span class="pre">expression</span></tt> and one <tt class="docutils literal"><span class="pre">nud</span></tt> or <tt class="docutils literal"><span class="pre">led</span></tt> method are called per token, and that's about it. Fredrik Lundh compares the performance of TDOP with several other methods in his article, and gets very favorable results.</p>
+<div align="center" class="align-center"><img class="align-center" src="../../../images/hline.jpg" style="width: 320px; height: 5px;" /></div>
+<table class="docutils footnote" frame="void" id="id7" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="top-down-operator-precedence-parsing.html#id1">[1]</a></td><td>Which is also the source for most of the code in this article - so the copyright is Fredrik Lundh's</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id8" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="top-down-operator-precedence-parsing.html#id2">[2]</a></td><td>Like C, Java, Python. An example of a language that doesn't have infix notation is Lisp, which has prefix notation for expressions.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id9" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="top-down-operator-precedence-parsing.html#id3">[3]</a></td><td>This tokenizer just recognizes numbers and single-character operators.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id10" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="top-down-operator-precedence-parsing.html#id4">[4]</a></td><td>Note that to allow our parser actually recognize <tt class="docutils literal"><span class="pre">-</span></tt>, an appropriate dispatcher should be added to the <tt class="docutils literal"><span class="pre">tokenize</span></tt> function - this is left as an exercise to the reader.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id11" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="top-down-operator-precedence-parsing.html#id5">[5]</a></td><td>Quiz: is it useful having a <tt class="docutils literal"><span class="pre">led</span></tt> handler for a left paren as well? Hint: how would you implement function calls?</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id12" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="top-down-operator-precedence-parsing.html#id6">[6]</a></td><td>By the way, I have no idea where to categorize it on the LL/LR scale? Any ideas?</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="top-down-operator-precedence-parsing.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

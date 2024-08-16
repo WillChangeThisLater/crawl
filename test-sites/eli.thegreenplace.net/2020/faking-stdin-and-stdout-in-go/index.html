@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Faking stdin and stdout in Go - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Faking stdin and stdout in Go">
+                        Faking stdin and stdout in Go
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> May 02, 2020 at 05:36</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>In this post I want to discuss <em>faking</em> (or <em>redirecting</em>) standard input and
+output (<tt class="docutils literal">os.Stdin</tt> and <tt class="docutils literal">os.Stdout</tt> <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>) in Go programs. This is often done
+in tests, but may also be useful in other scenarios.</p>
+<p>The basic idea is demonstrated in the following pseudocode:</p>
+<div class="highlight"><pre><span></span><span class="nx">StartFakingIO</span><span class="p">(</span><span class="nx">stdin</span><span class="w"> </span><span class="nx">to</span><span class="w"> </span><span class="nx">feed</span><span class="p">)</span><span class="w"></span>
+
+<span class="nx">FunctionUnderTest</span><span class="p">(</span><span class="o">...</span><span class="p">)</span><span class="w"></span>
+
+<span class="nx">out</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">GetCapturedOutput</span><span class="p">()</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">out</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nx">expected</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">...</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>We assume <tt class="docutils literal">FunctionUnderTest</tt> reads from <tt class="docutils literal">os.Stdin</tt> and writes to
+<tt class="docutils literal">os.Stdout</tt> directly (this whole post is unnecessary if <tt class="docutils literal">FunctionUnderTest</tt>
+uses dependency injection to take an <tt class="docutils literal">io.Reader</tt> and <tt class="docutils literal">io.Writer</tt> instead).
+Therefore <tt class="docutils literal">StartFakingIO</tt> should redirect the <tt class="docutils literal">os.Stdin</tt> and
+<tt class="docutils literal">os.Stdout</tt> globals, such that the code of <tt class="docutils literal">FunctionUnderTest</tt> remains
+unchanged.</p>
+<div class="section" id="pipes">
+<h2>Pipes</h2>
+<p>Since <tt class="docutils literal">os.Stdin</tt> and <tt class="docutils literal">os.Stdout</tt> are of type <tt class="docutils literal">*os.File</tt>, we can't just
+use <tt class="docutils literal">io</tt> interfaces to replace them; we need concrete <tt class="docutils literal">*os.File</tt>s. Luckily,
+this is exactly what the <tt class="docutils literal">os.Pipe()</tt> function provides:</p>
+<div class="highlight"><pre><span></span>func Pipe() (r *File, w *File, err error)
+
+Pipe returns a connected pair of Files; reads from r return bytes written to
+w. It returns the files and an error, if any.
+</pre></div>
+<p>In graphic form:</p>
+<img alt="Go pipe - write at one end, read from another" class="align-center" src="../../images/2020/go-pipe.png" />
+<p>Here's a simple code snippet to demonstrate it:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">r</span><span class="p">,</span><span class="w"> </span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Pipe</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">w</span><span class="p">.</span><span class="nx">Write</span><span class="p">([]</span><span class="nb">byte</span><span class="p">(</span><span class="s">&quot;hello&quot;</span><span class="p">))</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">buf</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">make</span><span class="p">([]</span><span class="kt">byte</span><span class="p">,</span><span class="w"> </span><span class="mi">1024</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">n</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">Read</span><span class="p">(</span><span class="nx">buf</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nb">string</span><span class="p">(</span><span class="nx">buf</span><span class="p">[:</span><span class="nx">n</span><span class="p">]))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This prints &quot;hello&quot;.</p>
+<p>If <tt class="docutils literal">os.Pipe</tt> reminds you of Unix pipes, that's because it's exactly what it
+is. Under the hood, <tt class="docutils literal">os.Pipe</tt> is a thin wrapper around the <tt class="docutils literal">pipe(2)</tt>
+syscall.</p>
+<p>Given this pipe construct, it's easy to come up with a faking scheme for
+<tt class="docutils literal">os.Stdout</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span><span class="w"> </span><span class="nx">main</span><span class="w"></span>
+
+<span class="kn">import</span><span class="w"> </span><span class="p">(</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;fmt&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;log&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;os&quot;</span><span class="w"></span>
+<span class="p">)</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">r</span><span class="p">,</span><span class="w"> </span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Pipe</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">origStdout</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Stdout</span><span class="w"></span>
+<span class="w">  </span><span class="nx">os</span><span class="p">.</span><span class="nx">Stdout</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">w</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Print</span><span class="p">(</span><span class="s">&quot;hello to stdout&quot;</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">buf</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">make</span><span class="p">([]</span><span class="kt">byte</span><span class="p">,</span><span class="w"> </span><span class="mi">1024</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">n</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">Read</span><span class="p">(</span><span class="nx">buf</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Restore</span><span class="w"></span>
+<span class="w">  </span><span class="nx">os</span><span class="p">.</span><span class="nx">Stdout</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">origStdout</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;Written to stdout:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nb">string</span><span class="p">(</span><span class="nx">buf</span><span class="p">[:</span><span class="nx">n</span><span class="p">]))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Faking <tt class="docutils literal">os.Stdin</tt> is very similar, except the direction is inverted. See the
+full code at the end of the post.</p>
+<p>This approach is the basis of most stdio faking packages you'll find online.
+Unfortunately, this approach has a serious problem in some scenarios.</p>
+</div>
+<div class="section" id="pipe-buffers">
+<h2>Pipe buffers</h2>
+<p>Pipes on Linux have limited capacities. Here's what <tt class="docutils literal">man 7 pipe</tt> has to say
+about it:</p>
+<blockquote>
+<p>A pipe has a limited capacity. If the pipe is full, then a write(2) will
+block or fail, depending on whether the O_NONBLOCK flag is set (see below).
+Different implementations have different limits for the pipe capacity.
+Applications should not  rely  on  a particular capacity: an application
+should be designed so that a reading process consumes data as soon as it is
+available, so that a writing process does not remain blocked.</p>
+<p>In Linux versions before 2.6.11, the capacity of a pipe was the same as the
+system page size (e.g., 4096 bytes on i386).  Since Linux 2.6.11, the pipe
+capacity is 65536 bytes.  Since Linux 2.6.35, the default pipe capacity is
+65536 bytes, but the capacity can be queried and set using the fcntl(2)
+F_GETPIPE_SZ and F_SETPIPE_SZ operations.  See fcntl(2) for more
+information.</p>
+</blockquote>
+<p>We can easily test this by extending the previous example to print out much
+more to <tt class="docutils literal">os.Stdout</tt> before trying to read from it:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">r</span><span class="p">,</span><span class="w"> </span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Pipe</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">origStdout</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Stdout</span><span class="w"></span>
+<span class="w">  </span><span class="nx">os</span><span class="p">.</span><span class="nx">Stdout</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">w</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="mi">5000</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Print</span><span class="p">(</span><span class="s">&quot;hello to stdout&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">buf</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">make</span><span class="p">([]</span><span class="kt">byte</span><span class="p">,</span><span class="w"> </span><span class="mi">1024</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">n</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">Read</span><span class="p">(</span><span class="nx">buf</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Restore</span><span class="w"></span>
+<span class="w">  </span><span class="nx">os</span><span class="p">.</span><span class="nx">Stdout</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">origStdout</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;Written to stdout:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nb">string</span><span class="p">(</span><span class="nx">buf</span><span class="p">[:</span><span class="nx">n</span><span class="p">]))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It's exactly the same code, except that now we print out &quot;hello to stdout&quot;
+5000 times, for a total of 75,000 bytes, which should overflow the buffer.</p>
+<p>Indeed, if you run this program, it hangs. Sending SIGQUIT to the program shows
+it's stuck in the call to <tt class="docutils literal">fmt.Print</tt>. Without anything reading from the
+pipe's other end, the program can't proceed once the pipe buffer has been
+filled. Obviously, this problem may not apply to most scenarios - you don't
+typically print out this much data, especially in unit tests. But it's still
+fairly common to get bitten by it.</p>
+<p>To solve this problem, we have to ensure that something is reading from the
+pipe continuously, to prevent the overflow. This can be easily done with a
+separate goroutine, as the next section will demonstrate.</p>
+</div>
+<div class="section" id="a-complete-stdio-faker">
+<h2>A complete stdio faker</h2>
+<p>I'll now show the code a complete &quot;stdio faker&quot; type, that will enable us
+writing code just like the &quot;basic idea&quot; pseudocode at the top of this post.
+<a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2020/go-fake-stdio">The full code with tests and an example is available on GitHub</a>. Let's
+start with the type; all its fields are private, since the user code only
+interacts with the faker via its methods:</p>
+<div class="highlight"><pre><span></span><span class="c1">// FakeStdio can be used to fake stdin and capture stdout.</span><span class="w"></span>
+<span class="c1">// Between creating a new FakeStdio and calling ReadAndRestore on it,</span><span class="w"></span>
+<span class="c1">// code reading os.Stdin will get the contents of stdinText passed to New.</span><span class="w"></span>
+<span class="c1">// Output to os.Stdout will be captured and returned from ReadAndRestore.</span><span class="w"></span>
+<span class="c1">// FakeStdio is not reusable; don&#39;t attempt to use it after calling</span><span class="w"></span>
+<span class="c1">// ReadAndRestore, but it should be safe to create a new FakeStdio.</span><span class="w"></span>
+<span class="kd">type</span><span class="w"> </span><span class="nx">FakeStdio</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">origStdout</span><span class="w">   </span><span class="o">*</span><span class="nx">os</span><span class="p">.</span><span class="nx">File</span><span class="w"></span>
+<span class="w">  </span><span class="nx">stdoutReader</span><span class="w"> </span><span class="o">*</span><span class="nx">os</span><span class="p">.</span><span class="nx">File</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">outCh</span><span class="w"> </span><span class="kd">chan</span><span class="w"> </span><span class="p">[]</span><span class="kt">byte</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">origStdin</span><span class="w">   </span><span class="o">*</span><span class="nx">os</span><span class="p">.</span><span class="nx">File</span><span class="w"></span>
+<span class="w">  </span><span class="nx">stdinWriter</span><span class="w"> </span><span class="o">*</span><span class="nx">os</span><span class="p">.</span><span class="nx">File</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This is the constructor:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">New</span><span class="p">(</span><span class="nx">stdinText</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="nx">FakeStdio</span><span class="p">,</span><span class="w"> </span><span class="kt">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Pipe for stdin.</span><span class="w"></span>
+<span class="w">  </span><span class="c1">//</span><span class="w"></span>
+<span class="w">  </span><span class="c1">//                 ======</span><span class="w"></span>
+<span class="w">  </span><span class="c1">//  w -------------&gt;||||------&gt; r</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// (stdinWriter)   ======      (os.Stdin)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">stdinReader</span><span class="p">,</span><span class="w"> </span><span class="nx">stdinWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Pipe</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Pipe for stdout.</span><span class="w"></span>
+<span class="w">  </span><span class="c1">//</span><span class="w"></span>
+<span class="w">  </span><span class="c1">//               ======</span><span class="w"></span>
+<span class="w">  </span><span class="c1">//  w -----------&gt;||||------&gt; r</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// (os.Stdout)   ======      (stdoutReader)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">stdoutReader</span><span class="p">,</span><span class="w"> </span><span class="nx">stdoutWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Pipe</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">origStdin</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Stdin</span><span class="w"></span>
+<span class="w">  </span><span class="nx">os</span><span class="p">.</span><span class="nx">Stdin</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">stdinReader</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">stdinWriter</span><span class="p">.</span><span class="nx">Write</span><span class="p">([]</span><span class="nb">byte</span><span class="p">(</span><span class="nx">stdinText</span><span class="p">))</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">stdinWriter</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">os</span><span class="p">.</span><span class="nx">Stdin</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">origStdin</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">origStdout</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Stdout</span><span class="w"></span>
+<span class="w">  </span><span class="nx">os</span><span class="p">.</span><span class="nx">Stdout</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">stdoutWriter</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">outCh</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">make</span><span class="p">(</span><span class="kd">chan</span><span class="w"> </span><span class="p">[]</span><span class="kt">byte</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// This goroutine reads stdout into a buffer in the background.</span><span class="w"></span>
+<span class="w">  </span><span class="k">go</span><span class="w"> </span><span class="kd">func</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">b</span><span class="w"> </span><span class="nx">bytes</span><span class="p">.</span><span class="nx">Buffer</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">io</span><span class="p">.</span><span class="nx">Copy</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">b</span><span class="p">,</span><span class="w"> </span><span class="nx">stdoutReader</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">outCh</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="nx">b</span><span class="p">.</span><span class="nx">Bytes</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="p">}()</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">FakeStdio</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">origStdout</span><span class="p">:</span><span class="w">   </span><span class="nx">origStdout</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">stdoutReader</span><span class="p">:</span><span class="w"> </span><span class="nx">stdoutReader</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">outCh</span><span class="p">:</span><span class="w">        </span><span class="nx">outCh</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">origStdin</span><span class="p">:</span><span class="w">    </span><span class="nx">origStdin</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">stdinWriter</span><span class="p">:</span><span class="w">  </span><span class="nx">stdinWriter</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="p">},</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Of particular interest in this code:</p>
+<ol class="arabic simple">
+<li>The ASCII diagrams showing how the different pipes are hooked together.</li>
+<li>A goroutine that runs in the background throughout the lifetime of a
+<tt class="docutils literal">FakeStdio</tt>. This goroutine continuously reads from the reading end
+of the fake stdout to drain the buffer, ensuring that large writes don't
+block.</li>
+</ol>
+<p>And this is the <tt class="docutils literal">ReadAndRestore</tt> method:</p>
+<div class="highlight"><pre><span></span><span class="c1">// ReadAndRestore collects all captured stdout and returns it; it also restores</span><span class="w"></span>
+<span class="c1">// os.Stdin and os.Stdout to their original values.</span><span class="w"></span>
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">sf</span><span class="w"> </span><span class="o">*</span><span class="nx">FakeStdio</span><span class="p">)</span><span class="w"> </span><span class="nx">ReadAndRestore</span><span class="p">()</span><span class="w"> </span><span class="p">([]</span><span class="kt">byte</span><span class="p">,</span><span class="w"> </span><span class="kt">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">sf</span><span class="p">.</span><span class="nx">stdoutReader</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Errorf</span><span class="p">(</span><span class="s">&quot;ReadAndRestore from closed FakeStdio&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Close the writer side of the faked stdout pipe. This signals to the</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// background goroutine that it should exit.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">os</span><span class="p">.</span><span class="nx">Stdout</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">out</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&lt;-</span><span class="nx">sf</span><span class="p">.</span><span class="nx">outCh</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">os</span><span class="p">.</span><span class="nx">Stdout</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">sf</span><span class="p">.</span><span class="nx">origStdout</span><span class="w"></span>
+<span class="w">  </span><span class="nx">os</span><span class="p">.</span><span class="nx">Stdin</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">sf</span><span class="p">.</span><span class="nx">origStdin</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">sf</span><span class="p">.</span><span class="nx">stdoutReader</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">sf</span><span class="p">.</span><span class="nx">stdoutReader</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">sf</span><span class="p">.</span><span class="nx">stdoutReader</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">sf</span><span class="p">.</span><span class="nx">stdinWriter</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">sf</span><span class="p">.</span><span class="nx">stdinWriter</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">sf</span><span class="p">.</span><span class="nx">stdinWriter</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">out</span><span class="p">,</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p><a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2020/go-fake-stdio/example_test.go">Here's a usage example</a>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">ExampleFakeInOut</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Create a new fakestdio with some input to feed into Stdin.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fs</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">New</span><span class="p">(</span><span class="s">&quot;input text&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">scanned</span><span class="w"> </span><span class="kt">string</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Scanf</span><span class="p">(</span><span class="s">&quot;%s&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">scanned</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Emit text to Stdout - it will be captured.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Print</span><span class="p">(</span><span class="s">&quot;some output&quot;</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">b</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">ReadAndRestore</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// This will go to the actual os.Stdout because we&#39;re no longer capturing.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;Scanned: %q, Captured: %q&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">scanned</span><span class="p">,</span><span class="w"> </span><span class="nb">string</span><span class="p">(</span><span class="nx">b</span><span class="p">))</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Output: Scanned: &quot;input&quot;, Captured: &quot;some output&quot;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+</div>
+<div class="section" id="variations">
+<h2>Variations</h2>
+<p>Writing a fully general package for faking stdio requires handling a whole bunch
+of different requirements and scenarios; I'm not attempting to do so here, but
+I'll mention some.</p>
+<p>My implementation has an additional method I haven't shown so far:</p>
+<div class="highlight"><pre><span></span><span class="c1">// CloseStdin closes the fake stdin. This may be necessary if the process has</span><span class="w"></span>
+<span class="c1">// logic for reading stdin until EOF; otherwise such code would block forever.</span><span class="w"></span>
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">sf</span><span class="w"> </span><span class="o">*</span><span class="nx">FakeStdio</span><span class="p">)</span><span class="w"> </span><span class="nx">CloseStdin</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">sf</span><span class="p">.</span><span class="nx">stdinWriter</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">sf</span><span class="p">.</span><span class="nx">stdinWriter</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">sf</span><span class="p">.</span><span class="nx">stdinWriter</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>As its comment explains, this is important to test code that reads <tt class="docutils literal">os.Stdin</tt>
+until it's closed - think a standard Unix line filter program.</p>
+<p>Another feature that could be added is a method to feed more data to the faked
+<tt class="docutils literal">os.Stdin</tt>; in the current approach, the only data to stdin is provided in the
+constructor. To test interactive code we may want to send more data to stdin
+after we've seen some of the output. This should be fairly easy to add - try it
+as an exercise!</p>
+<p>A similar variant is reading captured stdout data before <tt class="docutils literal">FakeStdio</tt> is
+restored; this could also be useful for testing interactive code. For this to
+work, a slightly more significant rework of the code would be required. The
+stdout draining goroutine will need to have its <tt class="docutils literal">io.Copy</tt> broken up to
+individual <tt class="docutils literal">Read</tt> operations, and a synchronized way to access the buffer it's
+filling will have to be added.</p>
+<p>So far the code takes care not to overflow stdout; but what about stdin? If
+you need to feed more than 64KiB into stdin, the current approach will hang.
+This requires a similar goroutine, but on the user code side.</p>
+<p>Finally, this code only handles <tt class="docutils literal">os.Stdin</tt> and <tt class="docutils literal">os.Stdout</tt>; there's also
+<tt class="docutils literal">os.Stderr</tt> we could capture. That should be trivial to add, if needed.</p>
+</div>
+<div class="section" id="redirecting-output-from-cgo">
+<h2>Redirecting output from cgo</h2>
+<p>The post so far discussed redirecting streams used directly from Go code. This
+won't help us if our code calls into C code that emits output to stdout
+directly. I've discussed this scenario before <a class="reference external" href="../../2015/redirecting-all-kinds-of-stdout-in-python/index.html">in a post about Python</a>,
+and the Go situation is very similar.</p>
+<p>The solution will be similar as well - using the <tt class="docutils literal">dup</tt> and <tt class="docutils literal">dup2</tt> syscalls
+to redirect the underlying file descriptors. These are accessible directly from
+pure Go code using the <tt class="docutils literal">syscall</tt> package. I won't provide a handy type with
+methods here, but <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2020/go-fake-stdio/snippets/redirect-cgo-stdout.go">this code snippet</a>
+demonstrates how to redirect stdout printed by a sample C function invoked from
+Go.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>Every mention of <tt class="docutils literal">os.Stdout</tt> in this post could apply to <tt class="docutils literal">os.Stderr</tt>
+as well, if needed. My implementation doesn't bother to fake
+<tt class="docutils literal">os.Stderr</tt>, but this can be added trivially.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

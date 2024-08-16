@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Reducers, transducers and core.async in Clojure - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Reducers, transducers and core.async in Clojure">
+                        Reducers, transducers and core.async in Clojure
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> June 07, 2017 at 05:32</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/clojure.html">Clojure</a>
+        ,
+    <a href="../../tag/programming.html">Programming</a>
+        ,
+    <a href="../../tag/concurrency.html">Concurrency</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This is a whirlwind tour of some of the cool new features that appeared
+in Clojure in the past few years. I find it fascinating how one good idea
+(reducers) morphed into another (transducers), and ended up mating with yet
+another, apparently unrelated concept (concurrent pipelines) to produce some
+really powerful coding abstractions.</p>
+<p>The article is not for beginners; otherwise it'd take a small book to cover all
+this material. Some experience with Clojure or a similar functional language is
+required.</p>
+<div class="section" id="sequences-iterators-and-laziness">
+<h2>Sequences, iterators and laziness</h2>
+<p>Let's start with the basics. Suppose we want to iterate over a sequence of
+items, performing some combination of transforming and filtering on the
+items in it. Here's an example:</p>
+<div class="highlight"><pre><span></span><span class="nv">=&gt;</span><span class="w"> </span><span class="p">(</span><span class="k">def </span><span class="nv">s</span><span class="w"> </span><span class="p">(</span><span class="nb">range </span><span class="mi">0</span><span class="w"> </span><span class="mi">10</span><span class="p">))</span><span class="w"></span>
+<span class="o">#</span><span class="ss">&#39;simplerepl.core/s</span><span class="w"></span>
+<span class="nv">=&gt;</span><span class="w"> </span><span class="p">(</span><span class="nb">reduce + </span><span class="p">(</span><span class="nb">map inc </span><span class="p">(</span><span class="nb">filter </span><span class="nv">even?</span><span class="w"> </span><span class="nv">s</span><span class="p">)))</span><span class="w"></span>
+<span class="mi">25</span><span class="w"></span>
+</pre></div>
+<p>It's very simple, but our imagination and experience tell us that it is
+representative of many real data processing pipelines. Mapping, filtering and
+reducing is the bread and butter of functional programming, after all. However,
+our eternal concern with efficiency should sound the sirens here; it seems like
+we take a sequence and pull it through several operations that need the whole
+sequence to operate. Are there copies involved? The way the Clojure code is
+written above, the answer is <em>no</em> - because of laziness.</p>
+<p><tt class="docutils literal">range</tt> returns a lazy sequence - a sequence whose members are not really
+materialized until we try to use them. Further, Clojure's functional primitives
+like map and filter respect laziness by not materializing more than they need
+for any given step (sans a bit of chunking/buffering for efficiency).</p>
+<p>In other words, the code above does not create intermediate sequences between
+steps. It creates <em>lazy</em> sequences, which are just thunks holding a function to
+materialize the next item.</p>
+<p>Python has iterators for the same purpose. When writing a function to generate a
+sequence of items in modern Python, returning a list is discouraged because this
+may incur unnecessary copying. Rather, such functions ought to return
+<em>iterators</em> (which is very easy using <tt class="docutils literal">yield</tt>). Moreover, functions consuming
+sequences should be careful about not materializing the whole sequence but
+rather using elementwise iteration (which is the default in <tt class="docutils literal"><span class="pre">for...in</span></tt> loops).
+Python 3 made this style prevalent by switching <tt class="docutils literal">range</tt> to return an iterable;
+same for <tt class="docutils literal">map</tt>. In Python 2 both <tt class="docutils literal">range</tt> and <tt class="docutils literal">map</tt> return fully
+materialized lists.</p>
+<p>In an imperative programming style, we'd probably have a loop to perform the
+operation shown above:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">process</span><span class="p">(</span><span class="n">s</span><span class="p">):</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">s</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">i</span> <span class="o">%</span> <span class="mi">2</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="n">result</span> <span class="o">+=</span> <span class="n">i</span> <span class="o">+</span> <span class="mi">1</span>
+    <span class="k">return</span> <span class="n">result</span>
+</pre></div>
+<p>It's easy to reason about the efficiency of this code, but it's also structured
+in a less modular way. A composition of <tt class="docutils literal">map</tt>s, <tt class="docutils literal">filter</tt>s and reductions
+could be easier to reason about because it maps well to the actual business
+logic of our application. The imperative implementation does not compose as
+well.</p>
+</div>
+<div class="section" id="reducers">
+<h2>Reducers</h2>
+<img alt="Pipe reducers" class="align-center" src="../../images/2017/reducers.jpg" />
+<p>Alright, so laziness ensures that Clojure code as shown above is not as
+inefficient as we may have feared. But still, is it as efficient as an
+imperative implementation? It turns out the answer is no; while laziness avoids
+large copying costs, it <em>does</em> incur a constant overhead for boxing and unboxing
+thunks representing the rest of the sequence; it would be nice to avoid these
+costs as well. This brings us to reducers.</p>
+<p>Expressing data transformation with reducers starts with the observation that
+<tt class="docutils literal">reduce</tt> is a fundamental building block that can express other
+transformations fairly easily. Here's how we can perform the job of a <tt class="docutils literal">map</tt>
+with <tt class="docutils literal">reduce</tt>:</p>
+<div class="highlight"><pre><span></span><span class="nv">=&gt;</span><span class="w"> </span><span class="p">(</span><span class="nb">reduce </span><span class="p">(</span><span class="k">fn </span><span class="p">[</span><span class="nv">acc</span><span class="w"> </span><span class="nv">item</span><span class="p">]</span><span class="w"> </span><span class="p">(</span><span class="nb">conj </span><span class="nv">acc</span><span class="w"> </span><span class="p">(</span><span class="nb">inc </span><span class="nv">item</span><span class="p">)))</span><span class="w"> </span><span class="p">[]</span><span class="w"> </span><span class="p">[</span><span class="mi">1</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="mi">5</span><span class="p">])</span><span class="w"></span>
+<span class="p">[</span><span class="mi">2</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="mi">6</span><span class="p">]</span><span class="w"></span>
+</pre></div>
+<p><tt class="docutils literal">filter</tt> is only slightly trickier:</p>
+<div class="highlight"><pre><span></span><span class="nv">=&gt;</span><span class="w"> </span><span class="p">(</span><span class="nb">reduce </span><span class="p">(</span><span class="k">fn </span><span class="p">[</span><span class="nv">acc</span><span class="w"> </span><span class="nv">item</span><span class="p">]</span><span class="w"> </span><span class="p">(</span><span class="k">if </span><span class="p">(</span><span class="nf">even?</span><span class="w"> </span><span class="nv">item</span><span class="p">)</span><span class="w"></span>
+<span class="o">#</span><span class="nv">_=&gt;</span><span class="w">                          </span><span class="p">(</span><span class="nb">conj </span><span class="nv">acc</span><span class="w"> </span><span class="nv">item</span><span class="p">)</span><span class="w"></span>
+<span class="o">#</span><span class="nv">_=&gt;</span><span class="w">                          </span><span class="nv">acc</span><span class="p">))</span><span class="w"></span>
+<span class="o">#</span><span class="nv">_=&gt;</span><span class="w">         </span><span class="p">[]</span><span class="w"> </span><span class="p">[</span><span class="mi">1</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="mi">5</span><span class="p">])</span><span class="w"></span>
+<span class="p">[</span><span class="mi">2</span><span class="w"> </span><span class="mi">4</span><span class="p">]</span><span class="w"></span>
+</pre></div>
+<p>This is cool, but note something slightly disturbing. This code will work fine
+only on collections for which <tt class="docutils literal">conj</tt> works well; it will blow up on lists.
+Also, we've just spent time talking about <em>not</em> building temporary collections
+in between transformations, but this exactly what this code is doing with that
+<tt class="docutils literal">conj</tt>.</p>
+<p>The <tt class="docutils literal">clojure.core.reducers</tt> library solves both these problems by conceptually
+inverting the process of applying multiple transformations to a sequence
+inside-out. Reducers are now integrated into Clojure core, but it's worth
+spending a few minutes getting an intuitive feel for how they work by
+implementing a simplistic variant. For the full scoop, read <a class="reference external" href="https://clojure.org/news/2012/05/15/anatomy-of-reducer">Rich Hickey's
+article</a>. Here's
+an abridged version.</p>
+<p>We start by defining a &quot;reducing function&quot;. A reducing function is what
+<tt class="docutils literal">reduce</tt> takes - a function accepting an accumulator and a new item, and
+returning the new accumulator value. In classical reductions this function can
+just be <tt class="docutils literal">+</tt>; in the sense of implementing-map-with-a-reduce, it can be as
+shown above. In pseudo-type-notation, it's something like <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>:</p>
+<div class="highlight"><pre><span></span>reducingf :: acc -&gt; item -&gt; acc
+</pre></div>
+<p>Next, let's define the concept of &quot;transforming&quot; a reducing function. This is
+simply a function that takes a reducing function and returns another reducing
+function:</p>
+<div class="highlight"><pre><span></span>transformingf :: (acc -&gt; item -&gt; acc) -&gt; (acc -&gt; item -&gt; acc)
+</pre></div>
+<p>The main insight is that we can express all kinds of data transformations simply
+by transforming a reducing function. In the end we'll end up with a single
+reducing function that can be passed to <tt class="docutils literal">reduce</tt>.</p>
+<p>Here's another take at representing <tt class="docutils literal">map</tt> with <tt class="docutils literal">reduce</tt>, this time using the
+generalized approach described above:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">mapping-transform</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">mapf</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">fn </span><span class="p">[</span><span class="nv">reducingf</span><span class="p">]</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="k">fn </span><span class="p">[</span><span class="nv">acc</span><span class="w"> </span><span class="nv">item</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="nf">reducingf</span><span class="w"> </span><span class="nv">acc</span><span class="w"> </span><span class="p">(</span><span class="nf">mapf</span><span class="w"> </span><span class="nv">item</span><span class="p">)))))</span><span class="w"></span>
+</pre></div>
+<p>It may look scary, but it's just an code embodiment of the textual description
+above. A call to <tt class="docutils literal"><span class="pre">mapping-transform</span></tt> will create a function that transforms
+a reducing function into another reducing function. The actual parameter passed
+to <tt class="docutils literal"><span class="pre">mapping-transform</span></tt> is used to modify every item in the collection before
+that item is passed to the original reducing function. Here's how we can use
+this to compute a sum of squares for a given vector:</p>
+<div class="highlight"><pre><span></span><span class="nv">reducers.core=&gt;</span><span class="w"> </span><span class="p">(</span><span class="nb">reduce </span><span class="p">((</span><span class="nf">mapping-transform</span><span class="w"> </span><span class="o">#</span><span class="p">(</span><span class="nb">* </span><span class="nv">%</span><span class="w"> </span><span class="nv">%</span><span class="p">))</span><span class="w"> </span><span class="nv">+</span><span class="p">)</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">[</span><span class="mi">1</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="mi">6</span><span class="p">])</span><span class="w"></span>
+<span class="mi">91</span><span class="w"></span>
+</pre></div>
+<p>There's nothing more magical than some higher-order function munging going on
+here. <tt class="docutils literal"><span class="pre">(mapping-transform</span> #(* % %))</tt> returns a function that takes a reducing
+function as argument, and returns another reducing function. Since the actual
+reduction we want to perform is <tt class="docutils literal">+</tt>, this is what we pass in <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>. The
+returned reducing function is then given to <tt class="docutils literal">reduce</tt>. Take a couple of minutes
+to convince yourself how this works. It may help tracing the <tt class="docutils literal">+</tt> in the REPL:</p>
+<div class="highlight"><pre><span></span>reducers.core=&gt; (trace-vars +)
+#&#39;clojure.core/+
+reducers.core=&gt; (reduce ((mapping-transform #(* % %)) +) 0 [1 2 3 4 5 6])
+TRACE t8399: (clojure.core/+ 1 4)
+TRACE t8399: =&gt; 5
+TRACE t8400: (clojure.core/+ 5 9)
+TRACE t8400: =&gt; 14
+TRACE t8401: (clojure.core/+ 14 16)
+TRACE t8401: =&gt; 30
+TRACE t8402: (clojure.core/+ 30 25)
+TRACE t8402: =&gt; 55
+TRACE t8403: (clojure.core/+ 55 36)
+TRACE t8403: =&gt; 91
+91
+</pre></div>
+<p>Question: how many times do we process each item in the input vector? Note that
+we do <em>two</em> data transformation operations:</p>
+<ol class="arabic simple">
+<li>Map the square function <tt class="docutils literal">#(* % %)</tt> over each item.</li>
+<li>Sum all squared items together.</li>
+</ol>
+<p>However, this code only walks over the input sequence <strong>once</strong>. What happens
+here is that, instead of generating a new lazy thunk after each step, we combine
+all steps into a single traversal. This combination is achieved via a
+composition of functions orchestrated by <tt class="docutils literal"><span class="pre">mapping-transform</span></tt>. We can take this
+approach further, and define a <tt class="docutils literal"><span class="pre">filtering-transform</span></tt>:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">filtering-transform</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">predicate</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">fn </span><span class="p">[</span><span class="nv">reducingf</span><span class="p">]</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="k">fn </span><span class="p">[</span><span class="nv">acc</span><span class="w"> </span><span class="nv">item</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="k">if </span><span class="p">(</span><span class="nf">predicate</span><span class="w"> </span><span class="nv">item</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="nf">reducingf</span><span class="w"> </span><span class="nv">acc</span><span class="w"> </span><span class="nv">item</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="nv">acc</span><span class="p">))))</span><span class="w"></span>
+</pre></div>
+<p>Here's how we sum up the all the even numbers in a vector:</p>
+<div class="highlight"><pre><span></span>reducers.core=&gt; (reduce ((filtering-transform even?) +) 0 [1 2 3 4 5 6])
+12
+</pre></div>
+<p>Now it's time to go back to the first example we started the article with. Let's
+take all the even numbers in a sequence, increment them and sum them up, using
+the higher-order reducing transforms. Here goes:</p>
+<div class="highlight"><pre><span></span>reducers.core=&gt; (reduce ((filtering-transform even?)
+           #_=&gt;            ((mapping-transform inc) +)) 0 (range 0 10))
+25
+</pre></div>
+<p>Remember the mention of inverting the transformation process inside-out? The
+order of transformations is inverted from the usual Clojure function application
+order. We first filter the evens, then increment, then add them all up. The
+&quot;standard&quot; Clojure code is:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="nb">reduce + </span><span class="p">(</span><span class="nb">map inc </span><span class="p">(</span><span class="nb">filter </span><span class="nv">even?</span><span class="w"> </span><span class="nv">s</span><span class="p">)))</span><span class="w"></span>
+</pre></div>
+<p>But we've flipped it with <tt class="docutils literal">even?</tt> on the outside and <tt class="docutils literal">+</tt> on the inside
+(with <tt class="docutils literal">inc</tt> still in-between), due to the way our <tt class="docutils literal"><span class="pre">mapping-transform</span></tt> and
+<tt class="docutils literal"><span class="pre">filtering-transform</span></tt> are defined. The order doesn't really matter, and the
+actual Clojure reducers library lets us write it in the more expected order, as
+we will soon see <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>.</p>
+<p>What <em>really</em> matters is that this approach only walks the input sequence
+<em>once</em>, without any temporary sequences or lazy thunks in the interim. It really
+is similar to the imperative-style loop <a class="footnote-reference" href="index.html#footnote-4" id="footnote-reference-4">[4]</a>.</p>
+</div>
+<div class="section" id="is-it-faster-in-practice">
+<h2>Is it faster in practice?</h2>
+<p>Let's leave this explanatory framework behind and just use
+<tt class="docutils literal">clojure.core.reducers</tt> that exports its own versions of <tt class="docutils literal">map</tt> and
+<tt class="docutils literal">filter</tt>, which are designed to be passed to <tt class="docutils literal">reduce</tt>. These functions do
+essentially the same thing as the trick explained above, but with a bit more
+sophistication so that invoking them looks exactly like invoking the built-in
+<tt class="docutils literal">map</tt> and <tt class="docutils literal">filter</tt>.</p>
+<p>To use them in the REPL, we'll first <tt class="docutils literal">require</tt> the module:</p>
+<div class="highlight"><pre><span></span>reducers.core=&gt; (require &#39;[clojure.core.reducers :as r])
+nil
+</pre></div>
+<p>Now we can distinguish between the built-in <tt class="docutils literal">map</tt> and the transforming
+<tt class="docutils literal">r/map</tt>. Here is a benchmark that compares this new way of transforming
+collections <a class="footnote-reference" href="index.html#footnote-5" id="footnote-reference-5">[5]</a>:</p>
+<div class="highlight"><pre><span></span>reducers.core=&gt; (def s (range 0 9999999))
+#&#39;reducers.core/s
+reducers.core=&gt; (time (reduce + 0 (map inc (filter even? s))))
+&quot;Elapsed time: 599.985027 msecs&quot;
+25000000000000
+reducers.core=&gt; (time (reduce + 0 (r/map inc (r/filter even? s))))
+&quot;Elapsed time: 432.453733 msecs&quot;
+25000000000000
+</pre></div>
+<p>The <tt class="docutils literal">reducers</tt> version is quite a bit faster. As an excercise, try to make the
+transforming chain longer by adding several more mapping and filtering steps.
+How does it affect the performance difference?</p>
+<p>Great, so we can speed up our data processing with <em>this one weird trick</em>.
+However, if you have some experience in working on compiler backends, you may be
+feeling underwhelmed. Isn't this just loop fusion? Indeed, it is. Our original
+code had multiple loops going over the same data; but we could just fuse all the
+operations done on every element into a single loop. Indeed, this is what the
+imperative code in the beginning of the article does.</p>
+<p>I suspect that Clojure is too dynamic and there are too many layers of
+abstraction (such as laziness, sequences, etc) to expect a perfect automatic
+loop fusion from the JVM here. This is why we resort to fusing the loops
+manually; well, not really manually - we actually use some higher-order function
+goodness to accomplish this for us. If you squint hard at the
+<tt class="docutils literal"><span class="pre">mapping-transform</span></tt> function above, you may notice that it fuses the mapping
+function into the reducing function.</p>
+<p>All of this makes me wonder - what if we <em>really</em> fuse the loops manually, can
+we go even faster? It turns out yes, but only for some types of sequences. Let's
+start by changing the <tt class="docutils literal">s</tt> in the benchmark to a materialized vector (<tt class="docutils literal">range</tt>
+actually produces a lazy sequence):</p>
+<div class="highlight"><pre><span></span>reducers.core=&gt; (def sv (vec s))
+#&#39;reducers.core/sv
+</pre></div>
+<p>And now let's re-run the benchmark of regular filter-map-reduce with the
+reducers-infused filter-map-reduce:</p>
+<div class="highlight"><pre><span></span>reducers.core=&gt; (time (reduce + 0 (map inc (filter even? sv))))
+&quot;Elapsed time: 555.125033 msecs&quot;
+25000000000000
+reducers.core=&gt; (time (reduce + 0 (r/map inc (r/filter even? sv))))
+&quot;Elapsed time: 371.145887 msecs&quot;
+25000000000000
+</pre></div>
+<p>But now let's add another contender - a manually fused reducing function that
+combines the addition, filtering and increment mapping:</p>
+<div class="highlight"><pre><span></span>reducers.core=&gt; (time (reduce (fn [acc item] (if (even? item)
+                                               (+ acc (inc item))
+                                               acc))
+                               0 sv))
+&quot;Elapsed time: 324.793784 msecs&quot;
+25000000000000
+</pre></div>
+<p>Hah, even faster! Of course, writing such pipelines manually is not always
+practical, isn't composable and quickly gets unreadable, so in most cases using
+reducers is preferred. But that's not all. Reducers have another trick in the
+sleeve - effortless parallelism.</p>
+</div>
+<div class="section" id="folding-in-parallel">
+<h2>Folding in parallel</h2>
+<p>Let's begin this section right with the punchline:</p>
+<div class="highlight"><pre><span></span>reducers.core=&gt; (time (r/fold + (r/map inc (r/filter even? sv))))
+&quot;Elapsed time: 145.529636 msecs&quot;
+25000000000000
+</pre></div>
+<p>Whoa, what happened? Given an appropriate collection (such as a vector) that is
+<em>foldable</em>, and an appropriate reducing function that is <em>associative</em>, we can
+actually perform a reduction in parallel on multiple cores. The trick is
+breaking the input sequence into chunks, reducing each chunk and then reducing
+the results of the chunks. For foldable collections and associative reducing
+functions this is mathematically equivalent to the original task; and the big
+win is that we can reduce separate chunk in parallel, on different CPU cores.
+Which is exactly what <tt class="docutils literal">r/fold</tt> does for us, automatically. Even though the
+operation done on each item is trivial, <tt class="docutils literal">r/fold</tt> generates a 2x speedup on an
+8-core CPU. For longer operations, the speedup could be even better.</p>
+<p>How awesome is that? We barely changed the code and get a considerably better
+performance, leveraging parallelism. All of this is possible due to the
+abstraction created by the reducers library. Remember the part about decoupling
+the actual collection from the operations to reduce it? This comes useful here.</p>
+</div>
+<div class="section" id="transducers">
+<h2>Transducers</h2>
+<p>Remember our discussion of transforming reducing functions above? A transforming
+function (such as <tt class="docutils literal"><span class="pre">mapping-transform</span></tt>) has the pseudo-type:</p>
+<div class="highlight"><pre><span></span>transformingf :: (acc -&gt; item -&gt; acc) -&gt; (acc -&gt; item -&gt; acc)
+</pre></div>
+<p>It takes a reducing function and returns another reducing function. We've just
+seen how this concept is used in the reducers library to decouple the
+transformation from the actual process of reduction.</p>
+<p>Shortly after introducing reducers, the designers of Clojure had another
+insight. Such transforming functions are useful not just in the context of
+reductions. The Clojure core developers were designing utility functions for
+<tt class="docutils literal">core.async</tt> to transform channels (more on this later), and found themselves
+rewriting a bunch of existing logic from existing mapping and transforming
+functions. The solution? Use the concept of transforming functions to define
+sequence transformations in a more abstract way, completely decoupling them from
+the underlying sequences.</p>
+<p>So transforming functions got a new name - <em>transducers</em>, and got integrated
+more tightly into the language. Now many of the built-in sequence processing
+like <tt class="docutils literal">map</tt> have an additional arity where no sequence is actually passed in.
+<tt class="docutils literal">(map inc)</tt>, for example, simply returns a <em>transducer</em> - a transforming
+function for other reducers. These transducers are composable, so another way
+to write the non-parallel reduction we've been using in the benchmarks is:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="nb">reduce </span><span class="p">((</span><span class="nb">comp </span><span class="p">(</span><span class="nb">filter </span><span class="nv">even?</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nb">map </span><span class="nv">inc</span><span class="p">))</span><span class="w"> </span><span class="nv">+</span><span class="p">)</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="nv">sv</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>Note that the order here is similar to the one we had to apply with our own
+<tt class="docutils literal"><span class="pre">filtering-transform</span></tt> and <tt class="docutils literal"><span class="pre">mapping-transform</span></tt>, to convey that we first
+filter and then map (it's also similar to the Clojure <tt class="docutils literal"><span class="pre">-&gt;</span></tt> macro).</p>
+<p>Aimed with the insights of this article, we can actually look under the hood
+of Clojure's built-in <tt class="docutils literal">map</tt>:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">map</span><span class="w"></span>
+<span class="w">  </span><span class="p">([</span><span class="nv">f</span><span class="p">]</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="k">fn </span><span class="p">[</span><span class="nv">rf</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="nf">fn</span><span class="w"></span>
+<span class="w">        </span><span class="p">([]</span><span class="w"> </span><span class="p">(</span><span class="nf">rf</span><span class="p">))</span><span class="w"></span>
+<span class="w">        </span><span class="p">([</span><span class="nv">result</span><span class="p">]</span><span class="w"> </span><span class="p">(</span><span class="nf">rf</span><span class="w"> </span><span class="nv">result</span><span class="p">))</span><span class="w"></span>
+<span class="w">        </span><span class="p">([</span><span class="nv">result</span><span class="w"> </span><span class="nv">input</span><span class="p">]</span><span class="w"></span>
+<span class="w">           </span><span class="p">(</span><span class="nf">rf</span><span class="w"> </span><span class="nv">result</span><span class="w"> </span><span class="p">(</span><span class="nf">f</span><span class="w"> </span><span class="nv">input</span><span class="p">)))</span><span class="w"></span>
+<span class="w">        </span><span class="p">([</span><span class="nv">result</span><span class="w"> </span><span class="nv">input</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="nv">inputs</span><span class="p">]</span><span class="w"></span>
+<span class="w">           </span><span class="p">(</span><span class="nf">rf</span><span class="w"> </span><span class="nv">result</span><span class="w"> </span><span class="p">(</span><span class="nb">apply </span><span class="nv">f</span><span class="w"> </span><span class="nv">input</span><span class="w"> </span><span class="nv">inputs</span><span class="p">))))))</span><span class="w"></span>
+<span class="p">([</span><span class="nv">f</span><span class="w"> </span><span class="nv">coll</span><span class="p">]</span><span class="w"></span>
+<span class="c1">;; Implementation of other, non-transducer arities.</span><span class="w"></span>
+<span class="c1">;; ...</span><span class="w"></span>
+</pre></div>
+<p>To be a true transducer, a Clojure function must have three arities. I'll skip
+the no-argument and single-argument versions (please read a more comprehensive
+reference on transducers for the full scoop). The 2-arity version is where the
+real meat is and, oh wait, it's <em>exactly</em> the same as our <tt class="docutils literal"><span class="pre">mapping-transform</span></tt>
+from this article!</p>
+<p>So OK, now &quot;functions that transform reducing functions&quot; have a shorter name -
+<em>transducers</em>; but what has actually changed?</p>
+<p>What's really changed is that the <tt class="docutils literal">map</tt> transducer has a wider range of
+applicability than just mapping collections. Its implementation has no
+collection-specific code. Let's see how it can be used to transform
+communication channels.</p>
+</div>
+<div class="section" id="pipelines-and-transducers">
+<h2>Pipelines and transducers</h2>
+<p>Clojure has borrowed go-routines and channels from Go, and placed them in a
+standard libray module named <tt class="docutils literal">core.async</tt>. Unfortunately, a thorough
+discussion of <tt class="docutils literal">core.async</tt> is outside the scope of this article. I'll just say
+that <tt class="docutils literal">core.async</tt> is awesome; that it was implemented as a library without
+changing the language is beyond awesome - it's a terrific example of the power
+of Lisps to <em>grow the language</em> towards the problem domain.</p>
+<p>That said, I do want to mention <tt class="docutils literal">core.async</tt> in the context of transducers,
+since the two mix in an interesting way.</p>
+<p>Let's take the simple squaring pipeline from <a class="reference external" href="https://blog.golang.org/pipelines">Go concurrency patterns</a> and rewrite it in Clojure. The first
+version is a pretty-much verbatim transcription:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">gen-1</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="o">&amp;</span><span class="w"> </span><span class="nv">nums</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">let </span><span class="p">[</span><span class="nv">c</span><span class="w"> </span><span class="p">(</span><span class="nf">async/chan</span><span class="p">)]</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">async/go</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="nb">doseq </span><span class="p">[</span><span class="nv">n</span><span class="w"> </span><span class="nv">nums</span><span class="p">]</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="nf">async/&gt;!</span><span class="w"> </span><span class="nv">c</span><span class="w"> </span><span class="nv">n</span><span class="p">))</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="nf">async/close!</span><span class="w"> </span><span class="nv">c</span><span class="p">))</span><span class="w"></span>
+<span class="w">    </span><span class="nv">c</span><span class="p">))</span><span class="w"></span>
+
+<span class="p">(</span><span class="kd">defn </span><span class="nv">sq-1</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">cin</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">let </span><span class="p">[</span><span class="nv">cout</span><span class="w"> </span><span class="p">(</span><span class="nf">async/chan</span><span class="p">)]</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">async/go-loop</span><span class="w"> </span><span class="p">[</span><span class="nv">n</span><span class="w"> </span><span class="p">(</span><span class="nf">async/&lt;!</span><span class="w"> </span><span class="nv">cin</span><span class="p">)]</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="k">if </span><span class="nv">n</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="nf">do</span><span class="w"></span>
+<span class="w">          </span><span class="p">(</span><span class="nf">async/&gt;!</span><span class="w"> </span><span class="nv">cout</span><span class="w"> </span><span class="p">(</span><span class="nb">* </span><span class="nv">n</span><span class="w"> </span><span class="nv">n</span><span class="p">))</span><span class="w"></span>
+<span class="w">          </span><span class="p">(</span><span class="nf">recur</span><span class="w"> </span><span class="p">(</span><span class="nf">async/&lt;!</span><span class="w"> </span><span class="nv">cin</span><span class="p">)))</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="nf">async/close!</span><span class="w"> </span><span class="nv">cout</span><span class="p">)))</span><span class="w"></span>
+<span class="w">    </span><span class="nv">cout</span><span class="p">))</span><span class="w"></span>
+
+<span class="p">(</span><span class="kd">defn </span><span class="nv">main-1</span><span class="w"></span>
+<span class="w">  </span><span class="p">[]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">let </span><span class="p">[</span><span class="nv">c-gen</span><span class="w"> </span><span class="p">(</span><span class="nf">gen-1</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="mi">5</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="nv">c-sq</span><span class="w"> </span><span class="p">(</span><span class="nf">sq-1</span><span class="w"> </span><span class="nv">c-gen</span><span class="p">)]</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="k">loop </span><span class="p">[</span><span class="nv">n</span><span class="w"> </span><span class="p">(</span><span class="nf">async/&lt;!!</span><span class="w"> </span><span class="nv">c-sq</span><span class="p">)]</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="nb">when </span><span class="nv">n</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="nb">println </span><span class="nv">n</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="nf">recur</span><span class="w"> </span><span class="p">(</span><span class="nf">async/&lt;!!</span><span class="w"> </span><span class="nv">c-sq</span><span class="p">))))))</span><span class="w"></span>
+</pre></div>
+<p>There are two pipeline stages; the first, <tt class="docutils literal"><span class="pre">gen-1</span></tt> generates a sequence of
+numbers into a channel. The second, <tt class="docutils literal"><span class="pre">sq-1</span></tt> takes a channel of inputs,
+transforms them (by squaring each number) and puts the results in another
+channel. <tt class="docutils literal"><span class="pre">main-1</span></tt> connects the two pipeline stages together.</p>
+<p>The second version makes more use of higher-level <tt class="docutils literal">core.async</tt> tools:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">gen-2</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="o">&amp;</span><span class="w"> </span><span class="nv">nums</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="nf">async/to-chan</span><span class="w"> </span><span class="nv">nums</span><span class="p">))</span><span class="w"></span>
+
+<span class="p">(</span><span class="kd">defn </span><span class="nv">sq-2</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">cin</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="nf">async/map&lt;</span><span class="w"> </span><span class="o">#</span><span class="p">(</span><span class="nb">* </span><span class="nv">%</span><span class="w"> </span><span class="nv">%</span><span class="p">)</span><span class="w"> </span><span class="nv">cin</span><span class="p">))</span><span class="w"></span>
+
+<span class="p">(</span><span class="kd">defn </span><span class="nv">main-2</span><span class="w"></span>
+<span class="w">  </span><span class="p">[]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">let </span><span class="p">[</span><span class="nv">c-gen</span><span class="w"> </span><span class="p">(</span><span class="nf">gen-2</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="mi">5</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="nv">c-sq</span><span class="w"> </span><span class="p">(</span><span class="nf">sq-2</span><span class="w"> </span><span class="nv">c-gen</span><span class="p">)]</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="k">loop </span><span class="p">[</span><span class="nv">n</span><span class="w"> </span><span class="p">(</span><span class="nf">async/&lt;!!</span><span class="w"> </span><span class="nv">c-sq</span><span class="p">)]</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="nb">when </span><span class="nv">n</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="nb">println </span><span class="nv">n</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="nf">recur</span><span class="w"> </span><span class="p">(</span><span class="nf">async/&lt;!!</span><span class="w"> </span><span class="nv">c-sq</span><span class="p">))))))</span><span class="w"></span>
+</pre></div>
+<p>In <tt class="docutils literal"><span class="pre">gen-2</span></tt>, <tt class="docutils literal"><span class="pre">to-chan</span></tt> places its input collection into a channel, and closes
+the channel; all of this in a separate go-block, of course. <tt class="docutils literal"><span class="pre">sq-2</span></tt> uses the
+<tt class="docutils literal">map&lt;</tt> function to create a mapping channel which takes items from its input
+channel, maps some function on them and returns a channel of results.</p>
+<p>If you read the documentation of <tt class="docutils literal">core.async</tt>, you'll notice that <tt class="docutils literal">map&lt;</tt> is
+now deprecated and you're advised to &quot;use transducers instead&quot;. Let's see how to
+do that, in this third version:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">main-3</span><span class="w"></span>
+<span class="w">  </span><span class="p">[]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">let </span><span class="p">[</span><span class="nv">c-sq</span><span class="w"> </span><span class="p">(</span><span class="nf">async/chan</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">(</span><span class="nb">map </span><span class="o">#</span><span class="p">(</span><span class="nb">* </span><span class="nv">%</span><span class="w"> </span><span class="nv">%</span><span class="p">)))]</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">async/onto-chan</span><span class="w"> </span><span class="nv">c-sq</span><span class="w"> </span><span class="p">[</span><span class="mi">2</span><span class="w"> </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="w"> </span><span class="mi">5</span><span class="p">])</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="k">loop </span><span class="p">[</span><span class="nv">n</span><span class="w"> </span><span class="p">(</span><span class="nf">async/&lt;!!</span><span class="w"> </span><span class="nv">c-sq</span><span class="p">)]</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="nb">when </span><span class="nv">n</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="nb">println </span><span class="nv">n</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="nf">recur</span><span class="w"> </span><span class="p">(</span><span class="nf">async/&lt;!!</span><span class="w"> </span><span class="nv">c-sq</span><span class="p">))))))</span><span class="w"></span>
+</pre></div>
+<p>Here we create a <em>single</em> channel named <tt class="docutils literal"><span class="pre">c-sq</span></tt>, with a mapping transducer.
+This means that every item going through the channel gets transformed with the
+given mapping function before being read out of the channel. We don't need
+a separate channel, and <tt class="docutils literal">core.async</tt> doesn't need a separate mapping helper.</p>
+<p>In fact, with the introduction of transducers <tt class="docutils literal">core.async</tt> deprecated a whole
+bunch of functions. <tt class="docutils literal">map&lt;</tt>, <tt class="docutils literal">filter&lt;</tt>, <tt class="docutils literal">unique</tt>, <tt class="docutils literal">partition</tt> and so on.
+While implementing these for channels, the Clojure core devs had the epiphany
+that they're basically reimplementing all sequence processing functions in a
+different context <a class="footnote-reference" href="index.html#footnote-6" id="footnote-reference-6">[6]</a>. Transducers is an elegant solution to abstract away the
+concept of transformation from the underlying context (be it collections or
+channels, or...)</p>
+<p>It's easy to compose transducers on channels. Here's a silly example:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">square</span><span class="w"> </span><span class="p">[</span><span class="nv">x</span><span class="p">]</span><span class="w"> </span><span class="p">(</span><span class="nb">* </span><span class="nv">x</span><span class="w"> </span><span class="nv">x</span><span class="p">))</span><span class="w"></span>
+
+<span class="p">(</span><span class="k">def </span><span class="nv">xform</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="nf">comp</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nb">filter </span><span class="nv">even?</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nb">filter </span><span class="o">#</span><span class="p">(</span><span class="nb">&lt; </span><span class="nv">%</span><span class="w"> </span><span class="mi">10</span><span class="p">))</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nb">map </span><span class="nv">square</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nb">map </span><span class="nv">inc</span><span class="p">)))</span><span class="w"></span>
+
+<span class="p">(</span><span class="k">def </span><span class="nv">c</span><span class="w"> </span><span class="p">(</span><span class="nf">async/chan</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="nv">xform</span><span class="p">))</span><span class="w"></span>
+
+<span class="p">(</span><span class="nf">async/go</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="nf">async/onto-chan</span><span class="w"> </span><span class="nv">c</span><span class="w"> </span><span class="p">[</span><span class="mi">5</span><span class="w"> </span><span class="mi">6</span><span class="w"> </span><span class="mi">8</span><span class="w"> </span><span class="mi">12</span><span class="w"> </span><span class="mi">15</span><span class="p">]))</span><span class="w"></span>
+<span class="p">(</span><span class="k">loop </span><span class="p">[</span><span class="nv">n</span><span class="w"> </span><span class="p">(</span><span class="nf">async/&lt;!!</span><span class="w"> </span><span class="nv">c</span><span class="p">)]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="nb">when </span><span class="nv">n</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nb">println </span><span class="nv">n</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">recur</span><span class="w"> </span><span class="p">(</span><span class="nf">async/&lt;!!</span><span class="w"> </span><span class="nv">c</span><span class="p">))))</span><span class="w"></span>
+</pre></div>
+<p>Here the transducer is more complex, applying several filtering and mapping
+steps on the items going through the channel. That said, as we've seen earlier
+in the article this is actually pretty efficient, with no unnecessary copying
+involved.</p>
+</div>
+<div class="section" id="closing-thoughts-on-the-generality-of-reducing-functions">
+<h2>Closing thoughts - on the generality of reducing functions</h2>
+<p>It's interesting to ponder how reducing functions, from the humble beginning of
+the workhorse of <tt class="docutils literal">reduce</tt>, became the most important building block of the
+concepts discussed in this article. Recall that a reducing function has the
+type:</p>
+<div class="highlight"><pre><span></span>reducingf :: acc -&gt; item -&gt; acc
+</pre></div>
+<p>I think the key insight is that taking and returning the new combined value
+permits a reducing function to implement things like filtering, because we can
+convey the concept of including or not including the current item in the
+combined result. Clojure's reductions also support the <tt class="docutils literal">reduced</tt> call for
+early termination, and keeping state between reductions can help implement more
+involved processing steps. For a fairly complete example of all these tools,
+take a look at the implementation of the transducer variant of <tt class="docutils literal">take</tt> in the
+<a class="reference external" href="https://github.com/clojure/clojure/blob/master/src/clj/clojure/core.clj">Clojure core library sources</a>.</p>
+<p>The code snippets shown throughout the article are <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2017/reducers-transducers-async">available on GitHub</a>.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>This is a Haskell-y type notation. <tt class="docutils literal">x <span class="pre">-&gt;</span> y <span class="pre">-&gt;</span> z</tt> means a function
+taking a parameter of type <tt class="docutils literal">x</tt> and a parameter of type <tt class="docutils literal">y</tt> and
+returning a value of type <tt class="docutils literal">z</tt>. <tt class="docutils literal">(x <span class="pre">-&gt;</span> y) <span class="pre">-&gt;</span> z</tt> means we take one
+parameter of type &quot;function taking <tt class="docutils literal">x</tt> and returning <tt class="docutils literal">y</tt>) and
+return a value of type <tt class="docutils literal">z</tt>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>Execrise: modify this code to produce a new vector of squares, instead
+of summing them up. Your solution will still use <tt class="docutils literal">reduce</tt>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>The actual <a class="reference external" href="https://github.com/clojure/clojure/blob/master/src/clj/clojure/core/reducers.clj">reducers library</a>
+cleverly uses Clojure protocols to make this process even more abstract
+and let sequences decide the best way to reduce them. It's worth checking
+out, though there's quite a bit of added complexity that obscures away
+the main point I want to make in this article.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-4">[4]</a></td><td><p class="first">We have to give up laziness though, since Clojure's <tt class="docutils literal">reduce</tt> is
+inherently <em>eager</em>. It implements left-folding rather than right-folding,
+so it can't be run on infinite sequences.</p>
+<p class="last">This is usually not a very big deal; while infinite sequences are a nice
+abstraction in some cases, most of the real data processing tasks we have
+are, luckily, finite.</p>
+</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-5">[5]</a></td><td>Benchmarking in Clojure is tricky since the JVM needs some warmup for the
+heavy-handed JIT to kick-in, so it's worth rerunning such benchmarks
+several times and collecting the fastest runtime. The numbers shown here
+are representative of the results obtained on my machine.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-6" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-6">[6]</a></td><td>There's a small caveat here to be aware of, IMHO. Pipelines as
+demonstrated in the Go article linked here aren't only useful to decouple
+the different steps. They are also useful to actually <em>parallelize</em> them.
+Squaring is a toy example, but imagine this step in the pipeline was time
+consuming. Then the go-routines running the generating step (or some
+other pipeline step) could actually run in parallel with the squaring
+step. When we use transducers as shown here, this flexibility goes away.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

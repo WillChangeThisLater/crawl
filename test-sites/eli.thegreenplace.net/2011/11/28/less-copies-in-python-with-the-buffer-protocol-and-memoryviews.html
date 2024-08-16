@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Less copies in Python with the buffer protocol and memoryviews - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="less-copies-in-python-with-the-buffer-protocol-and-memoryviews.html"
+                       rel="bookmark"
+                       title="Permalink to Less copies in Python with the buffer protocol and memoryviews">
+                        Less copies in Python with the buffer protocol and memoryviews
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> November 28, 2011 at 07:48</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/python.html">Python</a>
+        ,
+    <a href="../../../tag/python-internals.html">Python internals</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>For one of the hobby projects I'm currently hacking on, I recently had to do a lot of binary data processing in memory. Large chunks of data are being read from a file, then examined and modified in memory and finally used to write some reports.</p>
+<p>This made me think about the most efficient way to read data from a file into a modifiable memory chunk in Python. As we all know, the standard file <tt class="docutils literal">read</tt> method, for a file opened in binary mode, returns a <tt class="docutils literal">bytes</tt> object <a class="footnote-reference" href="less-copies-in-python-with-the-buffer-protocol-and-memoryviews.html#id10" id="id1">[1]</a>, which is immutable:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00"># Snippet #1</span>
+
+f = <span style="color: #00007f">open</span>(FILENAME, <span style="color: #7f007f">&#39;rb&#39;</span>)
+data = f.read()
+<span style="color: #007f00"># oops: TypeError: &#39;bytes&#39; object does not support item assignment</span>
+data[<span style="color: #007f7f">0</span>] = <span style="color: #007f7f">97</span>
+</pre></div>
+<p>This reads the whole contents of  the file into <tt class="docutils literal">data</tt> - a <tt class="docutils literal">bytes</tt> object which is read only. But what if we now want to perform some modifications on the data? Then, we need to somehow get it into a writable object. The most straightforward writable data buffer in Python is a <tt class="docutils literal">bytearray</tt>. So we can do this:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00"># Snippet #2</span>
+
+f = <span style="color: #00007f">open</span>(FILENAME, <span style="color: #7f007f">&#39;rb&#39;</span>)
+data = <span style="color: #00007f">bytearray</span>(f.read())
+data[<span style="color: #007f7f">0</span>] = <span style="color: #007f7f">97</span> <span style="color: #007f00"># OK!</span>
+</pre></div>
+<p>Now, the <tt class="docutils literal">bytes</tt> object returned by <tt class="docutils literal">f.read()</tt> is passed into the <tt class="docutils literal">bytearray</tt> constructor, which copies its contents into an internal buffer. Since <tt class="docutils literal">data</tt> is a <tt class="docutils literal">bytearray</tt>, we can manipulate it.</p>
+<p>Although it appears that the goal has been achieved, I don't like this solution. The extra copy made by <tt class="docutils literal">bytearray</tt> is bugging me. Why is this copy needed? <tt class="docutils literal">f.read()</tt> just returns a throwaway buffer we don't need anyway - can't we just initialize the <tt class="docutils literal">bytearray</tt> directly, without copying a temporary buffer?</p>
+<img class="align-center" src="../../../images/2011/yes-we-can-thumb.jpg" />
+<p>This use case is one of the reasons the Python buffer protocol exists.</p>
+<div class="section" id="the-buffer-protocol-introduction">
+<h3>The buffer protocol - introduction</h3>
+<p>The buffer protocol is described in the <a class="reference external" href="http://docs.python.org/dev/c-api/buffer.html">Python documentation</a> and in <a class="reference external" href="http://www.python.org/dev/peps/pep-3118/">PEP 3118</a> <a class="footnote-reference" href="less-copies-in-python-with-the-buffer-protocol-and-memoryviews.html#id11" id="id2">[2]</a>. Briefly, it provides a way for Python objects to expose their internal buffers to other objects. This is useful to avoid extra copies and for certain kinds of sharing. There are many examples of the buffer protocol in use. In the core language - in builtin types such as <tt class="docutils literal">bytes</tt> and <tt class="docutils literal">bytearray</tt>, in the standard library (for example <tt class="docutils literal">array.array</tt> and <tt class="docutils literal">ctypes</tt>) and 3rd party libraries (some important Python libraries such as <tt class="docutils literal">numpy</tt> and <tt class="docutils literal">PIL</tt> rely extensively on the buffer protocol for performance).</p>
+<p>There are usually two or more parties involved in each protocol. In the case of the Python buffer protocol, the parties are a &quot;producer&quot; (or &quot;provider&quot;) and a &quot;consumer&quot;. The producer exposes its internals via the buffer protocol, and the consumer accesses those internals.</p>
+<p>Here I want to focus specifically on one use of the buffer protocol that's relevant to this article. The producer is the built-in <tt class="docutils literal">bytearray</tt> type, and the consumer is a method in the <tt class="docutils literal">file</tt> object named <tt class="docutils literal">readinto</tt>.</p>
+</div>
+<div class="section" id="a-more-efficient-way-to-read-into-a-bytearray">
+<h3>A more efficient way to read into a bytearray</h3>
+<p>Here's the way to do what Snippet #2 did, just without the extra copy:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00"># Snippet #3</span>
+
+f = <span style="color: #00007f">open</span>(FILENAME, <span style="color: #7f007f">&#39;rb&#39;</span>)
+data = <span style="color: #00007f">bytearray</span>(os.path.getsize(FILENAME))
+f.readinto(data)
+</pre></div>
+<p>First, a <tt class="docutils literal">bytearray</tt> is created and pre-allocated to the size of the data we're going to read into it. The pre-allocation is important - since <tt class="docutils literal">readinto</tt> directly accesses the internal buffer of <tt class="docutils literal">bytearray</tt>, it won't write more than has been allocated. Next, the <tt class="docutils literal">file.readinto</tt> method is used to read the data directly into the bytearray's internal storage, without going via temporary buffers.</p>
+<p>The result: this code runs ~30% faster than snippet #2 <a class="footnote-reference" href="less-copies-in-python-with-the-buffer-protocol-and-memoryviews.html#id12" id="id3">[3]</a>.</p>
+</div>
+<div class="section" id="variations-on-the-theme">
+<h3>Variations on the theme</h3>
+<p>Other objects and modules could be used here. For example, the built-in <tt class="docutils literal">array.array</tt> class also supports the buffer protocol, so it can also be written and read from a file directly and efficiently. The same goes for <tt class="docutils literal">numpy</tt> arrays. On the consumer side, the <tt class="docutils literal">socket</tt> module can also read directly into a buffer with the <tt class="docutils literal">read_into</tt> method. I'm sure that it's easy to find many other sample uses of this protocol in Python itself and some 3rd partly libraries - if you find something interesting, please let me know.</p>
+</div>
+<div class="section" id="the-buffer-protocol-implementation">
+<h3>The buffer protocol - implementation</h3>
+<p>Let's see how Snippet #3 works under the hood using the buffer protocol <a class="footnote-reference" href="less-copies-in-python-with-the-buffer-protocol-and-memoryviews.html#id13" id="id4">[4]</a>. We'll start with the producer.</p>
+<p><tt class="docutils literal">bytearray</tt> declares that it implements the buffer protocol by filling the <tt class="docutils literal">tp_as_buffer</tt> slot of its type object <a class="footnote-reference" href="less-copies-in-python-with-the-buffer-protocol-and-memoryviews.html#id14" id="id5">[5]</a>. What's placed there is the address of  a <tt class="docutils literal">PyBufferProcs</tt> structure, which is a simple container for two function pointers:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">typedef</span> <span style="color: #00007f; font-weight: bold">int</span> (*getbufferproc)(PyObject *, Py_buffer *, <span style="color: #00007f; font-weight: bold">int</span>);
+<span style="color: #00007f; font-weight: bold">typedef</span> <span style="color: #00007f; font-weight: bold">void</span> (*releasebufferproc)(PyObject *, Py_buffer *);
+<span style="color: #007f00">/* ... */</span>
+<span style="color: #00007f; font-weight: bold">typedef</span> <span style="color: #00007f; font-weight: bold">struct</span> {
+     getbufferproc bf_getbuffer;
+     releasebufferproc bf_releasebuffer;
+} PyBufferProcs;
+</pre></div>
+<p><tt class="docutils literal">bf_getbuffer</tt> is the function used to obtain a buffer from the object providing it, and <tt class="docutils literal">bf_releasebuffer</tt> is the function used to notify the object that the provided buffer is no longer needed.</p>
+<p>The <tt class="docutils literal">bytearray</tt> implementation in <tt class="docutils literal">Objects/bytearrayobject.c</tt> initializes an instance of <tt class="docutils literal">PyBufferProces</tt> thus:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">static</span> PyBufferProcs bytearray_as_buffer = {
+    (getbufferproc)bytearray_getbuffer,
+    (releasebufferproc)bytearray_releasebuffer,
+};
+</pre></div>
+<p>The more interesting function here is <tt class="docutils literal">bytearray_getbuffer</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">static</span> <span style="color: #00007f; font-weight: bold">int</span>
+<span style="color: #00007f">bytearray_getbuffer</span>(PyByteArrayObject *obj, Py_buffer *view, <span style="color: #00007f; font-weight: bold">int</span> flags)
+{
+    <span style="color: #00007f; font-weight: bold">int</span> ret;
+    <span style="color: #00007f; font-weight: bold">void</span> *ptr;
+    <span style="color: #00007f; font-weight: bold">if</span> (view == <span style="color: #00007f">NULL</span>) {
+        obj-&gt;ob_exports++;
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">0</span>;
+    }
+    ptr = (<span style="color: #00007f; font-weight: bold">void</span> *) PyByteArray_AS_STRING(obj);
+    ret = PyBuffer_FillInfo(view, (PyObject*)obj, ptr, Py_SIZE(obj), <span style="color: #007f7f">0</span>, flags);
+    <span style="color: #00007f; font-weight: bold">if</span> (ret &gt;= <span style="color: #007f7f">0</span>) {
+        obj-&gt;ob_exports++;
+    }
+    <span style="color: #00007f; font-weight: bold">return</span> ret;
+}
+</pre></div>
+<p>It simply uses the <tt class="docutils literal">PyBuffer_FillInfo</tt> API to fill the <a class="reference external" href="http://docs.python.org/dev/c-api/buffer.html#the-buffer-structure">buffer structure</a> passed to it. <tt class="docutils literal">PyBuffer_FillInfo</tt> provides a simplified method of filling the buffer structure, which is suitable for unsophisticated objects like <tt class="docutils literal">bytearray</tt> (if you want to see a more complex example that has to fill the buffer structure manually, take a look at the corresponding function of <tt class="docutils literal">array.array</tt>).</p>
+<p>On the consumer side, the code that interests us is the <tt class="docutils literal">buffered_readinto</tt> function in <tt class="docutils literal">Modules\_io\bufferedio.c</tt> <a class="footnote-reference" href="less-copies-in-python-with-the-buffer-protocol-and-memoryviews.html#id15" id="id6">[6]</a>. I won't show its full code here since it's quite complex, but with regards to the buffer protocol, the flow is simple:</p>
+<ol class="arabic simple">
+<li>Use the <tt class="docutils literal">PyArg_ParseTuple</tt> function with the <tt class="docutils literal">w*</tt> format specifier to parse its argument as a R/W buffer object, which itself calls <tt class="docutils literal">PyObject_GetBuffer</tt> - a Python API that invokes the producer's &quot;get buffer&quot; function.</li>
+<li>Read data from the file directly into this buffer.</li>
+<li>Release the buffer using the <tt class="docutils literal">PyBuffer_Release</tt> API <a class="footnote-reference" href="less-copies-in-python-with-the-buffer-protocol-and-memoryviews.html#id16" id="id7">[7]</a>, which eventually gets routed to the <tt class="docutils literal">bytearray_releasebuffer</tt> function in our case.</li>
+</ol>
+<p>To conclude, here's what the call sequence looks like when <tt class="docutils literal">f.readinto(data)</tt> is executed in the Python code:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">buffered_readinto
+|
+\--&gt; PyArg_ParseTuple(..., &quot;w*&quot;, ...)
+|    |
+|    \--&gt; PyObject_GetBuffer(obj)
+|         |
+|         \--&gt; obj-&gt;ob_type-&gt;tp_as_buffer-&gt;bf_getbuffer
+|
+|--&gt; ... read the data
+|
+\--&gt; PyBuffer_Release
+     |
+     \--&gt; obj-&gt;ob_type-&gt;tp_as_buffer-&gt;bf_releasebuffer
+</pre></div>
+</div>
+<div class="section" id="memory-views">
+<h3>Memory views</h3>
+<p>The buffer protocol is an internal implementation detail of Python, accessible only on the C-API level. And that's a good thing, since the buffer protocol requires certain low-level behavior such as properly releasing buffers. <a class="reference external" href="http://docs.python.org/dev/library/stdtypes.html#typememoryview">Memoryview objects</a> were created to expose it to a user's Python code in a safe manner:</p>
+<blockquote>
+memoryview objects allow Python code to access the internal data of an object that supports the buffer protocol without copying.</blockquote>
+<p>The linked documentation page explains <tt class="docutils literal">memoryviews</tt> quite well and should be immediately comprehensible if you've reached so far in this article. Therefore I'm not going to explain how a <tt class="docutils literal">memoryview</tt> works, just show some examples of its use.</p>
+<p>It is a known fact that in Python, slices on strings and bytes make copies. Sometimes when performance matters and the buffers are large, this is a big waste. Suppose you have a large buffer and you want to pass just half of it to some function (that will send it to a socket or do something else <a class="footnote-reference" href="less-copies-in-python-with-the-buffer-protocol-and-memoryviews.html#id17" id="id8">[8]</a>). Here's what happens (annotated Python pseudo-code):</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">mybuf = ... <span style="color: #007f00"># some large buffer of bytes</span>
+func(mybuf[:<span style="color: #00007f">len</span>(mybuf)//<span style="color: #007f7f">2</span>])
+  <span style="color: #007f00"># passes the first half of mybuf into func</span>
+  <span style="color: #007f00"># COPIES half of mybuf&#39;s data to a new buffer</span>
+</pre></div>
+<p>The copy can be expensive if there's a lot of data involved. What's the alternative? Using a <tt class="docutils literal">memoryview</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">mybuf = ... <span style="color: #007f00"># some large buffer of bytes</span>
+mv_mybuf = memoryview(mybuf) <span style="color: #007f00"># a memoryview of mybuf</span>
+func(mv_mybuf[:<span style="color: #00007f">len</span>(mv_mybuf)//<span style="color: #007f7f">2</span>])
+  <span style="color: #007f00"># passes the first half of mybuf into func as a &quot;sub-view&quot; created</span>
+  <span style="color: #007f00"># by slicing a memoryview.</span>
+  <span style="color: #007f00"># NO COPY is made here!</span>
+</pre></div>
+<p>A <tt class="docutils literal">memoryview</tt> behaves just like <tt class="docutils literal">bytes</tt> in many useful contexts (for example, it supports the mapping protocol) so it provides an adequate replacement if used carefully. The great thing about it is that it uses the buffer protocol beneath the covers to avoid copies and just juggle pointers to data. The performance difference is dramatic - I timed a 300x speedup on slicing out a half of a 1MB <tt class="docutils literal">bytes</tt> buffer when using a <tt class="docutils literal">memoryview</tt> as demonstrated above. And this speedup will get larger with larger buffers, since it's O(1) vs. the O(n) of copying.</p>
+<p>But there's more. On writable producers such as <tt class="docutils literal">bytearray</tt>, a <tt class="docutils literal">memoryview</tt> creates a writable view that can be modified:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">&gt;&gt;&gt; buf = <span style="color: #00007f">bytearray</span>(b<span style="color: #7f007f">&#39;abcdefgh&#39;</span>)
+&gt;&gt;&gt; mv = memoryview(buf)
+&gt;&gt;&gt; mv[<span style="color: #007f7f">4</span>:<span style="color: #007f7f">6</span>] = b<span style="color: #7f007f">&#39;ZA&#39;</span>
+&gt;&gt;&gt; buf
+<span style="color: #00007f">bytearray</span>(b<span style="color: #7f007f">&#39;abcdZAgh&#39;</span>)
+</pre></div>
+<p>This gives us a way to do something we couldn't achieve by any other means - read from a file (or receive from a socket) <em>directly into the middle of some existing buffer</em> <a class="footnote-reference" href="less-copies-in-python-with-the-buffer-protocol-and-memoryviews.html#id18" id="id9">[9]</a>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">buf = <span style="color: #00007f">bytearray</span>(...) <span style="color: #007f00"># pre-allocated to the needed size</span>
+mv = memoryview(buf)
+numread = f.readinto(mv[some_offset:])
+</pre></div>
+</div>
+<div class="section" id="conclusion">
+<h3>Conclusion</h3>
+<p>This article demonstrated the Python buffer protocol, showing both how it works and what it can be used for. The main <em>use</em> of the buffer protocol to the Python programmer is optimization of certain patterns of coding, by avoiding unnecessary data copies.</p>
+<p>Any mention of optimization in Python code is sure to draw fire from people claiming that if I want to write fast code, I shouldn't use Python at all. But I disagree. Python these days is fast enough to be suitable for many tasks that were previously only in the domain of C/C++. I want to keep using it while I can, and only resort to low-level C/C++ when I must.</p>
+<p>Employing the buffer protocol to have zero-copy buffer manipulations on the Python level is IMHO a huge boon that can stall (or even avoid) the transition of some performance-sensitive code from Python to C. That's because when dealing with data processing, we often use a lot of C APIs anyway, the only Python overhead being the passing of data between these APIs. A speed boost in this code can make a huge difference and bring the Python code very close to the performance we could have with plain C.</p>
+<p>The article also gave a glimpse into one aspect of the implementation of Python, hopefully showing that it's not difficult at all to dive right into the code and understand how Python does something it does.</p>
+<img class="align-center" src="../../../images/hline.jpg" style="width: 320px; height: 5px;" />
+<table class="docutils footnote" frame="void" id="id10" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="less-copies-in-python-with-the-buffer-protocol-and-memoryviews.html#id1">[1]</a></td><td>In this article I'm focusing on the latest Python 3.x, although most of it also applies to Python 2.7</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id11" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="less-copies-in-python-with-the-buffer-protocol-and-memoryviews.html#id2">[2]</a></td><td>The buffer protocol existed in Python prior to 2.6, but was then greatly enhanced. The PEP also describes the change that was made to the buffer protocol with the move to Python 3.x (and later backported to the 2.x line starting with 2.6).</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id12" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="less-copies-in-python-with-the-buffer-protocol-and-memoryviews.html#id3">[3]</a></td><td><p class="first">This is on the latest build of Python 3.3. Roughly the same speedup can be seen on Python 2.7. With Python 3.2 there appears to be a speed regression that makes the two snippets perform similarly, but it has been fixed in 3.3</p>
+<p class="last">Another note on the benchmarking: it's recommended to use large files (say, ~100 MB and up) to get reliable measurements. For small files too many irrelevant factors come into play and offset the benchmarks. In addition, the code should be run in a loop to avoid differences due to warm/cold disk cache issues. I'm using the <tt class="docutils literal">timeit</tt> module, which is perfect for this purpose.</p>
+</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id13" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="less-copies-in-python-with-the-buffer-protocol-and-memoryviews.html#id4">[4]</a></td><td>All the code displayed here is taken from the latest development snapshot of Python 3.3 (<tt class="docutils literal">default</tt> branch).</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id14" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="less-copies-in-python-with-the-buffer-protocol-and-memoryviews.html#id5">[5]</a></td><td>Type objects are a fascinating aspect of Python's implementation, and I hope to cover it in a separate article one day. Briefly, it allows Python objects to declare which services they provide (or, in other terms, which interfaces they implement). More information can be found <a class="reference external" href="http://docs.python.org/dev/c-api/typeobj.html">in the documentation</a>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id15" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="less-copies-in-python-with-the-buffer-protocol-and-memoryviews.html#id6">[6]</a></td><td>Since the built-in <tt class="docutils literal">open</tt> function, when asked to open a file in binary mode for reading, returns an <tt class="docutils literal">io.BufferedReader</tt> object by default. This can be controlled with the <em>buffering</em> argument.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id16" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="less-copies-in-python-with-the-buffer-protocol-and-memoryviews.html#id7">[7]</a></td><td>Releasing the buffer structure is an important part of the buffer protocol. Each time it's requested for a buffer, <tt class="docutils literal">bytearray</tt> increments a reference count, and decrements it when the buffer is released. While the refcount is positive (meaning that there are consumer objects directly relying on the internal buffer), <tt class="docutils literal">bytearray</tt> won't agree to resize or do other operations that may invalidate the internal buffer. Otherwise, this would be an avenue for insidious memory bugs.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id17" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="less-copies-in-python-with-the-buffer-protocol-and-memoryviews.html#id8">[8]</a></td><td>Networking code is actually a common use case. When sending data over sockets, it's frequently sliced and diced to build frames. This can involve a lot of copying. Other data-munging applications such as encryption and compression are also culprits.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id18" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="less-copies-in-python-with-the-buffer-protocol-and-memoryviews.html#id9">[9]</a></td><td>This code snippet was borrowed from Antoine Pitrou's post on python-dev.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="less-copies-in-python-with-the-buffer-protocol-and-memoryviews.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

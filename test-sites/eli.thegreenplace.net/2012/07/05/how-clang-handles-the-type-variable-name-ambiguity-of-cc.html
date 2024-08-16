@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>How Clang handles the type / variable name ambiguity of C/C++ - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="how-clang-handles-the-type-variable-name-ambiguity-of-cc.html"
+                       rel="bookmark"
+                       title="Permalink to How Clang handles the type / variable name ambiguity of C/C++">
+                        How Clang handles the type / variable name ambiguity of C/C++
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> July 05, 2012 at 19:35</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../../tag/compilation.html">Compilation</a>
+        ,
+    <a href="../../../tag/llvm-clang.html">LLVM & Clang</a>
+        ,
+    <a href="../../../tag/recursive-descent-parsing.html">Recursive descent parsing</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>My previous articles on the context sensitivity and ambiguity of the C/C++ grammar (<a class="reference external" href="../../../2007/11/24/the-context-sensitivity-of-cs-grammar/index.html">one</a>, <a class="reference external" href="../../../2011/05/02/the-context-sensitivity-of-cs-grammar-revisited/index.html">two</a>, <a class="reference external" href="../../06/28/the-type-variable-name-ambiguity-in-c/index.html">three</a>) can probably make me sound pessimistic about the prospect of correctly parsing C/C++, which couldn't be farther from the truth. My gripe is not with the grammar itself (although I admit it's needlessly complex), it's with the inability of Yacc-generated LALR(1) parsers to parse it without considerable hacks. As I've mentioned numerous times before, industrial-strength compilers for C/C++ exist after all, so they do manage to somehow parse these languages.</p>
+<p>One of the newest, and in my eyes the most exciting of C/C++ compilers is <a class="reference external" href="http://clang.llvm.org/">Clang</a>. Originally developed by Apple as a front-end to LLVM, it's been a vibrant open-source project for the past couple of years with participation from many companies and individuals (although Apple remains the main driving force in the community). Clang, similarly to LLVM, features a modular library-based design and a very clean C++ code-base. Clang's parser is hand-written, based on a standard recursive-descent parsing algorithm.</p>
+<p>In this post I want to explain how Clang manages to overcome the ambiguities I mentioned in the previous articles.</p>
+<div class="section" id="no-lexer-hack">
+<h3>No lexer hack</h3>
+<p>There is no &quot;lexer hack&quot; in Clang. Information flows in a single direction - from the lexer to the parser, not back. How is this managed?</p>
+<p>The thing is that the Clang lexer doesn't distinguish between user-defined types and other identifiers. All are marked with the <tt class="docutils literal">identifier</tt> token.</p>
+<p>For this code:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">typedef</span> <span style="color: #00007f; font-weight: bold">int</span> mytype;
+mytype bb;
+</pre></div>
+<p>The Clang parser encounters the following tokens (<tt class="docutils literal"><span class="pre">-dump-tokens</span></tt>):</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">typedef &#39;typedef&#39;   [StartOfLine]   Loc=&lt;z.c:1:1&gt;
+int &#39;int&#39;           [LeadingSpace]  Loc=&lt;z.c:1:9&gt;
+identifier &#39;mytype&#39; [LeadingSpace]  Loc=&lt;z.c:1:13&gt;
+semi &#39;;&#39;                            Loc=&lt;z.c:1:19&gt;
+identifier &#39;mytype&#39; [StartOfLine]   Loc=&lt;z.c:2:1&gt;
+identifier &#39;bb&#39;     [LeadingSpace]  Loc=&lt;z.c:2:8&gt;
+semi &#39;;&#39;                            Loc=&lt;z.c:2:10&gt;
+eof &#39;&#39;                              Loc=&lt;z.c:4:1&gt;
+</pre></div>
+<p>Note how <tt class="docutils literal">mytype</tt> is always reported as an identifier, both before and after Clang figures out it's actually a user-defined type.</p>
+</div>
+<div class="section" id="figuring-out-what-s-a-type">
+<h3>Figuring out what's a type</h3>
+<p>So if the Clang lexer always reports <tt class="docutils literal">mytype</tt> as an identifier, how does the parser figure out when it is actually a type? By keeping a symbol table.</p>
+<p>Well, actually it's not the parser that keeps the symbol table, it's <tt class="docutils literal">Sema</tt>. <tt class="docutils literal">Sema</tt> is the Clang module responsible for semantic analysis and AST construction. It gets invoked from the parser through a generic &quot;actions&quot; interface, which in theory could serve a different client. Although conceptually the parser and <tt class="docutils literal">Sema</tt> are coupled, the actions interface provides a clean separation in the code. The parser is responsible for driving the parsing process, and <tt class="docutils literal">Sema</tt> is responsible for handling semantic information. In this particular case, the symbol table <em>is</em> semantic information, so it's handled by <tt class="docutils literal">Sema</tt>.</p>
+<p>To follow this process through, we'll start in <tt class="docutils literal"><span class="pre">Parser::ParseDeclarationSpecifiers</span></tt> <a class="footnote-reference" href="how-clang-handles-the-type-variable-name-ambiguity-of-cc.html#id5" id="id1">[1]</a>. In the C/C++ grammar, type names are part of the &quot;specifiers&quot; in a declaration (that also include things like <tt class="docutils literal">extern</tt> or <tt class="docutils literal">inline</tt>), and following the &quot;recursive-descent protocol&quot;, Clang will usually feature a parsing method per grammar rule. When this method encounters an identifier (<tt class="docutils literal"><span class="pre">tok::identifier</span></tt>), it asks <tt class="docutils literal">Sema</tt> whether it's actually a type by calling <tt class="docutils literal">Actions.getTypeName</tt> <a class="footnote-reference" href="how-clang-handles-the-type-variable-name-ambiguity-of-cc.html#id6" id="id2">[2]</a>.</p>
+<p><tt class="docutils literal"><span class="pre">Sema::getTypeName</span></tt> calls <tt class="docutils literal"><span class="pre">Sema::LookupName</span></tt> to do the actual name lookup. For C, name lookup rules are relatively simple - you just climb the lexical scope stack the code belongs to, trying to find a scope that defines the name as a type. I've <a class="reference external" href="../../../2011/05/02/the-context-sensitivity-of-cs-grammar-revisited/index.html">mentioned before</a> that all names in C (including type names) obey lexical scoping rules. With this mechanism, Clang implements the required nested symbol table. Note that this symbol table is queried by Clang in places where a type is actually expected and allowed, not only in declarations. For example, it's also done to disambiguate function calls from casts in some cases.</p>
+<p>How does a type actually get into this table, though?</p>
+<p>When the parser is done parsing a <tt class="docutils literal">typedef</tt> (and any declarator, for that matter), it calls <tt class="docutils literal"><span class="pre">Sema::ActOnDeclarator</span></tt>. When the latter notices a new <tt class="docutils literal">typedef</tt> and makes sure everything about it is kosher (e.g. it does not re-define a name in the same scope), it adds the new name to the symbol table at the current scope.</p>
+<p>In Clang's code this whole process looks very clean and intuitive, but in a generated LALR(1) parser it would be utterly impossible, because leaving out the special token for type names and merging it with <tt class="docutils literal">identifier</tt> would create a tons of unresolvable reduce-reduce conflicts in the grammar. This is why Yacc-based parsers require a lexer hack to handle this issue.</p>
+</div>
+<div class="section" id="class-wide-declarations-in-c">
+<h3>Class-wide declarations in C++</h3>
+<p>In the <a class="reference external" href="../../06/28/the-type-variable-name-ambiguity-in-c/index.html">previous post</a> I mentioned how C++ makes this type lookup problem much more difficult by forcing declarations inside a class to be visible throughout the class, even in code that appears before them. Here's a short reminder:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">int</span> aa(<span style="color: #00007f; font-weight: bold">int</span> arg) {
+    <span style="color: #00007f; font-weight: bold">return</span> arg;
+}
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">C</span> {
+    <span style="color: #00007f; font-weight: bold">int</span> foo(<span style="color: #00007f; font-weight: bold">int</span> bb) {
+        <span style="color: #00007f; font-weight: bold">return</span> (aa)(bb);
+    }
+
+    <span style="color: #00007f; font-weight: bold">typedef</span> <span style="color: #00007f; font-weight: bold">int</span> aa;
+};
+</pre></div>
+<p>In this code, even though the <tt class="docutils literal">typedef</tt> appears after <tt class="docutils literal">foo</tt>, the parser must figure out that <tt class="docutils literal"><span class="pre">(aa)(bb)</span></tt> is a cast of <tt class="docutils literal">bb</tt> to type <tt class="docutils literal">aa</tt>, and not the function call <tt class="docutils literal">aa(bb)</tt>.</p>
+<p>We've seen how Clang can manage to figure out that <tt class="docutils literal">aa</tt> is a type. However, when it parses <tt class="docutils literal">foo</tt> it hasn't even <em>seen</em> the <tt class="docutils literal">typedef</tt> yet, so how does that work?</p>
+</div>
+<div class="section" id="delayed-parsing-of-inline-method-bodies">
+<h3>Delayed parsing of inline method bodies</h3>
+<p>To solve the problem described above, Clang employs a clever technique. When parsing an inline member function declaration/definition, it does full parsing and semantic analysis of the <em>declaration</em>, leaving the <em>definition</em> for later.</p>
+<p>Specifically, the body of an inline method definition is <em>lexed</em> and the tokens are kept in a special buffer for later (this is done by <tt class="docutils literal"><span class="pre">Parser::ParseCXXInlineMethodDef</span></tt>). Once the parser has finished parsing the class, it calls <tt class="docutils literal"><span class="pre">Parser::ParseLexedMethodDefs</span></tt> that does the actual parsing and semantic analysis of the saved method bodies. At this point, all the types declared inside the class are available, so the parser can correctly disambiguate wherever required.</p>
+</div>
+<div class="section" id="annotation-tokens">
+<h3>Annotation tokens</h3>
+<p>Although the above is enough to understand how Clang approaches the problem, I want to mention another trick it uses to make parsing more efficient in some cases.</p>
+<p>The <tt class="docutils literal"><span class="pre">Sema::getTypeName</span></tt> method mentioned earlier can be costly. It performs a lookup in a set of nested scopes, which may be expensive if the scopes are deeply nested and a name is <em>not</em> actually a type (which is probably most often the case). It's alright (and inevitable!) to do this lookup once, but Clang would like to avoid repeating it for the same token when it <em>backtracks</em> trying to parse a statement in a different way.</p>
+<p>A word on what &quot;backtracks&quot; means in this context. <a class="reference external" href="../../../2008/09/26/recursive-descent-ll-and-predictive-parsers/index.html">Recursive descent parsers</a> are naturally (by their very structure) backtracking. That is, they may try a number of different ways to parse a single grammatical production (be that a statement, an expression, a declaration, or whatever), before finding an approach that succeeds. In this process, the same token may need to be queried more than once.</p>
+<p>To avoid this, Clang has special &quot;annotation tokens&quot; it inserts into the token stream. The mechanism is used for other things as well, but in our case we're interested in the <tt class="docutils literal"><span class="pre">tok::annot_typename</span></tt> token. What happens is that the first time the parser encounters a <tt class="docutils literal"><span class="pre">tok::identifier</span></tt> and figures out it's a type, this token gets replaced by <tt class="docutils literal"><span class="pre">tok::annot_typename</span></tt>. The next time the parser encounters this token, it won't have to lookup whether it's a type once again, because it's no longer a generic <tt class="docutils literal"><span class="pre">tok::identifier</span></tt> <a class="footnote-reference" href="how-clang-handles-the-type-variable-name-ambiguity-of-cc.html#id7" id="id3">[3]</a>.</p>
+</div>
+<div class="section" id="disclaimer-and-conclusion">
+<h3>Disclaimer and conclusion</h3>
+<p>It's important to keep in mind that the cases examined in this post do not represent the full complexity of the C++ grammar. In C++, constructs like qualified names (<tt class="docutils literal"><span class="pre">foo::bar::baz</span></tt>) and templates complicate matters considerably. However, I just wanted to focus on the cases I specifically discussed in previous posts, explaining how Clang addresses them.</p>
+<p>To conclude, we've seen how Clang's recursive descent parser manages some of the ambiguities of the C/C++ grammar. For a task that complex, it's inevitable for the code to become non-trivial <a class="footnote-reference" href="how-clang-handles-the-type-variable-name-ambiguity-of-cc.html#id8" id="id4">[4]</a>. That said, Clang has actually managed to keep its code-base relatively clean and logically structured, while at the same time sticking to its aggressive performance goals. Someone with a general understanding of how front-ends work shouldn't require more than a few hours of immersion in the Clang code-base to be able to answer questions about &quot;how does it do <em>that</em>&quot;.</p>
+<img class="align-center" src="../../../images/hline.jpg" style="width: 320px; height: 5px;" />
+<table class="docutils footnote" frame="void" id="id5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="how-clang-handles-the-type-variable-name-ambiguity-of-cc.html#id1">[1]</a></td><td>As a rule, all <tt class="docutils literal">Parser</tt> code lives in <tt class="docutils literal">lib/Parse</tt> in the Clang source tree. <tt class="docutils literal">Sema</tt> code lives in <tt class="docutils literal">lib/Sema</tt>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id6" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="how-clang-handles-the-type-variable-name-ambiguity-of-cc.html#id2">[2]</a></td><td>Here and later I'll skip a lot of details and variations, focusing only on the path I want to use in the example.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id7" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="how-clang-handles-the-type-variable-name-ambiguity-of-cc.html#id3">[3]</a></td><td>It's very important to note that only <em>this instance</em> of the token in the token stream is replaced. The next instance may have already become a type (or we may have even changed the scope), so it wouldn't be semantically correct to reason about it.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id8" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="how-clang-handles-the-type-variable-name-ambiguity-of-cc.html#id4">[4]</a></td><td>That Clang parses Objective-C and various extensions like CUDA or OpenCL in the same code-base doesn't help in this respect.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="how-clang-handles-the-type-variable-name-ambiguity-of-cc.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

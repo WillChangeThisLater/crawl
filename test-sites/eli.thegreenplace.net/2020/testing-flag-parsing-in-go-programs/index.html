@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Testing flag parsing in Go programs - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Testing flag parsing in Go programs">
+                        Testing flag parsing in Go programs
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> April 04, 2020 at 07:24</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/testing.html">Testing</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This is a short post about writing tests for Go programs that have
+command-line flags, and in particular programs where flags are a significant
+chunk of their functionality (think command-line tools like <tt class="docutils literal">grep</tt>). I'll
+cover a technique that works well for code that uses the standard <tt class="docutils literal">flag</tt>
+package for parsing flags. If you're using a framework like Cobra, refer to
+its documentation for best practices.</p>
+<p>Here's a typical flow of a program that parses flags and other command-line
+arguments <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>:</p>
+<img alt="Diagram of program parsing command-line flags" class="align-center" src="../../images/2020/go-flag-testing-baseline.png" />
+<p>For some programs the &quot;parse flags&quot; part is trivial enough that you wouldn't
+typically even consider writing unit tests for it (whether this is a good choice
+or not is outside the scope of this post). However, in many other programs flag
+parsing is a critical part of the functionality. In some common command-line
+tools, like <tt class="docutils literal">grep</tt> or <tt class="docutils literal">find</tt>, it would be fair to say that flags are a
+<em>major</em> part of the user-visible functionality.</p>
+<p>Therefore, when we talk about testing such programs there are two aspects we'll
+need help with:</p>
+<ol class="arabic simple">
+<li>Writing <em>unit tests</em> only for the &quot;parse flags&quot; part of the program.</li>
+<li>Writing <em>integration tests</em> where the input is the command line given to
+the program and the output is the full effect of the program (observable
+output and/or environment changes).</li>
+</ol>
+<p>The technique described in this post is helpful for both. It's a very simple
+concept that should be familiar to most programmers. The main goal of this
+post is to show how to do it with the tools provided by Go's <tt class="docutils literal">flag</tt> package.</p>
+<p>Let's start by showing how the program flow described in the previous is split
+to enable testing:</p>
+<img alt="Program parsing command-line flags split into stages" class="align-center" src="../../images/2020/go-flag-testing-split.png" />
+<p>Instead of parsing a flag and invoking its related functionality directly, the
+values of parsed flags will be saved in a <tt class="docutils literal">Config</tt> value that can be used in
+tests. This lets us write unit-tests for the &quot;parse flags&quot; part of the program.</p>
+<p>The following is sample <tt class="docutils literal">parseFlags</tt> for a toy program. The full code with tests is
+<a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2020/go-testing-flags">available here</a>.</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">Config</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">verbose</span><span class="w">  </span><span class="kt">bool</span><span class="w"></span>
+<span class="w">  </span><span class="nx">greeting</span><span class="w"> </span><span class="kt">string</span><span class="w"></span>
+<span class="w">  </span><span class="nx">level</span><span class="w">    </span><span class="kt">int</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// args are the positional (non-flag) command-line arguments.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">args</span><span class="w"> </span><span class="p">[]</span><span class="kt">string</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="c1">// parseFlags parses the command-line arguments provided to the program.</span><span class="w"></span>
+<span class="c1">// Typically os.Args[0] is provided as &#39;progname&#39; and os.args[1:] as &#39;args&#39;.</span><span class="w"></span>
+<span class="c1">// Returns the Config in case parsing succeeded, or an error. In any case, the</span><span class="w"></span>
+<span class="c1">// output of the flag.Parse is returned in output.</span><span class="w"></span>
+<span class="c1">// A special case is usage requests with -h or -help: then the error</span><span class="w"></span>
+<span class="c1">// flag.ErrHelp is returned and output will contain the usage message.</span><span class="w"></span>
+<span class="kd">func</span><span class="w"> </span><span class="nx">parseFlags</span><span class="p">(</span><span class="nx">progname</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">args</span><span class="w"> </span><span class="p">[]</span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nx">config</span><span class="w"> </span><span class="o">*</span><span class="nx">Config</span><span class="p">,</span><span class="w"> </span><span class="nx">output</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="kt">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flags</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">NewFlagSet</span><span class="p">(</span><span class="nx">progname</span><span class="p">,</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">ContinueOnError</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">buf</span><span class="w"> </span><span class="nx">bytes</span><span class="p">.</span><span class="nx">Buffer</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flags</span><span class="p">.</span><span class="nx">SetOutput</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">buf</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">conf</span><span class="w"> </span><span class="nx">Config</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flags</span><span class="p">.</span><span class="nx">BoolVar</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">conf</span><span class="p">.</span><span class="nx">verbose</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;verbose&quot;</span><span class="p">,</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;set verbosity&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flags</span><span class="p">.</span><span class="nx">StringVar</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">conf</span><span class="p">.</span><span class="nx">greeting</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;greeting&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;set greeting&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flags</span><span class="p">.</span><span class="nx">IntVar</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">conf</span><span class="p">.</span><span class="nx">level</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;level&quot;</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;set level&quot;</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">err</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">flags</span><span class="p">.</span><span class="nx">Parse</span><span class="p">(</span><span class="nx">args</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="nx">buf</span><span class="p">.</span><span class="nx">String</span><span class="p">(),</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">conf</span><span class="p">.</span><span class="nx">args</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">flags</span><span class="p">.</span><span class="nx">Args</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">conf</span><span class="p">,</span><span class="w"> </span><span class="nx">buf</span><span class="p">.</span><span class="nx">String</span><span class="p">(),</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This code uses two features of the <tt class="docutils literal">flag</tt> package to make the approach work:</p>
+<ol class="arabic simple">
+<li>Creating a custom <tt class="docutils literal">flag.FlagSet</tt> instead of using the default global one.</li>
+<li>Using the <tt class="docutils literal">XxxVar</tt> variant of flag definition methods (e.g. <tt class="docutils literal">BoolVar</tt>) to
+tie parsed flag values to pre-defined variables.</li>
+</ol>
+<p>There's a bit of care around handling usage flags like <tt class="docutils literal"><span class="pre">-h</span></tt>, but otherwise
+this code is trivial. Here's the rest of the program, simulating some
+arbitrary &quot;work&quot; given the parsed configuration:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">doWork</span><span class="p">(</span><span class="nx">config</span><span class="w"> </span><span class="o">*</span><span class="nx">Config</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;config = %+v\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">config</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">conf</span><span class="p">,</span><span class="w"> </span><span class="nx">output</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">parseFlags</span><span class="p">(</span><span class="nx">os</span><span class="p">.</span><span class="nx">Args</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Args</span><span class="p">[</span><span class="mi">1</span><span class="p">:])</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">ErrHelp</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nx">output</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">os</span><span class="p">.</span><span class="nx">Exit</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;got error:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;output:\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">output</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">os</span><span class="p">.</span><span class="nx">Exit</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">doWork</span><span class="p">(</span><span class="nx">conf</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>With our <tt class="docutils literal">parseFlags</tt>, unit-testing of flags is straightforward:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">TestParseFlagsCorrect</span><span class="p">(</span><span class="nx">t</span><span class="w"> </span><span class="o">*</span><span class="nx">testing</span><span class="p">.</span><span class="nx">T</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">tests</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="p">[]</span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">args</span><span class="w"> </span><span class="p">[]</span><span class="kt">string</span><span class="w"></span>
+<span class="w">    </span><span class="nx">conf</span><span class="w"> </span><span class="nx">Config</span><span class="w"></span>
+<span class="w">  </span><span class="p">}{</span><span class="w"></span>
+<span class="w">    </span><span class="p">{[]</span><span class="kt">string</span><span class="p">{</span><span class="s">&quot;-verbose&quot;</span><span class="p">},</span><span class="w"></span>
+<span class="w">      </span><span class="nx">Config</span><span class="p">{</span><span class="nx">verbose</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">greeting</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">level</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="nx">args</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="kt">string</span><span class="p">{}}},</span><span class="w"></span>
+
+<span class="w">    </span><span class="p">{[]</span><span class="kt">string</span><span class="p">{</span><span class="s">&quot;-level&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;8&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;-greeting&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;joe&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;-verbose&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;foo&quot;</span><span class="p">},</span><span class="w"></span>
+<span class="w">      </span><span class="nx">Config</span><span class="p">{</span><span class="nx">verbose</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"> </span><span class="nx">greeting</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;joe&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">level</span><span class="p">:</span><span class="w"> </span><span class="mi">8</span><span class="p">,</span><span class="w"> </span><span class="nx">args</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="kt">string</span><span class="p">{</span><span class="s">&quot;foo&quot;</span><span class="p">}}},</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// ... many more test entries here</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">tt</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">tests</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">t</span><span class="p">.</span><span class="nx">Run</span><span class="p">(</span><span class="nx">strings</span><span class="p">.</span><span class="nx">Join</span><span class="p">(</span><span class="nx">tt</span><span class="p">.</span><span class="nx">args</span><span class="p">,</span><span class="w"> </span><span class="s">&quot; &quot;</span><span class="p">),</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">t</span><span class="w"> </span><span class="o">*</span><span class="nx">testing</span><span class="p">.</span><span class="nx">T</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">conf</span><span class="p">,</span><span class="w"> </span><span class="nx">output</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">parseFlags</span><span class="p">(</span><span class="s">&quot;prog&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">tt</span><span class="p">.</span><span class="nx">args</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">t</span><span class="p">.</span><span class="nx">Errorf</span><span class="p">(</span><span class="s">&quot;err got %v, want nil&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">output</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">t</span><span class="p">.</span><span class="nx">Errorf</span><span class="p">(</span><span class="s">&quot;output got %q, want empty&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">output</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">!</span><span class="nx">reflect</span><span class="p">.</span><span class="nx">DeepEqual</span><span class="p">(</span><span class="o">*</span><span class="nx">conf</span><span class="p">,</span><span class="w"> </span><span class="nx">tt</span><span class="p">.</span><span class="nx">conf</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">t</span><span class="p">.</span><span class="nx">Errorf</span><span class="p">(</span><span class="s">&quot;conf got %+v, want %+v&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">conf</span><span class="p">,</span><span class="w"> </span><span class="nx">tt</span><span class="p">.</span><span class="nx">conf</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">})</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>If we want to write integration tests for the whole program driven by
+a command line, it would look very similar to the test above. However, instead
+of comparing a <tt class="docutils literal">Config</tt> with an expected value, we'd compare the output
+and/or side effects of <tt class="docutils literal">doWork</tt> with expected values. Naturally, the test
+would likely have to be split into multiple variants with different table-driven
+outcomes, depending on the nature of <tt class="docutils literal">doWork</tt>. If <tt class="docutils literal">doWork</tt>'s only observable
+side effect is text output, things are simple. But <tt class="docutils literal">doWork</tt> could also modify
+the file system and/or run network servers/clients, in which case it's a bit
+trickier but no different from testing any such program, regardless of the flag
+parsing part.</p>
+<p>The <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2020/go-testing-flags">code accompanying this post</a>
+has a more complete set of tests and exercises some error scenarios.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>Given the invocation <tt class="docutils literal">grep <span class="pre">-i</span> joe file.go</tt>, we'll refer to <tt class="docutils literal"><span class="pre">-i</span></tt> as
+a <em>flag</em> and to <tt class="docutils literal">joe</tt> and <tt class="docutils literal">file.go</tt> as <em>positional arguments</em>. The
+distinction is not terribly important for the sake of this post, however.</td></tr>
+</tbody>
+</table>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

@@ -1,0 +1,1363 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"><title>Eli Bendersky's website - Lexer</title><link href="https://eli.thegreenplace.net/" rel="alternate"></link><link href="https://eli.thegreenplace.net/feeds/lexer.atom.xml" rel="self"></link><id>https://eli.thegreenplace.net/</id><updated>2024-05-04T19:46:23-07:00</updated><entry><title>Performance of coroutine-style lexers in Go</title><link href="https://eli.thegreenplace.net/2022/performance-of-coroutine-style-lexers-in-go/" rel="alternate"></link><published>2022-06-06T20:32:00-07:00</published><updated>2024-05-04T19:46:23-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2022-06-06:/2022/performance-of-coroutine-style-lexers-in-go/</id><summary type="html">&lt;p&gt;Back in 2011, Rob Pike gave a talk on the topic of
+&lt;a class="reference external" href="https://www.youtube.com/watch?v=HxaD_trXwRE"&gt;Lexical Scanning in Go&lt;/a&gt;, where
+he presented an interesting approach to lexical analysis with coroutines
+(implemented via goroutines communicating over a channel). Since I've
+been pondering the &lt;a class="reference external" href="https://eli.thegreenplace.net/2009/08/29/co-routines-as-an-alternative-to-state-machines/"&gt;connection between coroutines and state machines&lt;/a&gt;
+in the past, Rob's talk …&lt;/p&gt;</summary><content type="html">&lt;p&gt;Back in 2011, Rob Pike gave a talk on the topic of
+&lt;a class="reference external" href="https://www.youtube.com/watch?v=HxaD_trXwRE"&gt;Lexical Scanning in Go&lt;/a&gt;, where
+he presented an interesting approach to lexical analysis with coroutines
+(implemented via goroutines communicating over a channel). Since I've
+been pondering the &lt;a class="reference external" href="https://eli.thegreenplace.net/2009/08/29/co-routines-as-an-alternative-to-state-machines/"&gt;connection between coroutines and state machines&lt;/a&gt;
+in the past, Rob's talk inspired me to try approximating this approach in Python
+&lt;a class="reference external" href="https://eli.thegreenplace.net/2012/08/09/using-sub-generators-for-lexical-scanning-in-python/"&gt;using sub-generators&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Since 2011, I've seen this talk and the technique presented in it mentioned many
+times, both in Go forums and in general programming communities. There's
+something in this approach that feels elegant - it's a problem very well suited
+for coroutines. However, there was always a small nagging voice in the back of
+my head doubting the efficiency of the approach.&lt;/p&gt;
+&lt;p&gt;Since I've recently found myself &lt;a class="reference external" href="https://eli.thegreenplace.net/tag/lexer"&gt;playing with lexers again&lt;/a&gt;, this seemed like a good
+opportunity to revisit Rob Pike's lexer and compare its performance to other
+approaches, using the same problem and benchmark for fairness.&lt;/p&gt;
+&lt;div class="section" id="rob-pike-s-original-lexer"&gt;
+&lt;h2&gt;Rob Pike's original lexer&lt;/h2&gt;
+&lt;p&gt;In the talk, Rob is describing a lexer he designed for Go's templating package.
+The lexer presented in the talk and &lt;a class="reference external" href="https://talks.golang.org/2011/lex.slide#1"&gt;slides&lt;/a&gt; is relatively simple; a much more
+featureful version of it still lives in the &lt;tt class="docutils literal"&gt;text/template&lt;/tt&gt; package - &lt;a class="reference external" href="https://cs.opensource.google/go/go/+/master:src/text/template/parse/lex.go"&gt;lex.go&lt;/a&gt;.
+As such, this lexer is heavily used in production every day.&lt;/p&gt;
+&lt;p&gt;I've transcribed the original lexer from the talk into my GitHub repository;
+it's available &lt;a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2022/go-coroutine-lexer"&gt;here, with tests&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;The main aesthetic appeal of this lexer is avoiding an explicit state machine
+by using a separate goroutine to perform the lexing. This goroutine switches
+states by returning a new &amp;quot;state function&amp;quot;, and emits tokens onto a channel
+which can be read by the lexer's clients.&lt;/p&gt;
+&lt;img alt="Diagram showing a lexing goroutine and a main goroutine" class="align-center" src="https://eli.thegreenplace.net/images/2022/lexing-channel.png" /&gt;
+&lt;p&gt;This approach is particularly attractive when parsing templates because it
+oscillates between two major states - lexing free-standing text and
+lexing inside actions delimited by &lt;tt class="docutils literal"&gt;{{ }}&lt;/tt&gt;. Using the concurrent approach
+avoids the need to have an explicit &amp;quot;am I inside an action&amp;quot; state flag that
+has to be checked every time a new token is requested &lt;a class="footnote-reference" href="#footnote-1" id="footnote-reference-1"&gt;[1]&lt;/a&gt;.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="lexing-tablegen"&gt;
+&lt;h2&gt;Lexing TableGen&lt;/h2&gt;
+&lt;p&gt;To be able to have a meaningful performance comparison, I've rewritten my
+TableGen lexer &lt;a class="reference external" href="https://eli.thegreenplace.net/2022/a-faster-lexer-in-go/"&gt;once again&lt;/a&gt;, this time using
+the coroutine approach. The full code for this lexer with tests is &lt;a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2022/go-coroutine-tablegen-lexer"&gt;available
+here&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;The API is very similar to my &lt;a class="reference external" href="https://eli.thegreenplace.net/2022/a-faster-lexer-in-go/"&gt;previous TableGen lexers&lt;/a&gt; - all the
+implementation details (like having a channel to read tokens from) are hidden
+from the user. The token type is the same:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="kd"&gt;type&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;Token&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kd"&gt;struct&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;Name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;TokenName&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;Val&lt;/span&gt;&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="kt"&gt;string&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;Pos&lt;/span&gt;&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The &lt;tt class="docutils literal"&gt;NextToken&lt;/tt&gt; method also has the same signature, though the implementation
+uses a channel now:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="kd"&gt;func&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;l&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="nx"&gt;Lexer&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;NextToken&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;Token&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;lt;-&lt;/span&gt;&lt;span class="nx"&gt;l&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;tokens&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The constructor creates a new &lt;tt class="docutils literal"&gt;Lexer&lt;/tt&gt;, creates a channel for the emitted
+tokens to go into and launches the goroutine that does the actual lexing:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="c1"&gt;// Lex creates a new Lexer&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="kd"&gt;func&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;Lex&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;input&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kt"&gt;string&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="nx"&gt;Lexer&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;l&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="nx"&gt;Lexer&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;input&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;input&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;tokens&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nb"&gt;make&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kd"&gt;chan&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;Token&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="k"&gt;go&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;l&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;run&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;l&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The &lt;tt class="docutils literal"&gt;run&lt;/tt&gt; method serves as a trampoline to advance the lexer from state to
+state (while the state functions emit tokens into the channel):&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="kd"&gt;type&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;stateFn&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kd"&gt;func&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="nx"&gt;Lexer&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;stateFn&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="kd"&gt;func&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;l&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="nx"&gt;Lexer&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;run&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="k"&gt;for&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;state&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;lexText&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;state&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;!=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;nil&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;state&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;state&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;l&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nb"&gt;close&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;l&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;tokens&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// no more tokens will be delivered&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;And so on. The implementation follows Rob Pike's lexer very closely, with the
+same primitives. For the TableGen language, which does not have the &amp;quot;two states&amp;quot;
+feature of templates, I found this approach to be less of a stylistic win,
+though it still makes state management simpler.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="performance"&gt;
+&lt;h2&gt;Performance&lt;/h2&gt;
+&lt;p&gt;In the &lt;a class="reference external" href="https://eli.thegreenplace.net/2022/a-faster-lexer-in-go/"&gt;previous post&lt;/a&gt;, the fastest Go
+lexer achieved with Go 1.18 runs the benchmark in about 6 ms (with a
+&lt;tt class="docutils literal"&gt;GOGC=1600&lt;/tt&gt; setting).&lt;/p&gt;
+&lt;p&gt;For a level playing field, I ran the new coroutine-style lexer on the same input
+file, with the same benchmarking invocation and the same &lt;tt class="docutils literal"&gt;GOGC&lt;/tt&gt; setting:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ GOGC=1600 TDINPUT=&amp;lt;path to input file&amp;gt; go test -bench=Preall -benchtime=5s
+goos: linux
+goarch: amd64
+pkg: example.com
+cpu: Intel(R) Core(TM) i7-4771 CPU @ 3.50GHz
+BenchmarkLexerPrealloc-8            80          70507009 ns/op
+PASS
+ok    example.com     5.885s
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;It takes... 70 ms, more than 10x slower!&lt;/p&gt;
+&lt;p&gt;While I'm not surprised that this approach is slower, I &lt;em&gt;am&lt;/em&gt; somewhat surprised
+at the magnitude. Let's think this through. What does each lexer do in its
+hot inner loop?&lt;/p&gt;
+&lt;p&gt;In my original lexer, each call to the &lt;tt class="docutils literal"&gt;NextLexer&lt;/tt&gt; function:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;Skips whitespace: iterates over the input string rune by rune until a
+non-whitespace rune is encountered.&lt;/li&gt;
+&lt;li&gt;Examines the current rune and decides which kind of token it belongs to.&lt;/li&gt;
+&lt;li&gt;Finishes lexing the token and returns it as a string slice.&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;Whereas in the coroutine-style lexer, each call to &lt;tt class="docutils literal"&gt;NextLexer&lt;/tt&gt;:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;Invokes a channel receive on the token channel.&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;In the meantime, the lexing goroutine:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;Skips whitespace and examines the current rune, just like in the regular
+lexer.&lt;/li&gt;
+&lt;li&gt;Invokes a channel send on the token channel.&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;The channel send/receive is the main culprit for the large performance
+difference. Channels in Go are fully synchronized, which implies locking inside
+the inner loop. Moreover, since there are two goroutines involved that perform
+channel operations, the Go runtime has much more work to do to handle suspending
+goroutines when the channel blocks and waking them up when it unblocks. All
+these operations are highly optimized in Go, but when they appear in the inner
+loop of a fast scanning process, the relative cost is high.&lt;/p&gt;
+&lt;p&gt;If we profile the new scanner with pprof, this cost is easily observed:&lt;/p&gt;
+&lt;img alt="Pprof diagram showing where the time goes for the channel lexer" class="align-center" src="https://eli.thegreenplace.net/images/2022/lex-channel-pprof.png" /&gt;
+&lt;p&gt;In the previous lexer, the &amp;quot;fetch next rune&amp;quot; method is very dominant. Here it
+accounts for only 5.8% of the execution time! Much more time goes on
+&lt;tt class="docutils literal"&gt;chansend1&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;chanrecv1&lt;/tt&gt; which are runtime functions with names that
+should be self-describing. There is also goroutine management code in the
+runtime that accounts for a large % there.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="using-a-buffered-channel"&gt;
+&lt;h2&gt;Using a buffered channel&lt;/h2&gt;
+&lt;p&gt;Go's &lt;tt class="docutils literal"&gt;make&lt;/tt&gt; primitive creates an &lt;em&gt;unbuffeered&lt;/em&gt; channel by default, meaning
+that every send into it blocks until a receive takes the item out. What would
+happen if we created a buffered channel instead? Theoretically, this should
+improve the lexer's execution time as there will be less suspension and waking
+up of goroutines.&lt;/p&gt;
+&lt;p&gt;Let's see what different values of the buffer give us; I re-ran the benchmark
+with buffer sizes starting from 1 to 16384 in jumps of 4x:&lt;/p&gt;
+&lt;img alt="Benchmark results for different sizes of channel buffer" class="align-center" src="https://eli.thegreenplace.net/images/2022/lexer-runtime-channel-size.png" /&gt;
+&lt;p&gt;As expected, using a buffered channel makes lexing significantly faster,
+leveling out at 1024 where it takes about 24 ms for our benchmark. This is
+a large improvement, though still much slower than the 6 ms we had with our
+non-concurrent lexer.&lt;/p&gt;
+&lt;p&gt;Channels have many uses in Go; sometimes they are used as synchronization
+mechanisms, so having a large buffer is not always feasible. In cases like our
+lexer, a buffer actually makes sense because there should be no problem for the
+lexing goroutine to run ahead a little bit. Note that this doesn't work for any
+input kind, though; had we been lexing C, for instance, we'd might want to have
+a feedback mechanism back into the lexer (for handling the grammar's &lt;a class="reference external" href="https://eli.thegreenplace.net/2007/11/24/the-context-sensitivity-of-cs-grammar/"&gt;context
+sensitivity&lt;/a&gt;).&lt;/p&gt;
+&lt;p&gt;FWIW, the template lexer Rob Pike added to the standard library uses an
+unbuffered channel. Maybe it would make sense to add a modest buffer there to
+&lt;a class="reference external" href="https://go-review.googlesource.com/c/go/+/410296"&gt;speed it up somewhat&lt;/a&gt; :-)
+See also &lt;a class="reference external" href="https://github.com/golang/go/issues/53261"&gt;go issue #53261&lt;/a&gt;.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="does-performance-matter-here"&gt;
+&lt;h2&gt;Does performance matter here?&lt;/h2&gt;
+&lt;p&gt;For the task at hand, the coroutine-style lexer is still plenty fast. Note that
+it's &lt;em&gt;much&lt;/em&gt; faster than some of the Python and JS-based lexers I wrote for the
+same task &lt;a class="reference external" href="https://eli.thegreenplace.net/2013/06/25/regex-based-lexical-analysis-in-python-and-javascript/"&gt;a while ago&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;This lexer is used by the standard library for parsing templates, but these
+are (1) rarely very big and (2) almost always OK to parse just once during the
+lifetime of a program, so the time it takes to parse them is not too important;
+in other words, it's very unlikely to dominate your application's benchmarks.&lt;/p&gt;
+&lt;p&gt;That said, I can envision scenarios where this &lt;em&gt;could&lt;/em&gt; matter. Suppose you're
+writing a frontend for a nontrivial programming language (or configuration
+language etc.) and a fast interpreter for this language &lt;a class="footnote-reference" href="#footnote-2" id="footnote-reference-2"&gt;[2]&lt;/a&gt;. This could lead
+to the frontend's performance being a bottleneck. In these scenarios, it just
+&lt;em&gt;may&lt;/em&gt; be important to have the fastest lexer you can reasonably implement.&lt;/p&gt;
+&lt;hr class="docutils" /&gt;
+&lt;table class="docutils footnote" frame="void" id="footnote-1" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#footnote-reference-1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;I do wonder if this would work in more complicated cases though. In
+templates, the kinds of tokens that appear inside actions can never
+appear outside them. But suppose they could; suppose there would be some
+token &lt;tt class="docutils literal"&gt;TOK&lt;/tt&gt; which could legally appear both in &amp;quot;text mode&amp;quot; and in
+&amp;quot;action mode&amp;quot;. What would the state function representing &lt;tt class="docutils literal"&gt;TOK&lt;/tt&gt; return
+when it's done parsing it? How would it know which mode it has to go
+back to? It's possible that some sort of explicit state variable would
+be unavoidable in this scenario.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="footnote-2" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#footnote-reference-2"&gt;[2]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;I'm saying interpreter on purpose, because interpreter backends tend
+to be very simple and quick. In full compilers, backends typically run
+many expensive optimizations that dominate the compile time.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;/div&gt;
+</content><category term="misc"></category><category term="Go"></category><category term="Lexer"></category><category term="Compilation"></category></entry><entry><title>Rewriting the lexer benchmark in Rust</title><link href="https://eli.thegreenplace.net/2022/rewriting-the-lexer-benchmark-in-rust/" rel="alternate"></link><published>2022-05-30T05:53:00-07:00</published><updated>2024-05-04T19:46:23-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2022-05-30:/2022/rewriting-the-lexer-benchmark-in-rust/</id><summary type="html">&lt;p&gt;I've reimplemented my lexical analyzer (lexer) for the the &lt;a class="reference external" href="https://llvm.org/docs/TableGen/"&gt;TableGen language&lt;/a&gt; in Python, JS and Go so far. The &lt;a class="reference external" href="https://eli.thegreenplace.net/2022/a-faster-lexer-in-go/"&gt;latest
+post in the series&lt;/a&gt;
+discussed how several years of new Go versions improved my lexer's performance
+by roughly 2x, and how several additional optimizations won another 37%; the
+final result …&lt;/p&gt;</summary><content type="html">&lt;p&gt;I've reimplemented my lexical analyzer (lexer) for the the &lt;a class="reference external" href="https://llvm.org/docs/TableGen/"&gt;TableGen language&lt;/a&gt; in Python, JS and Go so far. The &lt;a class="reference external" href="https://eli.thegreenplace.net/2022/a-faster-lexer-in-go/"&gt;latest
+post in the series&lt;/a&gt;
+discussed how several years of new Go versions improved my lexer's performance
+by roughly 2x, and how several additional optimizations won another 37%; the
+final result is a lexer that churns through 1 MiB of source code in just 5.6
+milliseconds.&lt;/p&gt;
+&lt;p&gt;Since &lt;a class="reference external" href="https://eli.thegreenplace.net/tag/rust"&gt;I've also been playing with Rust recently&lt;/a&gt;, I thought it would be interesting
+to re-implement this lexer once again, this time in Rust. Rust is certainly the
+lowest-level language among those I've used so far for this task, so I expect to
+see some top-notch performance.&lt;/p&gt;
+&lt;p&gt;The full code for this post is &lt;a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2022/rust-tablegen-lexer"&gt;available on GitHub&lt;/a&gt;.&lt;/p&gt;
+&lt;div class="section" id="designing-an-api"&gt;
+&lt;h2&gt;Designing an API&lt;/h2&gt;
+&lt;p&gt;I find that Rust's strict ownership rules makes one think carefully about API
+design from very early on. If we want to create a lexer and pass it a string
+as input - who owns the string? In Rust, the answer to this question is not
+an implicit contract (like it always is in C and sometimes in C++), and it
+cannot be deferred to the runtime either (like one would do in Python, JS or
+Go). The answer has to be explicitly encoded into the types of the program.&lt;/p&gt;
+&lt;p&gt;Since one of the goals of this series of posts is performance, I decided to
+go with a zero-copy API at first, where the user of the lexer owns the input
+string; the lexer, in turn, returns tokens that contain references into this
+input string - so the user ends up owning these too. Rust's lifetime specifiers
+make this fairly natural; here's the type:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="k"&gt;pub&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;struct&lt;/span&gt; &lt;span class="nc"&gt;Lexer&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&amp;#39;&lt;/span&gt;&lt;span class="na"&gt;source&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;input&lt;/span&gt;: &lt;span class="kp"&gt;&amp;amp;&lt;/span&gt;&lt;span class="o"&gt;&amp;#39;&lt;/span&gt;&lt;span class="na"&gt;source&lt;/span&gt; &lt;span class="kt"&gt;str&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;iter&lt;/span&gt;: &lt;span class="nc"&gt;Peekable&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;CharIndices&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&amp;#39;&lt;/span&gt;&lt;span class="na"&gt;source&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="c1"&gt;// c is the last char taken from iter, and ci is its offset in the input.&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;c&lt;/span&gt;: &lt;span class="kt"&gt;char&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;ci&lt;/span&gt;: &lt;span class="kt"&gt;usize&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="c1"&gt;// error is true iff the lexer encountered and error.&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;error&lt;/span&gt;: &lt;span class="kt"&gt;bool&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Ignore the fields for now, focusing just on the struct definition. This is
+the constructor:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="k"&gt;impl&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&amp;#39;&lt;/span&gt;&lt;span class="na"&gt;source&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Lexer&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&amp;#39;&lt;/span&gt;&lt;span class="na"&gt;source&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;pub&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;new&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;input&lt;/span&gt;: &lt;span class="kp"&gt;&amp;amp;&lt;/span&gt;&lt;span class="o"&gt;&amp;#39;&lt;/span&gt;&lt;span class="na"&gt;source&lt;/span&gt; &lt;span class="kt"&gt;str&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;-&amp;gt; &lt;span class="nc"&gt;Self&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="c1"&gt;// ...&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The &lt;tt class="docutils literal"&gt;'source&lt;/tt&gt; lifetime specifier is used to explicitly annotate the lifetime
+of the input string slice, since we want to store it in our &lt;tt class="docutils literal"&gt;Lexer&lt;/tt&gt; and refer
+to it later. Once a &lt;tt class="docutils literal"&gt;Lexer&lt;/tt&gt; is created, the user obtains new tokens by calling
+&lt;tt class="docutils literal"&gt;next_token&lt;/tt&gt;:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="k"&gt;pub&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;next_token&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="k"&gt;mut&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;-&amp;gt; &lt;span class="nc"&gt;Token&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&amp;#39;&lt;/span&gt;&lt;span class="na"&gt;source&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="c1"&gt;// ...&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Note that the returned &lt;tt class="docutils literal"&gt;Token&lt;/tt&gt; also has the same lifetime annotation. Here's
+how the type is defined:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="cp"&gt;#[derive(Debug, PartialEq, Clone, Copy)]&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="k"&gt;pub&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;struct&lt;/span&gt; &lt;span class="nc"&gt;Token&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&amp;#39;&lt;/span&gt;&lt;span class="na"&gt;source&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;pub&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;value&lt;/span&gt;: &lt;span class="nc"&gt;TokenValue&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&amp;#39;&lt;/span&gt;&lt;span class="na"&gt;source&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;pub&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;pos&lt;/span&gt;: &lt;span class="kt"&gt;usize&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="cp"&gt;#[derive(Debug, PartialEq, Clone, Copy)]&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="k"&gt;pub&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;enum&lt;/span&gt; &lt;span class="nc"&gt;TokenValue&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&amp;#39;&lt;/span&gt;&lt;span class="na"&gt;source&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;EOF&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Error&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Plus&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Minus&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Multiply&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Divide&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Period&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Backslash&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Colon&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Percent&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Pipe&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Exclamation&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Question&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Pound&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Ampersand&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Semi&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Comma&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;LeftParen&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;RightParen&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;LeftAng&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;RightAng&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;LeftBrace&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;RightBrace&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;LeftBracket&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;RightBracket&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Equals&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Comment&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&amp;#39;&lt;/span&gt;&lt;span class="na"&gt;source&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kt"&gt;str&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Identifier&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&amp;#39;&lt;/span&gt;&lt;span class="na"&gt;source&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kt"&gt;str&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Number&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&amp;#39;&lt;/span&gt;&lt;span class="na"&gt;source&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kt"&gt;str&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Quote&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&amp;#39;&lt;/span&gt;&lt;span class="na"&gt;source&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kt"&gt;str&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Now it should be clear how these lifetimes are tied together. Some tokens hold
+slices into the user's input, and this is encoded in the explicit lifetimes. The
+signature of the &lt;tt class="docutils literal"&gt;next_token&lt;/tt&gt; method says &amp;quot;we return tokens with a lifetime
+that's tied to the lifetime of the input passed into the constructor&amp;quot;.&lt;/p&gt;
+&lt;p&gt;We can also provide a more natural iteration API for the Lexer by
+implementing the &lt;tt class="docutils literal"&gt;Iterator&lt;/tt&gt; trait:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="c1"&gt;// Lexer is an Iterator; it returns tokens until EOF is encountered, when it&lt;/span&gt;
+&lt;span class="c1"&gt;// returns None (the EOF token itself is not returned). Note that errors are&lt;/span&gt;
+&lt;span class="c1"&gt;// still returned as tokens with TokenValue::Error.&lt;/span&gt;
+&lt;span class="k"&gt;impl&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&amp;#39;&lt;/span&gt;&lt;span class="na"&gt;source&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nb"&gt;Iterator&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;for&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Lexer&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&amp;#39;&lt;/span&gt;&lt;span class="na"&gt;source&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;type&lt;/span&gt; &lt;span class="nc"&gt;Item&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Token&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&amp;#39;&lt;/span&gt;&lt;span class="na"&gt;source&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;next&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="k"&gt;mut&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;-&amp;gt; &lt;span class="nb"&gt;Option&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="bp"&gt;Self&lt;/span&gt;::&lt;span class="n"&gt;Item&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;error&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="c1"&gt;// If an error has already been set before we invoke next_token,&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="c1"&gt;// it means we&amp;#39;ve already returned TokenValue::Error once and now&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="c1"&gt;// we should terminate the iteration.&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nb"&gt;None&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="kd"&gt;let&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;tok&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;next_token&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;tok&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;value&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;==&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;TokenValue&lt;/span&gt;::&lt;span class="n"&gt;EOF&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="nb"&gt;None&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;else&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="nb"&gt;Some&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;tok&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The iterator implementation makes it possible to integrate the lexer with the
+rest of Rust very elegantly; for example, to obtain all the tokens in a given
+input as a vector:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="k"&gt;pub&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;tokenize_all_collect&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&amp;#39;&lt;/span&gt;&lt;span class="na"&gt;source&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;data&lt;/span&gt;: &lt;span class="kp"&gt;&amp;amp;&lt;/span&gt;&lt;span class="o"&gt;&amp;#39;&lt;/span&gt;&lt;span class="na"&gt;source&lt;/span&gt; &lt;span class="kt"&gt;str&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;-&amp;gt; &lt;span class="nb"&gt;Vec&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;Token&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&amp;#39;&lt;/span&gt;&lt;span class="na"&gt;source&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="kd"&gt;let&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;lex&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Lexer&lt;/span&gt;::&lt;span class="n"&gt;new&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;data&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;lex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;collect&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class="section" id="implementation"&gt;
+&lt;h2&gt;Implementation&lt;/h2&gt;
+&lt;p&gt;Generally, the implementation of the lexer in Rust follows the same approach
+used by my previous hand-written lexers in this series. I'd like to highlight
+a couple of Rust-specific aspects here.&lt;/p&gt;
+&lt;p&gt;Our lexer fully supports Unicode, so I decided to use Rust's string iterator
+support to obtain &lt;tt class="docutils literal"&gt;char&lt;/tt&gt;s from &lt;tt class="docutils literal"&gt;&amp;amp;str&lt;/tt&gt;. Rust provides a helpful iterator
+called &lt;tt class="docutils literal"&gt;CharIndices&lt;/tt&gt;, which yields &lt;tt class="docutils literal"&gt;char&lt;/tt&gt;s along with their position in the
+input - we need the position to report token locations. Furthermore, since our
+lexer requires a bit of look-ahead &lt;a class="footnote-reference" href="#footnote-1" id="footnote-reference-1"&gt;[1]&lt;/a&gt;, the iterator is wrapped in &lt;a class="reference external" href="https://doc.rust-lang.org/std/iter/struct.Peekable.html"&gt;Peekable&lt;/a&gt;, which provides the
+&lt;tt class="docutils literal"&gt;peek&lt;/tt&gt; method. As we've seen above already, the final definition is:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="n"&gt;iter&lt;/span&gt;: &lt;span class="nc"&gt;Peekable&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;CharIndices&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&amp;#39;&lt;/span&gt;&lt;span class="na"&gt;source&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;With this in mind, the code of the lexer should be very readable, even for
+someone not too familiar with Rust.&lt;/p&gt;
+&lt;p&gt;Another note is how sub-string extraction happens when tokens are returned.
+As an example, let's look at the &lt;tt class="docutils literal"&gt;scan_number&lt;/tt&gt; method which is invoked when
+the lexer's current character is a digit:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;scan_number&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="k"&gt;mut&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;-&amp;gt; &lt;span class="nc"&gt;Token&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&amp;#39;&lt;/span&gt;&lt;span class="na"&gt;source&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="kd"&gt;let&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;startpos&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;ci&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;while&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;c&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;is_digit&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;10&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;scan_char&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Token&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="n"&gt;value&lt;/span&gt;: &lt;span class="nc"&gt;TokenValue&lt;/span&gt;::&lt;span class="n"&gt;Number&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;input&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="n"&gt;startpos&lt;/span&gt;&lt;span class="o"&gt;..&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;ci&lt;/span&gt;&lt;span class="p"&gt;]),&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="n"&gt;pos&lt;/span&gt;: &lt;span class="nc"&gt;startpos&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Recall that the &lt;tt class="docutils literal"&gt;Number&lt;/tt&gt; variant of the &lt;tt class="docutils literal"&gt;TokenValue&lt;/tt&gt; enum is defined as
+&lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;Number(&amp;amp;'source&lt;/span&gt; str)&lt;/tt&gt; - it contains a reference to the input source string.
+In the code for &lt;tt class="docutils literal"&gt;scan_number&lt;/tt&gt;, we see how this is actually implemented, by
+sub-slicing the input slice. This creates a slice with the same lifetime as the
+input slice (which is encoded in the lifetimes of the types). As in Go,
+sub-slicing is a very cheap operation in Rust (no heap allocation).&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="performance"&gt;
+&lt;h2&gt;Performance&lt;/h2&gt;
+&lt;p&gt;The performance of this Rust-implemented lexer is &lt;em&gt;very&lt;/em&gt; good! I ran it on the
+same large TableGen file I've used for all the benchmarking, and it finishes
+tokenizing it in just 3.7 ms; this is about 33% faster than my fastest Go
+version from the &lt;a class="reference external" href="https://eli.thegreenplace.net/2022/a-faster-lexer-in-go/"&gt;previous post&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Profiling Rust is quite a bit trickier than Go, but I managed to cobble together
+enough magic flags and &lt;tt class="docutils literal"&gt;perf&lt;/tt&gt; invocations to ascertain that &lt;tt class="docutils literal"&gt;next_token&lt;/tt&gt;
+indeed takes the bulk of the time; this is good - the time is being spent where
+it's supposed to be spent.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="trying-a-variant-with-allocations"&gt;
+&lt;h2&gt;Trying a variant with allocations&lt;/h2&gt;
+&lt;p&gt;As described above, the API for this Rust lexer was designed to be zero-copy.
+Since my Go lexers experimented with different approaches, I've decided to see
+how a different API in Rust would look.&lt;/p&gt;
+&lt;p&gt;There are two aspects to ownership we can change: taking ownership of the input
+string, and/or returning owned &lt;tt class="docutils literal"&gt;String&lt;/tt&gt;s in the tokens.&lt;/p&gt;
+&lt;p&gt;For taking ownership of the input string, our constructor would have to look
+like:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="k"&gt;pub&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;new&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;input&lt;/span&gt;: &lt;span class="nb"&gt;String&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;-&amp;gt; &lt;span class="nc"&gt;Self&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Does it make sense for a lexer to own its input? This isn't clear, and in
+reality it turned out to be tricky to implement due to lifetime issues. Rust
+is very unhappy when a struct field is a reference to another field of the same
+struct, because there is no safe way to move instances of such structs.
+In our case, the iterator (a struct field) needs a reference to the string
+(another field in the same struct), and this is doesn't pass the Rust compiler's
+scrutiny. I wanted to be able to implement this without actively &lt;a class="reference external" href="https://eli.thegreenplace.net/2021/rust-data-structures-with-circular-references/"&gt;fooling the
+compiler&lt;/a&gt;
+by using opaque indices or &lt;tt class="docutils literal"&gt;unsafe&lt;/tt&gt;.&lt;/p&gt;
+&lt;p&gt;When the language fights you this hard, it may be a good sign that the
+design is wrong - it's better to leave the ownership to the code that creates a
+&lt;tt class="docutils literal"&gt;Lexer&lt;/tt&gt;.&lt;/p&gt;
+&lt;p&gt;Ownership of returned tokens was easier to set up. The code for this is
+available in the &lt;tt class="docutils literal"&gt;owning.rs&lt;/tt&gt; file of the &lt;a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2022/rust-tablegen-lexer"&gt;repository&lt;/a&gt;.
+In this variant, the constructor doesn't change, but tokens are defined
+differently:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="cp"&gt;#[derive(Debug, PartialEq, Clone)]&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="k"&gt;pub&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;struct&lt;/span&gt; &lt;span class="nc"&gt;Token&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;pub&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;value&lt;/span&gt;: &lt;span class="nc"&gt;TokenValue&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;pub&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;pos&lt;/span&gt;: &lt;span class="kt"&gt;usize&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="cp"&gt;#[derive(Debug, PartialEq, Clone)]&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="k"&gt;pub&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;enum&lt;/span&gt; &lt;span class="nc"&gt;TokenValue&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="c1"&gt;// .. types&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Comment&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;String&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Identifier&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;String&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Number&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;String&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Quote&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;String&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Note that variants like &lt;tt class="docutils literal"&gt;Identifier&lt;/tt&gt; now hold an owning &lt;tt class="docutils literal"&gt;String&lt;/tt&gt; instead
+of a string reference. Therefore, lifetime annotations are no longer necessary
+on &lt;tt class="docutils literal"&gt;Token&lt;/tt&gt;.&lt;/p&gt;
+&lt;p&gt;The scanning code now allocates a new &lt;tt class="docutils literal"&gt;String&lt;/tt&gt; and reads characters into it
+from the iterator. We've seen previously how &lt;tt class="docutils literal"&gt;scan_number&lt;/tt&gt; looks; here it
+is again, for the owning token variant (with some helper methods):&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;scan_number&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="k"&gt;mut&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;-&amp;gt; &lt;span class="nc"&gt;Token&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="kd"&gt;let&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;startpos&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;ci&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;Token&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="n"&gt;value&lt;/span&gt;: &lt;span class="nc"&gt;TokenValue&lt;/span&gt;::&lt;span class="n"&gt;Number&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;scan_while_true&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;|&lt;/span&gt;&lt;span class="n"&gt;c&lt;/span&gt;&lt;span class="o"&gt;|&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;c&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;is_digit&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;10&lt;/span&gt;&lt;span class="p"&gt;))),&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="n"&gt;pos&lt;/span&gt;: &lt;span class="nc"&gt;startpos&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="c1"&gt;// Helper to scan chars while `pred(c)` returns true, into the given `s`.&lt;/span&gt;
+&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;scan_while_true_into&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;F&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="k"&gt;mut&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;s&lt;/span&gt;: &lt;span class="kp"&gt;&amp;amp;&lt;/span&gt;&lt;span class="nc"&gt;mut&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nb"&gt;String&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;pred&lt;/span&gt;: &lt;span class="nc"&gt;F&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="k"&gt;where&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;F&lt;/span&gt;: &lt;span class="nb"&gt;Fn&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kt"&gt;char&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;-&amp;gt; &lt;span class="kt"&gt;bool&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;while&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;pred&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;c&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="n"&gt;s&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;push&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;c&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;scan_char&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="c1"&gt;// Helper to scan chars while `pred(c)` returns true and return all scanned&lt;/span&gt;
+&lt;span class="c1"&gt;// chars in a new String.&lt;/span&gt;
+&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;scan_while_true&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;F&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="k"&gt;mut&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;pred&lt;/span&gt;: &lt;span class="nc"&gt;F&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;-&amp;gt; &lt;span class="nb"&gt;String&lt;/span&gt;
+&lt;span class="nc"&gt;where&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;F&lt;/span&gt;: &lt;span class="nb"&gt;Fn&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kt"&gt;char&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;-&amp;gt; &lt;span class="kt"&gt;bool&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="kd"&gt;let&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;mut&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;s&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nb"&gt;String&lt;/span&gt;::&lt;span class="n"&gt;with_capacity&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;8&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;scan_while_true_into&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="k"&gt;mut&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;s&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;pred&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;s&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class="section" id="performance-of-this-variant"&gt;
+&lt;h2&gt;Performance of this variant&lt;/h2&gt;
+&lt;p&gt;When I first tried this variant, its performance wasn't great at all! It was
+about 30% &lt;em&gt;slower&lt;/em&gt; than the string-copying version in Go. I think this has to
+do with the slight difference in approach - in Go, my lexer figures out the
+token boundaries using numerical indices and then converts a &lt;tt class="docutils literal"&gt;[]byte&lt;/tt&gt; into
+&lt;tt class="docutils literal"&gt;string&lt;/tt&gt; in one fell swoop. The Rust version fetches &lt;tt class="docutils literal"&gt;char&lt;/tt&gt;s one by one
+from an iterator and writes them into a &lt;tt class="docutils literal"&gt;String&lt;/tt&gt;.&lt;/p&gt;
+&lt;p&gt;In particular, since Rust's &lt;tt class="docutils literal"&gt;String&lt;/tt&gt; is dynamically allocated, this may incur
+reallocations (depending on how much is allocated initially).&lt;/p&gt;
+&lt;p&gt;So my solution was to create these strings &lt;tt class="docutils literal"&gt;with_capacity&lt;/tt&gt; - as you can see
+in the previous code sample. This cut down the execution time to be roughly
+equal to Go's version where strings are copied.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="which-api-is-better"&gt;
+&lt;h2&gt;Which API is better?&lt;/h2&gt;
+&lt;p&gt;IMHO there's little doubt that the original &amp;quot;slice&amp;quot; API is better, for multiple
+reasons:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;Performance: the results speak for themselves - the slice API is zero-copy
+and incurs no additional heap allocations. Like in Go, it deals in slice
+headers, which are just pointers to parts of a string.&lt;/li&gt;
+&lt;li&gt;The ownership story is very clear, symmetrical and explicitly documented with
+lifetime annotations. The &lt;tt class="docutils literal"&gt;'source&lt;/tt&gt; lifetime controls everything: it's the
+lifetime of the &lt;tt class="docutils literal"&gt;&amp;amp;str&lt;/tt&gt; passed into the lexer's constructor, and it's the
+lifetime of the tokens. The symmetry feels important - the code that creates
+a lexer controls the lifetime of the input, as well as the output.&lt;/li&gt;
+&lt;li&gt;In general, there's a known good practice in API design which is not to force
+allocations on users, if possible. This is well articulated in this &lt;a class="reference external" href="https://dave.cheney.net/2019/09/05/dont-force-allocations-on-the-callers-of-your-api"&gt;blog
+post for Go&lt;/a&gt;,
+but it applies equally well in Rust. In our slice API, the user can always
+call &lt;tt class="docutils literal"&gt;to_owned&lt;/tt&gt; on the returned slice, if they so wish. But why do it for
+them? Why should we assume the users want us to return them an owned string?
+Returning a slice provides more flexibility in using the API.&lt;/li&gt;
+&lt;/ol&gt;
+&lt;/div&gt;
+&lt;div class="section" id="performance-improvement-avoiding-peekable"&gt;
+&lt;h2&gt;Performance improvement: avoiding &lt;tt class="docutils literal"&gt;Peekable&lt;/tt&gt;&lt;/h2&gt;
+&lt;p&gt;After this post was published, the reader Utkarsh Kukreti mentioned that
+using &lt;tt class="docutils literal"&gt;Peekable&lt;/tt&gt; is not the most optimal approach, since its &lt;tt class="docutils literal"&gt;next&lt;/tt&gt; is
+slower than the underlying iterator's &lt;tt class="docutils literal"&gt;next&lt;/tt&gt;, and calling it is on the hot
+path. Instead of using &lt;tt class="docutils literal"&gt;Peekable&lt;/tt&gt;, we could just clone the iterator when we
+see a &lt;tt class="docutils literal"&gt;/&lt;/tt&gt; and invoke &lt;tt class="docutils literal"&gt;next&lt;/tt&gt; on the clone; iterators are small so cloning
+them is cheap.&lt;/p&gt;
+&lt;p&gt;&lt;a class="reference external" href="https://gist.github.com/eliben/a6a2a55a33e733e3104827ab03ebc720"&gt;Here's a patch&lt;/a&gt; with this
+change. Applying it to my lexer makes it ~11% faster on my machine, finishing
+the benchmark in about 3.4 ms!&lt;/p&gt;
+&lt;p&gt;To be honest, this is a little bit surprising and disappointing to me, since I
+was hoping that &lt;tt class="docutils literal"&gt;Peekable&lt;/tt&gt; would fall into the zero abstraction promise of
+Rust. Perhaps this is something that can fixed in the future.&lt;/p&gt;
+&lt;hr class="docutils" /&gt;
+&lt;table class="docutils footnote" frame="void" id="footnote-1" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#footnote-reference-1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;For properly tokenizing comments; when the lexer sees &lt;tt class="docutils literal"&gt;/&lt;/tt&gt;, it needs
+to peek forward to see if this is the beginning of a &lt;tt class="docutils literal"&gt;//&lt;/tt&gt;, or else
+the division operator. This is a common use case in lexers, especially
+when tokenizing multi-character operators (like &lt;tt class="docutils literal"&gt;&amp;gt;=&lt;/tt&gt;).&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;/div&gt;
+</content><category term="misc"></category><category term="Rust"></category><category term="Lexer"></category><category term="Compilation"></category></entry><entry><title>A faster lexer in Go</title><link href="https://eli.thegreenplace.net/2022/a-faster-lexer-in-go/" rel="alternate"></link><published>2022-05-03T19:53:00-07:00</published><updated>2024-05-04T19:46:23-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2022-05-03:/2022/a-faster-lexer-in-go/</id><summary type="html">&lt;p&gt;It's been a while since I've last &lt;a class="reference external" href="https://eli.thegreenplace.net/2014/03/27/rewriting-the-lexer-benchmark-in-go"&gt;rewritten my favorite lexical analyzer&lt;/a&gt;
+:-) That post is the last in a series implementing a lexer for the &lt;a class="reference external" href="https://llvm.org/docs/TableGen/"&gt;TableGen
+language&lt;/a&gt; in a variety of programming
+languages, using multiple techniques. The last lexer written, in Go, was very
+fast indeed - processing 1 MiB of …&lt;/p&gt;</summary><content type="html">&lt;p&gt;It's been a while since I've last &lt;a class="reference external" href="https://eli.thegreenplace.net/2014/03/27/rewriting-the-lexer-benchmark-in-go"&gt;rewritten my favorite lexical analyzer&lt;/a&gt;
+:-) That post is the last in a series implementing a lexer for the &lt;a class="reference external" href="https://llvm.org/docs/TableGen/"&gt;TableGen
+language&lt;/a&gt; in a variety of programming
+languages, using multiple techniques. The last lexer written, in Go, was very
+fast indeed - processing 1 MiB of source in about 20 milliseconds.&lt;/p&gt;
+&lt;p&gt;The other day I started wondering whether Go compiler improvements from the last
+few years made this code run any faster. Back in 2014 I measured it with Go 1.2,
+and now Go 1.18 is out. So I tried (on the same machine) with some newer Go
+versions; the full code for this is &lt;a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2014/tablegen-lexer-go"&gt;still here&lt;/a&gt;,
+and the benchmark is run as follows &lt;a class="footnote-reference" href="#footnote-1" id="footnote-reference-1"&gt;[1]&lt;/a&gt;:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ TDINPUT=input.td go test -bench=Preall -benchtime=5s
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;These are the results:&lt;/p&gt;
+&lt;img alt="Benchmark results for different Go versions" class="align-center" src="https://eli.thegreenplace.net/images/2022/lexer-benchmark-per-go-version.png" /&gt;
+&lt;p&gt;Go 1.5 is comparable to 1.2, but by 1.10 there was a significant improvement
+in performance, and a further improvement in later versions. The code produced
+by Go 1.18 is more than twice as fast as the original lexer. Now it takes only
+~9.6 ms to process the same 1 MiB of TableGen source!&lt;/p&gt;
+&lt;div class="section" id="looking-deeper-into-the-performance-of-this-lexer"&gt;
+&lt;h2&gt;Looking deeper into the performance of this lexer&lt;/h2&gt;
+&lt;p&gt;This got me curious - what &lt;em&gt;does&lt;/em&gt; the lexer spend its time on? Since Go has
+fantastic tooling for performance profiling, time to whip up some flags... This
+will be for the most recent version of Go (1.18):&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ TDINPUT=input.td go test -cpuprofile cpu.out -bench=Preall -benchtime=5s
+...
+
+# --nodefraction tells pprof to ignore nodes that take less than 5% of the
+# total time - this significantly reduces the clutter in the produced graph
+
+$ go tool pprof --nodefraction=0.05 ./example.com.test cpu.out
+...
+(pprof) web
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Here's the important part of the profile:&lt;/p&gt;
+&lt;img alt="pprof CPU profile for the lexer" class="align-center" src="https://eli.thegreenplace.net/images/2022/lexer-pprof-cpu.png" /&gt;
+&lt;p&gt;As expected, the &lt;tt class="docutils literal"&gt;next&lt;/tt&gt; function is very heavy in the profile, as it should
+be, since this is the main code taking characters from the input stream and
+making them ready for the lexer to process:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="kd"&gt;func&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="nx"&gt;Lexer&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;next&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;nextpos&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;&amp;lt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nb"&gt;len&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;buf&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;rpos&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;nextpos&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="c1"&gt;// r is the current rune, w is its width. We start by assuming the&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="c1"&gt;// common case - that the current rune is ASCII (and thus has width=1).&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;r&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;w&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nb"&gt;rune&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;buf&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;nextpos&lt;/span&gt;&lt;span class="p"&gt;]),&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;r&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;utf8&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;RuneSelf&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="c1"&gt;// The current rune is not actually ASCII, so we have to decode it&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="c1"&gt;// properly.&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="nx"&gt;r&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;w&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;utf8&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;DecodeRune&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;buf&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;nextpos&lt;/span&gt;&lt;span class="p"&gt;:])&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;nextpos&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;+=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;w&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;r&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;r&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;else&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;rpos&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nb"&gt;len&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;buf&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;r&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// EOF&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Assuming that most characters in the stream are within ASCII bounds, what this
+function does on each call is very little. FWIW, it's very similar to how the
+inner loop of Go's own &lt;tt class="docutils literal"&gt;text/scanner&lt;/tt&gt; package works.&lt;/p&gt;
+&lt;p&gt;But notice the 16.5% spent on &lt;tt class="docutils literal"&gt;slicebytetostring&lt;/tt&gt; - what is that all
+about? Note that it's invoked from several &lt;tt class="docutils literal"&gt;scan*&lt;/tt&gt; methods. This has to be
+the &lt;tt class="docutils literal"&gt;string&lt;/tt&gt; conversion of buffer slices, e.g. from &lt;tt class="docutils literal"&gt;scanIdentifier&lt;/tt&gt;:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;Token&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;IDENTIFIER&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nb"&gt;string&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;buf&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;startpos&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;rpos&lt;/span&gt;&lt;span class="p"&gt;]),&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;startpos&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;In Go, strings are immutable while &lt;tt class="docutils literal"&gt;[]byte&lt;/tt&gt; is mutable; the two cannot safely
+alias. Therefore, when we have some &lt;tt class="docutils literal"&gt;b []byte&lt;/tt&gt; and we do &lt;tt class="docutils literal"&gt;string(b)&lt;/tt&gt;, Go
+allocates a copy of the slice to a new location and creates a string header to
+point to it.&lt;/p&gt;
+&lt;p&gt;We can verify this by running memory profiling and looking at the allocations:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ TDINPUT=input.td go test -memprofile=mem.mprof -bench=Preall -benchtime=5s
+...
+
+$ go tool pprof --alloc_objects example.com.test mem.mprof
+...
+(pprof) list scanIdentifier
+Total: 27388406
+ROUTINE ======================== example%2ecom.(*Lexer).scanIdentifier
+  21501647   21501647 (flat, cum) 78.51% of Total
+         .          .    238:func (lex *Lexer) scanIdentifier() Token {
+         .          .    239: startpos := lex.rpos
+         .          .    240: for isAlpha(lex.r) || isDigit(lex.r) {
+         .          .    241:         lex.next()
+         .          .    242: }
+  21501647   21501647    243: return Token{IDENTIFIER, string(lex.buf[startpos:lex.rpos]), startpos}
+         .          .    244:}
+         .          .    245:
+         .          .    246:func (lex *Lexer) scanNumber() Token {
+         .          .    247: startpos := lex.rpos
+         .          .    248: for isDigit(lex.r) {
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;As expected, many allocations come from the suspected line. Looking back at the
+CPU profiling graph, we also see that much of the run-time of
+&lt;tt class="docutils literal"&gt;slicebytetostirng&lt;/tt&gt; is spent on the allocation (&lt;tt class="docutils literal"&gt;mallocgc&lt;/tt&gt;). This is
+actually a good clue to the stark performance improvement in Go since 1.2; while
+the compiler certainly became better since then (especially with the
+register-based ABI &lt;a class="reference external" href="https://eli.thegreenplace.net/2022/interface-method-calls-with-the-go-register-abi/"&gt;introduced in 1.17&lt;/a&gt;),
+it didn't improve &lt;em&gt;that&lt;/em&gt; much. What did improve a whole lot is the garbage
+collector; many allocations mean lots of heap to scan and track, and lots of
+garbage to clean up.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="avoiding-allocations-with-sub-strings"&gt;
+&lt;h2&gt;Avoiding allocations with sub-strings&lt;/h2&gt;
+&lt;p&gt;Before we move on, let's get one thing out of the way. There are all kinds of
+tricks you can play in Go using &lt;tt class="docutils literal"&gt;unsafe&lt;/tt&gt; to explicitly alias byte slices and
+strings and thus avoid allocations; this is even done &lt;a class="reference external" href="https://pkg.go.dev/strings#Builder.String"&gt;in the standard library&lt;/a&gt;. I'll leave this topic out of
+this post and may cover it separately in the future.&lt;/p&gt;
+&lt;p&gt;I did wonder about the cost of these allocations, though; what if we avoid all
+the copies? At the moment, the lexer's API is such that it takes a &lt;tt class="docutils literal"&gt;[]byte&lt;/tt&gt; as
+input:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="kd"&gt;func&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;NewLexer&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;buf&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt;&lt;span class="kt"&gt;byte&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="nx"&gt;Lexer&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;And the tokens we return have &lt;tt class="docutils literal"&gt;string&lt;/tt&gt; values:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="kd"&gt;type&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;Token&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kd"&gt;struct&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;Name&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;TokenName&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;Val&lt;/span&gt;&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="kt"&gt;string&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;Pos&lt;/span&gt;&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;What if we created a lexer with a &lt;tt class="docutils literal"&gt;string&lt;/tt&gt; input instead? Since Go strings
+are immutable, subslices alias each other and are trivial to create and pass
+around; consider this code sample:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="nx"&gt;s&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;quot;hello there&amp;quot;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="nx"&gt;s2&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;s&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;6&lt;/span&gt;&lt;span class="p"&gt;:]&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;When &lt;tt class="docutils literal"&gt;s&lt;/tt&gt; is created, it allocates an 11-byte sequence of bytes and creates a
+&lt;a class="reference external" href="https://pkg.go.dev/reflect#StringHeader"&gt;2-word string header&lt;/a&gt; in &lt;tt class="docutils literal"&gt;s&lt;/tt&gt;: a
+pointer to the sequence of bytes and a &lt;tt class="docutils literal"&gt;len&lt;/tt&gt; field with the value 11. When the
+second line is run, Go just creates a new string header that points into the
+same byte buffer (with offset 6) and length 5. There are no allocations (string
+headers are typically created on the stack just like integers).&lt;/p&gt;
+&lt;p&gt;So I went ahead and rewrote the lexer using this different API; the code changes
+are pretty minor and the full code is &lt;a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2014/tablegen-lexer-go/lexer-string"&gt;available here&lt;/a&gt;.
+The &lt;tt class="docutils literal"&gt;scanIdentifier&lt;/tt&gt; method now looks like this:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="kd"&gt;func&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="nx"&gt;Lexer&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;scanIdentifier&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;Token&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;startpos&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;rpos&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="k"&gt;for&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;isAlpha&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;r&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;||&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;isDigit&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;r&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;next&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;Token&lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="nx"&gt;IDENTIFIER&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;buf&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="nx"&gt;startpos&lt;/span&gt;&lt;span class="p"&gt;:&lt;/span&gt;&lt;span class="nx"&gt;lex&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;rpos&lt;/span&gt;&lt;span class="p"&gt;],&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;startpos&lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Note there's no &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;string(...)&lt;/span&gt;&lt;/tt&gt; cast for the token value; since &lt;tt class="docutils literal"&gt;lex.buf&lt;/tt&gt; is
+already a &lt;tt class="docutils literal"&gt;string&lt;/tt&gt; in this version, that wouldn't be necessary. Instead, we
+just return a string slice, which creates a new 2-word header (instead of
+allocating a new string and copying the data into it).&lt;/p&gt;
+&lt;p&gt;If we benchmark this version, it runs in 7.7 ms for our input, about 20% faster.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="is-this-a-good-api-though"&gt;
+&lt;h2&gt;Is this a good API though?&lt;/h2&gt;
+&lt;p&gt;OK, so we found a way to further improve the performance of the lexer by taking
+a &lt;tt class="docutils literal"&gt;string&lt;/tt&gt; input; is this API useful though? Is it common for users of
+a lexer to have a fully formed &lt;tt class="docutils literal"&gt;string&lt;/tt&gt;? To be fair, the question applies
+equally to the existing &lt;tt class="docutils literal"&gt;[]byte&lt;/tt&gt; API. IMHO, in most cases the answer is &lt;em&gt;it
+depends&lt;/em&gt;. If the input to parse is already in memory (say, it was entered into
+some sort of text box in your GUI), then yes, &lt;tt class="docutils literal"&gt;string&lt;/tt&gt; is fine in an API.
+More typically, though, this data is read from &lt;em&gt;somewhere&lt;/em&gt;.&lt;/p&gt;
+&lt;p&gt;Go has useful I/O interfaces like &lt;tt class="docutils literal"&gt;io.Reader&lt;/tt&gt;; this interface encapsulates
+&amp;quot;a place we read data from&amp;quot;, and this data is typically read incrementally;
+e.g. you don't slurp the whole input file in a single go, but read it in chunks
+as needed. My old-ish SSD has read speeds in the order of 500 MiB / sec, meaning
+that a 1 MiB file will take about 2 ms to read from disk. If we really care
+about performance, overlapping this read with lexing makes sense. But this
+brings us to a &lt;tt class="docutils literal"&gt;io.Reader&lt;/tt&gt; based API, where our substring optimization won't
+really work.&lt;/p&gt;
+&lt;p&gt;Let's see how Go itself does it; the &lt;a class="reference external" href="https://pkg.go.dev/text/scanner"&gt;text/scanner package&lt;/a&gt; is initialized thus:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="kd"&gt;func&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;s&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="nx"&gt;Scanner&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;Init&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;src&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;io&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Reader&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="nx"&gt;Scanner&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;And to obtain the text of a token, you call &lt;tt class="docutils literal"&gt;TokenText&lt;/tt&gt;, which returns a
+&lt;tt class="docutils literal"&gt;string&lt;/tt&gt;. If we look under the hood, &lt;tt class="docutils literal"&gt;TokenText&lt;/tt&gt; does the equivalent of
+&lt;tt class="docutils literal"&gt;string(some []byte buffer)&lt;/tt&gt;, which incurs an allocation and copy.&lt;/p&gt;
+&lt;p&gt;When the API is &lt;tt class="docutils literal"&gt;io.Reader&lt;/tt&gt;, there's really no choice for this, though. It's
+really hard to safely return a &lt;tt class="docutils literal"&gt;string&lt;/tt&gt; that aliases part of a &lt;tt class="docutils literal"&gt;[]byte&lt;/tt&gt;
+buffer accumulated from reading some external source. This is what other
+standard library package do as well - &lt;tt class="docutils literal"&gt;io.Reader&lt;/tt&gt; input is very idiomatic.&lt;/p&gt;
+&lt;p&gt;The Go compiler itself has a lexical scanner in
+&lt;tt class="docutils literal"&gt;src/cmd/compile/internal/scanner.go&lt;/tt&gt;, and it also takes an &lt;tt class="docutils literal"&gt;io.Reader&lt;/tt&gt; (in
+its &lt;tt class="docutils literal"&gt;init&lt;/tt&gt; method); naturally, it also has to allocate and copy literal values
+with a &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;string(...)&lt;/span&gt;&lt;/tt&gt; conversion (these are stored in its &lt;tt class="docutils literal"&gt;lit&lt;/tt&gt; field).&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="garbage-collector"&gt;
+&lt;h2&gt;Garbage Collector&lt;/h2&gt;
+&lt;p&gt;We're not done yet. Let's look at the profile of the string version, using
+the same profiling invocation as before:&lt;/p&gt;
+&lt;img alt="pprof CPU profile for the lexer string version" class="align-center" src="https://eli.thegreenplace.net/images/2022/lexer-pprof-cpu-2.png" /&gt;
+&lt;p&gt;We see that our &lt;tt class="docutils literal"&gt;Lexer&lt;/tt&gt; methods no longer allocate heap data - that's good!
+We can prove this further by looking at memory profiling or the compiler's
+escape analysis with &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;-gcflags=&amp;quot;-m&amp;quot;&lt;/span&gt;&lt;/tt&gt; - I'll leave this as an exercise for
+diligent readers.&lt;/p&gt;
+&lt;p&gt;That said, the garbage collector (GC) still clearly runs, taking non-trivial %s
+of CPU, as we can see from the right side of the graph. Why does this happen?&lt;/p&gt;
+&lt;p&gt;This is a good example of why benchmarking is tricky, particularly in GC'd
+languages. The Go GC is concurrent, running &amp;quot;silently&amp;quot; alongside our application
+whenever it sees fit. In benchmarking situations, this often depends on the
+nature of the specific benchmark; specifically, in our benchmark the
+top-level function &lt;tt class="docutils literal"&gt;tokenizeAllPrealloc&lt;/tt&gt; is invoked in a loop. This function
+pre-allocates a slice of 200k tokens with &lt;tt class="docutils literal"&gt;make&lt;/tt&gt;. Each &lt;tt class="docutils literal"&gt;Token&lt;/tt&gt; in our
+lexer occupies 4 words, which is 32 bytes on my 64-bit machine. Overall,
+the pre-allocation of the token slice takes somewhere on the order of 6.4 MiB.
+Running in a benchmarking loop for 5 seconds results in over 700 cycles, for a
+total of 4.5 GiB of heap data (disregarding any additional heap the benchmarking
+machinery uses) - which is a lot!&lt;/p&gt;
+&lt;p&gt;Go lets us control GC behavior with the &lt;tt class="docutils literal"&gt;GOGC&lt;/tt&gt; env var, which sets the
+percentage of heap growth that triggers a collection cycle. The default is 100,
+which means a cycle is triggered when the heap doubles. If we use
+&lt;tt class="docutils literal"&gt;GODEBUG=gctrace=1&lt;/tt&gt; to trace GC invocations, we'll see that the GC runs over
+700 cycles during our benchmark; clearly, this affects performance.&lt;/p&gt;
+&lt;p&gt;What happens if we try to tweak &lt;tt class="docutils literal"&gt;GOGC&lt;/tt&gt;? Here's a chart for different values:&lt;/p&gt;
+&lt;img alt="Run-time with different values of GOGC" class="align-center" src="https://eli.thegreenplace.net/images/2022/lexer-runtime-gogc.png" /&gt;
+&lt;p&gt;The fastest run of ~6 ms is achieved with &lt;tt class="docutils literal"&gt;GOGC=1600&lt;/tt&gt; and stays stable
+thereafter. Using tracing again, we see that with this setting the GC only
+runs ~50 times during the 5 sec benchmark, compared to 700+ previously.
+FWIW, disabling GC entirely with &lt;tt class="docutils literal"&gt;GOGC=off&lt;/tt&gt; produces a slightly slower
+run-time at 6.5 ms (there's quite a lot of data here, so an overly large heap
+may occasionally lead to swapping).&lt;/p&gt;
+&lt;p&gt;Does any of this matter? This depends on your application! Admittedly, we're
+deep in the weeds here, trying to shave off sub-milliseconds from fully lexing
+a large input file. If you care about performance at this level of granularity,
+it's very likely that you'll consider the full lifecycle of your application
+and will have the GC tuned already.&lt;/p&gt;
+&lt;p&gt;As we've seen with the stark performance improvements from older versions of Go,
+the GC has improved a lot. And it keeps improving! Right now an &lt;a class="reference external" href="https://github.com/golang/proposal/blob/master/design/48409-soft-memory-limit.md"&gt;accepted
+proposal&lt;/a&gt;
+aims to add more control for users with a new &lt;tt class="docutils literal"&gt;GOMEMLIMIT&lt;/tt&gt; var. This is
+likely to land in the next Go version (or the one after it).&lt;/p&gt;
+&lt;p&gt;A longer term proposal to &lt;a class="reference external" href="https://github.com/golang/go/issues/51317"&gt;add arenas to Go&lt;/a&gt; is also on the table. This
+permits much finer-grained memory control, and is particularly suited for
+programs like compilers or other users of lexical analysis. Such programs have a
+lifecycle that's very suitable for arenas - you allocate a bunch of data per
+phase, and then at the very end you release &lt;em&gt;everything&lt;/em&gt; in one step.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="conclusion"&gt;
+&lt;h2&gt;Conclusion&lt;/h2&gt;
+&lt;p&gt;This post discussed some potential optimizations to a lexical scanner written
+in Go. It touched upon the relative efficiency of converting byte slices to
+strings vs. taking substrings, discussed some strategies w.r.t. API design
+in Go, and even got into optimizing GC behavior.&lt;/p&gt;
+&lt;p&gt;I'm pleasantly surprised at how fast lexical scanning in Go is. Even the copying
+version without GC tuning takes 9.6 ms to process 1 MiB of input source - that's
+over 100 MiB /sec! Depending on where your source is stored, this could be
+almost as fast as, or faster than your CPU can &lt;em&gt;read&lt;/em&gt; the source into memory.
+With API changes and GC tuning we were able to improve this by a further 37% to
+6 ms, though the specifics here depend on your actual application. Compared to
+our original version compiled with Go 1.2, the new lexer is more than 3 times
+as fast!&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Update (2022-05-24)&lt;/strong&gt;: The in-development version of Go (1.19) runs this
+benchmark even faster at 5.6 ms (with &lt;tt class="docutils literal"&gt;GOGC=1600&lt;/tt&gt;)! Go 1.19 should be released
+in August.&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;Update (2023-06-02)&lt;/strong&gt;: Today's in-development version of Go (1.21) runs this
+benchmark in 4.5 ms (with &lt;tt class="docutils literal"&gt;GOGC=1600&lt;/tt&gt;)! Go 1.21 should be released in August
+2023, but you can try it today with
+&lt;a class="reference external" href="https://pkg.go.dev/golang.org/dl/gotip"&gt;gotip&lt;/a&gt;.&lt;/p&gt;
+&lt;hr class="docutils" /&gt;
+&lt;table class="docutils footnote" frame="void" id="footnote-1" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#footnote-reference-1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;&lt;p class="first"&gt;To run this with Go 1.5 I had to comment out the &lt;tt class="docutils literal"&gt;t.Run&lt;/tt&gt; wrapper in
+the tests since this method did not exist in 1.5 yet; the tests still
+pass just fine, but in case of failure the reporting would be less
+helpful.&lt;/p&gt;
+&lt;p class="last"&gt;Also note the &lt;tt class="docutils literal"&gt;TDINPUT&lt;/tt&gt; environment variable. This is just to reuse
+the large-ish input file in multiple places without having to commit
+it to Git many times.&lt;/p&gt;
+&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;/div&gt;
+</content><category term="misc"></category><category term="Go"></category><category term="Lexer"></category><category term="Compilation"></category></entry><entry><title>Rewriting the lexer benchmark in Go</title><link href="https://eli.thegreenplace.net/2014/03/27/rewriting-the-lexer-benchmark-in-go" rel="alternate"></link><published>2014-03-27T05:58:29-07:00</published><updated>2024-05-04T19:46:23-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2014-03-27:/2014/03/27/rewriting-the-lexer-benchmark-in-go</id><summary type="html">
+        &lt;p&gt;Last year I was toying with a simple lexer (for the &lt;a class="reference external" href="http://llvm.org/docs/TableGen/"&gt;TableGen language&lt;/a&gt;, because why not), implementing it using &lt;a class="reference external" href="https://eli.thegreenplace.net/2013/07/16/hand-written-lexer-in-javascript-compared-to-the-regex-based-ones/"&gt;multiple approaches&lt;/a&gt; in both &lt;a class="reference external" href="https://eli.thegreenplace.net/2013/06/25/regex-based-lexical-analysis-in-python-and-javascript/"&gt;Python and Javascript&lt;/a&gt;. Redoing the same task using multiple approaches and using more than one language is a very interesting code kata and a great way to …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;Last year I was toying with a simple lexer (for the &lt;a class="reference external" href="http://llvm.org/docs/TableGen/"&gt;TableGen language&lt;/a&gt;, because why not), implementing it using &lt;a class="reference external" href="https://eli.thegreenplace.net/2013/07/16/hand-written-lexer-in-javascript-compared-to-the-regex-based-ones/"&gt;multiple approaches&lt;/a&gt; in both &lt;a class="reference external" href="https://eli.thegreenplace.net/2013/06/25/regex-based-lexical-analysis-in-python-and-javascript/"&gt;Python and Javascript&lt;/a&gt;. Redoing the same task using multiple approaches and using more than one language is a very interesting code kata and a great way to learn.&lt;/p&gt;
+&lt;p&gt;Since I've been recently looking at Go, I continued the exercise by reimplementing the lexer (the hand-written one, not a regex-based) in Go.
+The full code is
+&lt;a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2014/tablegen-lexer-go"&gt;available here&lt;/a&gt; (along with a large input file used for benchmarking).&lt;/p&gt;
+&lt;p&gt;Naturally, since my previous posts did performance comparisons between Python and Javascript, I wanted to add Go to the graph. I also had to rerun all the benchmarks because from the time of writing those posts I got a &lt;a class="reference external" href="https://eli.thegreenplace.net/2013/11/23/a-new-ubuntu-machine-for-home/"&gt;new, much faster, machine&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Anyway, here it is:&lt;/p&gt;
+&lt;img class="align-center" src="https://eli.thegreenplace.net/images/2014/03/comparison-py-js-go.png" /&gt;
+&lt;p&gt;Since Python is so slow here, it's hard to see the difference between the fastest versions, but the handwritten Go lexer is roughly on par with the Javascript one (33 vs. 31 msec). The benchmarks were run on my i7-4771 machine (amd64); go1.2.1, Node.js v0.10.26.&lt;/p&gt;
+&lt;p&gt;Now, this is quite literally the first non-trivial Go program I've written and I'm a neophyte by all measures, so any tips on the code would be very welcome. I tried to stay faithful to the Javascript implementation in terms of the algorithm, so the comparison would be fair.&lt;/p&gt;
+&lt;p&gt;That said, shortly after completing the code I started wondering if it could be made faster. There's something about Go that makes you think about performance on a low level, not unlike when programming in C. Maybe it's because so many things are explicit - pointers, slices, etc.&lt;/p&gt;
+&lt;p&gt;Anyhow, the code that uses a lexer to fill in a slice of tokens caught my eye:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;toks := []Token{}
+
+startTime := time.Now()
+&lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; {
+        nt := nl.NextToken()
+        toks = append(toks, nt)
+        &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; nt.Name == EOF {
+                &lt;span style="color: #00007f; font-weight: bold"&gt;break&lt;/span&gt;
+        }
+}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;That &lt;tt class="docutils literal"&gt;toks = append(toks, nt)&lt;/tt&gt; in particular. As the size grows, &lt;tt class="docutils literal"&gt;toks&lt;/tt&gt; will have to be reallocated and all its contents copied over. Since the input in my case had close to 200000 tokens and reallocation doubles the slice size, this means that in the order of 16 reallocations have to happen here, each time copying all the elements over. If that sounds like a lot of wasted work to you, that's because it is.&lt;/p&gt;
+&lt;p&gt;So I tried replacing the first line with:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;toks := &lt;span style="color: #00007f"&gt;make&lt;/span&gt;([]Token, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;200000&lt;/span&gt;)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;And wow, the runtime dropped from 33 to 20 ms, making it 33% faster than the JS version. To be fair to JS I tried to perform the same optimization there (instead of pushing onto an array, create a large one in advance), but this has actually made things &lt;em&gt;slower&lt;/em&gt;. &lt;a class="reference external" href="https://thewayofcode.wordpress.com/tag/array-pre-allocation/"&gt;Some sources online&lt;/a&gt; claim that V8 (which is what I'm running underneath, since my local code runs on Node.js) doesn't like preallocating large arrays.&lt;/p&gt;
+&lt;p&gt;So as is often the case with benchmarks, it's difficult to do an apples-to-apples comparison here. A hunch tells me that in a fully optimized (by a programmer skilled in the language) version of this benchmark, Go would still win, because its nature (typed, compiled to native code, and exposing a lot of low-level details) make it easier to reason about in terms of performance. But performance was not really the point here - I just wanted to see how easy it is to reimplement the same lexer in Go.&lt;/p&gt;
+&lt;p&gt;Hopefully the code would be useful/interesting to someone; please let me know what I could've done better.&lt;/p&gt;
+
+&lt;p&gt;
+&lt;b&gt;Update (2022-05-03):&lt;/b&gt; A newer version of Go and some additional
+optimizations make this lexer more than 3x faster.
+See &lt;a href="https://eli.thegreenplace.net/2022/a-faster-lexer-in-go/"&gt;details in this post&lt;/a&gt;.
+&lt;/p&gt;
+    </content><category term="misc"></category><category term="Go"></category><category term="Javascript"></category><category term="Lexer"></category><category term="Compilation"></category></entry><entry><title>Hand-written lexer in Javascript compared to the regex-based ones</title><link href="https://eli.thegreenplace.net/2013/07/16/hand-written-lexer-in-javascript-compared-to-the-regex-based-ones" rel="alternate"></link><published>2013-07-16T06:25:10-07:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2013-07-16:/2013/07/16/hand-written-lexer-in-javascript-compared-to-the-regex-based-ones</id><summary type="html">
+        &lt;p&gt;A &lt;a class="reference external" href="https://eli.thegreenplace.net/2013/06/25/regex-based-lexical-analysis-in-python-and-javascript/"&gt;few weeks ago I wrote&lt;/a&gt; about the comparison between regex-based lexers in Python and Javascript. Javascript running on Node.js (V8) ended up being much faster than Python, and in both languages a speed improvement could be gained by switching to a single regex and letting the regex engine …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;A &lt;a class="reference external" href="https://eli.thegreenplace.net/2013/06/25/regex-based-lexical-analysis-in-python-and-javascript/"&gt;few weeks ago I wrote&lt;/a&gt; about the comparison between regex-based lexers in Python and Javascript. Javascript running on Node.js (V8) ended up being much faster than Python, and in both languages a speed improvement could be gained by switching to a single regex and letting the regex engine do the hard work.&lt;/p&gt;
+&lt;p&gt;However, in the real world you'll find that most lexers (particularly lexers for real programming languages) are not written that way. They are carefully hand-written to go over the input and dispatch to the appropriate token handling code depending on the first character encountered.&lt;/p&gt;
+&lt;p&gt;This technique makes more sense for complex languages because it's much more flexible than regexes (for instance, representing nested comments with regexes is a big challenge). But I was curious also about its performance implications.&lt;/p&gt;
+&lt;p&gt;So I hacked together a hand-written lexer for exactly the same language used in the previous benchmark and also exercised it on the same large file to make sure the results are correct. Its runtime, however, surprised me. Here's the runtime of lexing a large-ish document (smaller is better):&lt;/p&gt;
+&lt;img class="align-center" src="https://eli.thegreenplace.net/images/2013/07/lexer_runtime_vs_handwritten.png" /&gt;
+&lt;p&gt;I was expecting the runtime to be much closer to the single-regex version; in fact I was expecting it to be a bit slower (because most of the regex engine work is done at a lower level). But it turned out to be much faster, more than 2.5x. Another case of the real world beating intuition.&lt;/p&gt;
+&lt;p&gt;I was lazy to look, but if V8's regex implementation is anything like Python's, then alternation of many options (&lt;tt class="docutils literal"&gt;foo|bar&lt;/tt&gt;) is not as efficient as one might expect because the regex engine does not use real DFAs, but rather backtracking. So alternation essentially means iteration deep in the regex engine. On the other hand, the hand-written code seems like something quite optimizable by a JIT compiler like V8 (the types are simple and consistent) so there's a good chance it got converted into tight machine code. Throw some inlining in and the speed is not very unlikely.&lt;/p&gt;
+&lt;p&gt;Anyway, here is the hand-written lexer. It's significantly more code than the regex-based ones, but I can't say it was particularly difficult to write - the main part took a bit more than an hour, or so. If you have any additional ideas about the speed difference, I'll be happy to hear about them.&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #7f007f"&gt;&amp;#39;use strict&amp;#39;&lt;/span&gt;;
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; Lexer = exports.Lexer = &lt;span style="color: #00007f; font-weight: bold"&gt;function&lt;/span&gt;() {
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos = &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf = &lt;span style="color: #00007f; font-weight: bold"&gt;null&lt;/span&gt;;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buflen = &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;;
+
+  &lt;span style="color: #007f00"&gt;// Operator table, mapping operator -&amp;gt; token name&lt;/span&gt;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.optable = {
+    &lt;span style="color: #7f007f"&gt;&amp;#39;+&amp;#39;&lt;/span&gt;:  &lt;span style="color: #7f007f"&gt;&amp;#39;PLUS&amp;#39;&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;#39;-&amp;#39;&lt;/span&gt;:  &lt;span style="color: #7f007f"&gt;&amp;#39;MINUS&amp;#39;&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;#39;*&amp;#39;&lt;/span&gt;:  &lt;span style="color: #7f007f"&gt;&amp;#39;MULTIPLY&amp;#39;&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;#39;.&amp;#39;&lt;/span&gt;:  &lt;span style="color: #7f007f"&gt;&amp;#39;PERIOD&amp;#39;&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;#39;\\&amp;#39;&lt;/span&gt;: &lt;span style="color: #7f007f"&gt;&amp;#39;BACKSLASH&amp;#39;&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;#39;:&amp;#39;&lt;/span&gt;:  &lt;span style="color: #7f007f"&gt;&amp;#39;COLON&amp;#39;&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;#39;%&amp;#39;&lt;/span&gt;:  &lt;span style="color: #7f007f"&gt;&amp;#39;PERCENT&amp;#39;&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;#39;|&amp;#39;&lt;/span&gt;:  &lt;span style="color: #7f007f"&gt;&amp;#39;PIPE&amp;#39;&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;#39;!&amp;#39;&lt;/span&gt;:  &lt;span style="color: #7f007f"&gt;&amp;#39;EXCLAMATION&amp;#39;&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;#39;?&amp;#39;&lt;/span&gt;:  &lt;span style="color: #7f007f"&gt;&amp;#39;QUESTION&amp;#39;&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;#39;#&amp;#39;&lt;/span&gt;:  &lt;span style="color: #7f007f"&gt;&amp;#39;POUND&amp;#39;&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;#39;&amp;amp;&amp;#39;&lt;/span&gt;:  &lt;span style="color: #7f007f"&gt;&amp;#39;AMPERSAND&amp;#39;&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;#39;;&amp;#39;&lt;/span&gt;:  &lt;span style="color: #7f007f"&gt;&amp;#39;SEMI&amp;#39;&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;#39;,&amp;#39;&lt;/span&gt;:  &lt;span style="color: #7f007f"&gt;&amp;#39;COMMA&amp;#39;&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;#39;(&amp;#39;&lt;/span&gt;:  &lt;span style="color: #7f007f"&gt;&amp;#39;L_PAREN&amp;#39;&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;#39;)&amp;#39;&lt;/span&gt;:  &lt;span style="color: #7f007f"&gt;&amp;#39;R_PAREN&amp;#39;&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;#39;&amp;lt;&amp;#39;&lt;/span&gt;:  &lt;span style="color: #7f007f"&gt;&amp;#39;L_ANG&amp;#39;&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;#39;&amp;gt;&amp;#39;&lt;/span&gt;:  &lt;span style="color: #7f007f"&gt;&amp;#39;R_ANG&amp;#39;&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;#39;{&amp;#39;&lt;/span&gt;:  &lt;span style="color: #7f007f"&gt;&amp;#39;L_BRACE&amp;#39;&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;#39;}&amp;#39;&lt;/span&gt;:  &lt;span style="color: #7f007f"&gt;&amp;#39;R_BRACE&amp;#39;&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;#39;[&amp;#39;&lt;/span&gt;:  &lt;span style="color: #7f007f"&gt;&amp;#39;L_BRACKET&amp;#39;&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;#39;]&amp;#39;&lt;/span&gt;:  &lt;span style="color: #7f007f"&gt;&amp;#39;R_BRACKET&amp;#39;&lt;/span&gt;,
+    &lt;span style="color: #7f007f"&gt;&amp;#39;=&amp;#39;&lt;/span&gt;:  &lt;span style="color: #7f007f"&gt;&amp;#39;EQUALS&amp;#39;&lt;/span&gt;
+  };
+}
+
+&lt;span style="color: #007f00"&gt;// Initialize the Lexer&amp;#39;s buffer. This resets the lexer&amp;#39;s internal&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// state and subsequent tokens will be returned starting with the&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// beginning of the new buffer.&lt;/span&gt;
+Lexer.prototype.input = &lt;span style="color: #00007f; font-weight: bold"&gt;function&lt;/span&gt;(buf) {
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos = &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf = buf;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buflen = buf.length;
+}
+
+&lt;span style="color: #007f00"&gt;// Get the next token from the current buffer. A token is an object with&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// the following properties:&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// - name: name of the pattern that this token matched (taken from rules).&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// - value: actual string value of the token.&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// - pos: offset in the current buffer where the token starts.&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;//&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// If there are no more tokens in the buffer, returns null. In case of&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// an error throws Error.&lt;/span&gt;
+Lexer.prototype.token = &lt;span style="color: #00007f; font-weight: bold"&gt;function&lt;/span&gt;() {
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;._skipnontokens();
+  &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (&lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos &amp;gt;= &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buflen) {
+    &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;null&lt;/span&gt;;
+  }
+
+  &lt;span style="color: #007f00"&gt;// The char at this.pos is part of a real token. Figure out which.&lt;/span&gt;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; c = &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf.charAt(&lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos);
+
+  &lt;span style="color: #007f00"&gt;// &amp;#39;/&amp;#39; is treated specially, because it starts a comment if followed by&lt;/span&gt;
+  &lt;span style="color: #007f00"&gt;// another &amp;#39;/&amp;#39;. If not followed by another &amp;#39;/&amp;#39;, it&amp;#39;s the DIVIDE&lt;/span&gt;
+  &lt;span style="color: #007f00"&gt;// operator.&lt;/span&gt;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (c === &lt;span style="color: #7f007f"&gt;&amp;#39;/&amp;#39;&lt;/span&gt;) {
+    &lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; next_c = &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf.charAt(&lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos + &lt;span style="color: #007f7f"&gt;1&lt;/span&gt;);
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (next_c === &lt;span style="color: #7f007f"&gt;&amp;#39;/&amp;#39;&lt;/span&gt;) {
+      &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;._process_comment();
+    } &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt; {
+      &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; {name: &lt;span style="color: #7f007f"&gt;&amp;#39;DIVIDE&amp;#39;&lt;/span&gt;, value: &lt;span style="color: #7f007f"&gt;&amp;#39;/&amp;#39;&lt;/span&gt;, pos: &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos++};
+    }
+  } &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt; {
+    &lt;span style="color: #007f00"&gt;// Look it up in the table of operators&lt;/span&gt;
+    &lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; op = &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.optable[c];
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (op !== &lt;span style="color: #00007f; font-weight: bold"&gt;undefined&lt;/span&gt;) {
+      &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; {name: op, value: c, pos: &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos++};
+    } &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt; {
+      &lt;span style="color: #007f00"&gt;// Not an operator - so it&amp;#39;s the beginning of another token.&lt;/span&gt;
+      &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (Lexer._isalpha(c)) {
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;._process_identifier();
+      } &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (Lexer._isdigit(c)) {
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;._process_number();
+      } &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (c === &lt;span style="color: #7f007f"&gt;&amp;#39;&amp;quot;&amp;#39;&lt;/span&gt;) {
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;._process_quote();
+      } &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt; {
+        &lt;span style="color: #00007f; font-weight: bold"&gt;throw&lt;/span&gt; &lt;span style="color: #00007f"&gt;Error&lt;/span&gt;(&lt;span style="color: #7f007f"&gt;&amp;#39;Token error at &amp;#39;&lt;/span&gt; + &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos);
+      }
+    }
+  }
+}
+
+Lexer._isnewline = &lt;span style="color: #00007f; font-weight: bold"&gt;function&lt;/span&gt;(c) {
+  &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; c === &lt;span style="color: #7f007f"&gt;&amp;#39;\r&amp;#39;&lt;/span&gt; || c === &lt;span style="color: #7f007f"&gt;&amp;#39;\n&amp;#39;&lt;/span&gt;;
+}
+
+Lexer._isdigit = &lt;span style="color: #00007f; font-weight: bold"&gt;function&lt;/span&gt;(c) {
+  &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; c &amp;gt;= &lt;span style="color: #7f007f"&gt;&amp;#39;0&amp;#39;&lt;/span&gt; &amp;amp;&amp;amp; c &amp;lt;= &lt;span style="color: #7f007f"&gt;&amp;#39;9&amp;#39;&lt;/span&gt;;
+}
+
+Lexer._isalpha = &lt;span style="color: #00007f; font-weight: bold"&gt;function&lt;/span&gt;(c) {
+  &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; (c &amp;gt;= &lt;span style="color: #7f007f"&gt;&amp;#39;a&amp;#39;&lt;/span&gt; &amp;amp;&amp;amp; c &amp;lt;= &lt;span style="color: #7f007f"&gt;&amp;#39;z&amp;#39;&lt;/span&gt;) ||
+         (c &amp;gt;= &lt;span style="color: #7f007f"&gt;&amp;#39;A&amp;#39;&lt;/span&gt; &amp;amp;&amp;amp; c &amp;lt;= &lt;span style="color: #7f007f"&gt;&amp;#39;Z&amp;#39;&lt;/span&gt;) ||
+         c === &lt;span style="color: #7f007f"&gt;&amp;#39;_&amp;#39;&lt;/span&gt; || c === &lt;span style="color: #7f007f"&gt;&amp;#39;$&amp;#39;&lt;/span&gt;;
+}
+
+Lexer._isalphanum = &lt;span style="color: #00007f; font-weight: bold"&gt;function&lt;/span&gt;(c) {
+  &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; (c &amp;gt;= &lt;span style="color: #7f007f"&gt;&amp;#39;a&amp;#39;&lt;/span&gt; &amp;amp;&amp;amp; c &amp;lt;= &lt;span style="color: #7f007f"&gt;&amp;#39;z&amp;#39;&lt;/span&gt;) ||
+         (c &amp;gt;= &lt;span style="color: #7f007f"&gt;&amp;#39;A&amp;#39;&lt;/span&gt; &amp;amp;&amp;amp; c &amp;lt;= &lt;span style="color: #7f007f"&gt;&amp;#39;Z&amp;#39;&lt;/span&gt;) ||
+         (c &amp;gt;= &lt;span style="color: #7f007f"&gt;&amp;#39;0&amp;#39;&lt;/span&gt; &amp;amp;&amp;amp; c &amp;lt;= &lt;span style="color: #7f007f"&gt;&amp;#39;9&amp;#39;&lt;/span&gt;) ||
+         c === &lt;span style="color: #7f007f"&gt;&amp;#39;_&amp;#39;&lt;/span&gt; || c === &lt;span style="color: #7f007f"&gt;&amp;#39;$&amp;#39;&lt;/span&gt;;
+}
+
+Lexer.prototype._process_number = &lt;span style="color: #00007f; font-weight: bold"&gt;function&lt;/span&gt;() {
+  &lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; endpos = &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos + &lt;span style="color: #007f7f"&gt;1&lt;/span&gt;;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;while&lt;/span&gt; (endpos &amp;lt; &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buflen &amp;amp;&amp;amp;
+         Lexer._isdigit(&lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf.charAt(endpos))) {
+    endpos++;
+  }
+
+  &lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; tok = {
+    name: &lt;span style="color: #7f007f"&gt;&amp;#39;NUMBER&amp;#39;&lt;/span&gt;,
+    value: &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf.substring(&lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos, endpos),
+    pos: &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos
+  };
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos = endpos;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; tok;
+}
+
+Lexer.prototype._process_comment = &lt;span style="color: #00007f; font-weight: bold"&gt;function&lt;/span&gt;() {
+  &lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; endpos = &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos + &lt;span style="color: #007f7f"&gt;2&lt;/span&gt;;
+  &lt;span style="color: #007f00"&gt;// Skip until the end of the line&lt;/span&gt;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; c = &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf.charAt(&lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos + &lt;span style="color: #007f7f"&gt;2&lt;/span&gt;);
+  &lt;span style="color: #00007f; font-weight: bold"&gt;while&lt;/span&gt; (endpos &amp;lt; &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buflen &amp;amp;&amp;amp;
+         !Lexer._isnewline(&lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf.charAt(endpos))) {
+    endpos++;
+  }
+
+  &lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; tok = {
+    name: &lt;span style="color: #7f007f"&gt;&amp;#39;COMMENT&amp;#39;&lt;/span&gt;,
+    value: &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf.substring(&lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos, endpos),
+    pos: &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos
+  };
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos = endpos + &lt;span style="color: #007f7f"&gt;1&lt;/span&gt;;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; tok;
+}
+
+Lexer.prototype._process_identifier = &lt;span style="color: #00007f; font-weight: bold"&gt;function&lt;/span&gt;() {
+  &lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; endpos = &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos + &lt;span style="color: #007f7f"&gt;1&lt;/span&gt;;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;while&lt;/span&gt; (endpos &amp;lt; &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buflen &amp;amp;&amp;amp;
+         Lexer._isalphanum(&lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf.charAt(endpos))) {
+    endpos++;
+  }
+
+  &lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; tok = {
+    name: &lt;span style="color: #7f007f"&gt;&amp;#39;IDENTIFIER&amp;#39;&lt;/span&gt;,
+    value: &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf.substring(&lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos, endpos),
+    pos: &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos
+  };
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos = endpos;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; tok;
+}
+
+Lexer.prototype._process_quote = &lt;span style="color: #00007f; font-weight: bold"&gt;function&lt;/span&gt;() {
+  &lt;span style="color: #007f00"&gt;// this.pos points at the opening quote. Find the ending quote.&lt;/span&gt;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; end_index = &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf.indexOf(&lt;span style="color: #7f007f"&gt;&amp;#39;&amp;quot;&amp;#39;&lt;/span&gt;, &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos + &lt;span style="color: #007f7f"&gt;1&lt;/span&gt;);
+
+  &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (end_index === -&lt;span style="color: #007f7f"&gt;1&lt;/span&gt;) {
+    &lt;span style="color: #00007f; font-weight: bold"&gt;throw&lt;/span&gt; &lt;span style="color: #00007f"&gt;Error&lt;/span&gt;(&lt;span style="color: #7f007f"&gt;&amp;#39;Unterminated quote at &amp;#39;&lt;/span&gt; + &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos);
+  } &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt; {
+    &lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; tok = {
+      name: &lt;span style="color: #7f007f"&gt;&amp;#39;QUOTE&amp;#39;&lt;/span&gt;,
+      value: &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf.substring(&lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos, end_index + &lt;span style="color: #007f7f"&gt;1&lt;/span&gt;),
+      pos: &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos
+    };
+    &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos = end_index + &lt;span style="color: #007f7f"&gt;1&lt;/span&gt;;
+    &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; tok;
+  }
+}
+
+Lexer.prototype._skipnontokens = &lt;span style="color: #00007f; font-weight: bold"&gt;function&lt;/span&gt;() {
+  &lt;span style="color: #00007f; font-weight: bold"&gt;while&lt;/span&gt; (&lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos &amp;lt; &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buflen) {
+    &lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; c = &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf.charAt(&lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos);
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (c == &lt;span style="color: #7f007f"&gt;&amp;#39; &amp;#39;&lt;/span&gt; || c == &lt;span style="color: #7f007f"&gt;&amp;#39;\t&amp;#39;&lt;/span&gt; || c == &lt;span style="color: #7f007f"&gt;&amp;#39;\r&amp;#39;&lt;/span&gt; || c == &lt;span style="color: #7f007f"&gt;&amp;#39;\n&amp;#39;&lt;/span&gt;) {
+      &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos++;
+    } &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt; {
+      &lt;span style="color: #00007f; font-weight: bold"&gt;break&lt;/span&gt;;
+    }
+  }
+}
+&lt;/pre&gt;&lt;/div&gt;
+
+    </content><category term="misc"></category><category term="Compilation"></category><category term="Javascript"></category><category term="Lexer"></category></entry><entry><title>Regex-based lexical analysis in Python and Javascript</title><link href="https://eli.thegreenplace.net/2013/06/25/regex-based-lexical-analysis-in-python-and-javascript" rel="alternate"></link><published>2013-06-25T05:36:06-07:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2013-06-25:/2013/06/25/regex-based-lexical-analysis-in-python-and-javascript</id><summary type="html">
+        &lt;p&gt;When I need a lexical analyzer, usually the first tool I turn to is a simple regex-based lexer I've been using for a few years now. Here is the most straightforward version, in Python. First, a couple of supporting classes:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;class&lt;/span&gt; &lt;span style="color: #00007f"&gt;Token&lt;/span&gt;(&lt;span style="color: #00007f"&gt;object&lt;/span&gt;):
+    &lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot; A simple Token structure. Token type, value …&lt;/span&gt;&lt;/pre&gt;&lt;/div&gt;</summary><content type="html">
+        &lt;p&gt;When I need a lexical analyzer, usually the first tool I turn to is a simple regex-based lexer I've been using for a few years now. Here is the most straightforward version, in Python. First, a couple of supporting classes:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;class&lt;/span&gt; &lt;span style="color: #00007f"&gt;Token&lt;/span&gt;(&lt;span style="color: #00007f"&gt;object&lt;/span&gt;):
+    &lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot; A simple Token structure. Token type, value and position.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;    &amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;__init__&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;, &lt;span style="color: #00007f"&gt;type&lt;/span&gt;, val, pos):
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.type = &lt;span style="color: #00007f"&gt;type&lt;/span&gt;
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.val = val
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.pos = pos
+
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;__str__&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;):
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #7f007f"&gt;&amp;#39;%s(%s) at %s&amp;#39;&lt;/span&gt; % (&lt;span style="color: #00007f"&gt;self&lt;/span&gt;.type, &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.val, &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.pos)
+
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;class&lt;/span&gt; &lt;span style="color: #00007f"&gt;LexerError&lt;/span&gt;(Exception):
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;__init__&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;, pos):
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.pos = pos
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Now, the lexer itself:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;class&lt;/span&gt; &lt;span style="color: #00007f"&gt;Lexer&lt;/span&gt;(&lt;span style="color: #00007f"&gt;object&lt;/span&gt;):
+    &lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot; A simple regex-based lexer/tokenizer.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;    &amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;__init__&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;, rules, skip_whitespace=&lt;span style="color: #00007f"&gt;True&lt;/span&gt;):
+        &lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot; Create a lexer.&lt;/span&gt;
+
+&lt;span style="color: #7f007f"&gt;            rules:&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;                A list of rules. Each rule is a `&lt;code&gt;regex, type&lt;/code&gt;`&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;                pair, where `&lt;code&gt;regex&lt;/code&gt;` is the regular expression used&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;                to recognize the token and `&lt;code&gt;type&lt;/code&gt;` is the type&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;                of the token to return when it&amp;#39;s recognized.&lt;/span&gt;
+
+&lt;span style="color: #7f007f"&gt;            skip_whitespace:&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;                If True, whitespace (\s+) will be skipped and not&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;                reported by the lexer. Otherwise, you have to&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;                specify your rules for whitespace, or it will be&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;                flagged as an error.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        &amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.rules = []
+        &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; regex, &lt;span style="color: #00007f"&gt;type&lt;/span&gt; &lt;span style="color: #0000aa"&gt;in&lt;/span&gt; rules:
+            &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.rules.append((re.compile(regex), &lt;span style="color: #00007f"&gt;type&lt;/span&gt;))
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.skip_whitespace = skip_whitespace
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.re_ws_skip = re.compile(&lt;span style="color: #7f007f"&gt;&amp;#39;\S&amp;#39;&lt;/span&gt;)
+
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;input&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;, buf):
+        &lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot; Initialize the lexer with a buffer as input.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        &amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.buf = buf
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.pos = &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;
+
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;token&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;):
+        &lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot; Return the next token (a Token object) found in the&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;            input buffer. None is returned if the end of the&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;            buffer was reached.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;            In case of a lexing error (the current chunk of the&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;            buffer matches no rule), a LexerError is raised with&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;            the position of the error.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        &amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+        &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.pos &amp;gt;= &lt;span style="color: #00007f"&gt;len&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;.buf):
+            &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f"&gt;None&lt;/span&gt;
+        &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.skip_whitespace:
+            m = &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.re_ws_skip.search(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;.buf, &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.pos)
+            &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; m:
+                &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.pos = m.start()
+            &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt;:
+                &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f"&gt;None&lt;/span&gt;
+
+        &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; regex, &lt;span style="color: #00007f"&gt;type&lt;/span&gt; &lt;span style="color: #0000aa"&gt;in&lt;/span&gt; &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.rules:
+            m = regex.match(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;.buf, &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.pos)
+            &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; m:
+                tok = Token(&lt;span style="color: #00007f"&gt;type&lt;/span&gt;, m.group(), &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.pos)
+                &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.pos = m.end()
+                &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; tok
+
+        &lt;span style="color: #007f00"&gt;# if we&amp;#39;re here, no rule matched&lt;/span&gt;
+        &lt;span style="color: #00007f; font-weight: bold"&gt;raise&lt;/span&gt; LexerError(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;.pos)
+
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;tokens&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;):
+        &lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot; Returns an iterator to the tokens found in the buffer.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        &amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+        &lt;span style="color: #00007f; font-weight: bold"&gt;while&lt;/span&gt; &lt;span style="color: #007f7f"&gt;1&lt;/span&gt;:
+            tok = &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.token()
+            &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; tok &lt;span style="color: #0000aa"&gt;is&lt;/span&gt; &lt;span style="color: #00007f"&gt;None&lt;/span&gt;: &lt;span style="color: #00007f; font-weight: bold"&gt;break&lt;/span&gt;
+            &lt;span style="color: #00007f; font-weight: bold"&gt;yield&lt;/span&gt; tok
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The code is well-commented and self explanatory, but in general the approach is: get a bunch of regular expressions, try to match each - the first one that matches is the triggered &amp;quot;rule&amp;quot;, so a token can be returned. It's really straightforward code. Sample usage:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;rules = [
+    (&lt;span style="color: #7f007f"&gt;&amp;#39;\d+&amp;#39;&lt;/span&gt;,             &lt;span style="color: #7f007f"&gt;&amp;#39;NUMBER&amp;#39;&lt;/span&gt;),
+    (&lt;span style="color: #7f007f"&gt;&amp;#39;[a-zA-Z_]\w*&amp;#39;&lt;/span&gt;,    &lt;span style="color: #7f007f"&gt;&amp;#39;IDENTIFIER&amp;#39;&lt;/span&gt;),
+    (&lt;span style="color: #7f007f"&gt;&amp;#39;\+&amp;#39;&lt;/span&gt;,              &lt;span style="color: #7f007f"&gt;&amp;#39;PLUS&amp;#39;&lt;/span&gt;),
+    (&lt;span style="color: #7f007f"&gt;&amp;#39;\-&amp;#39;&lt;/span&gt;,              &lt;span style="color: #7f007f"&gt;&amp;#39;MINUS&amp;#39;&lt;/span&gt;),
+    (&lt;span style="color: #7f007f"&gt;&amp;#39;\*&amp;#39;&lt;/span&gt;,              &lt;span style="color: #7f007f"&gt;&amp;#39;MULTIPLY&amp;#39;&lt;/span&gt;),
+    (&lt;span style="color: #7f007f"&gt;&amp;#39;\/&amp;#39;&lt;/span&gt;,              &lt;span style="color: #7f007f"&gt;&amp;#39;DIVIDE&amp;#39;&lt;/span&gt;),
+    (&lt;span style="color: #7f007f"&gt;&amp;#39;\(&amp;#39;&lt;/span&gt;,              &lt;span style="color: #7f007f"&gt;&amp;#39;LP&amp;#39;&lt;/span&gt;),
+    (&lt;span style="color: #7f007f"&gt;&amp;#39;\)&amp;#39;&lt;/span&gt;,              &lt;span style="color: #7f007f"&gt;&amp;#39;RP&amp;#39;&lt;/span&gt;),
+    (&lt;span style="color: #7f007f"&gt;&amp;#39;=&amp;#39;&lt;/span&gt;,               &lt;span style="color: #7f007f"&gt;&amp;#39;EQUALS&amp;#39;&lt;/span&gt;),
+]
+
+lx = Lexer(rules, skip_whitespace=&lt;span style="color: #00007f"&gt;True&lt;/span&gt;)
+lx.input(&lt;span style="color: #7f007f"&gt;&amp;#39;erw = _abc + 12*(R4-623902)  &amp;#39;&lt;/span&gt;)
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;try&lt;/span&gt;:
+    &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; tok &lt;span style="color: #0000aa"&gt;in&lt;/span&gt; lx.tokens():
+        &lt;span style="color: #00007f; font-weight: bold"&gt;print&lt;/span&gt;(tok)
+&lt;span style="color: #00007f; font-weight: bold"&gt;except&lt;/span&gt; LexerError &lt;span style="color: #00007f; font-weight: bold"&gt;as&lt;/span&gt; err:
+    &lt;span style="color: #00007f; font-weight: bold"&gt;print&lt;/span&gt;(&lt;span style="color: #7f007f"&gt;&amp;#39;LexerError at position %s&amp;#39;&lt;/span&gt; % err.pos)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Shortly after I started using it, it was suggested that combining all the regexes into a single regex with alternation (the &lt;tt class="docutils literal"&gt;|&lt;/tt&gt; regex syntax) and using named groups to know which one matched would make the lexer faster. Here are the methods of &lt;tt class="docutils literal"&gt;Lexer&lt;/tt&gt; that need to change in order to implement that:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;__init__&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;, rules, skip_whitespace=&lt;span style="color: #00007f"&gt;True&lt;/span&gt;):
+    &lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot; Create a lexer.&lt;/span&gt;
+
+&lt;span style="color: #7f007f"&gt;        rules:&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;            A list of rules. Each rule is a `&lt;code&gt;regex, type&lt;/code&gt;`&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;            pair, where `&lt;code&gt;regex&lt;/code&gt;` is the regular expression used&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;            to recognize the token and `&lt;code&gt;type&lt;/code&gt;` is the type&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;            of the token to return when it&amp;#39;s recognized.&lt;/span&gt;
+
+&lt;span style="color: #7f007f"&gt;        skip_whitespace:&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;            If True, whitespace (\s+) will be skipped and not&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;            reported by the lexer. Otherwise, you have to&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;            specify your rules for whitespace, or it will be&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;            flagged as an error.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;    &amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+    &lt;span style="color: #007f00"&gt;# All the regexes are concatenated into a single one&lt;/span&gt;
+    &lt;span style="color: #007f00"&gt;# with named groups. Since the group names must be valid&lt;/span&gt;
+    &lt;span style="color: #007f00"&gt;# Python identifiers, but the token types used by the&lt;/span&gt;
+    &lt;span style="color: #007f00"&gt;# user are arbitrary strings, we auto-generate the group&lt;/span&gt;
+    &lt;span style="color: #007f00"&gt;# names and map them to token types.&lt;/span&gt;
+    &lt;span style="color: #007f00"&gt;#&lt;/span&gt;
+    idx = &lt;span style="color: #007f7f"&gt;1&lt;/span&gt;
+    regex_parts = []
+    &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.group_type = {}
+
+    &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; regex, &lt;span style="color: #00007f"&gt;type&lt;/span&gt; &lt;span style="color: #0000aa"&gt;in&lt;/span&gt; rules:
+        groupname = &lt;span style="color: #7f007f"&gt;&amp;#39;GROUP%s&amp;#39;&lt;/span&gt; % idx
+        regex_parts.append(&lt;span style="color: #7f007f"&gt;&amp;#39;(?P&amp;lt;%s&amp;gt;%s)&amp;#39;&lt;/span&gt; % (groupname, regex))
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.group_type[groupname] = &lt;span style="color: #00007f"&gt;type&lt;/span&gt;
+        idx += &lt;span style="color: #007f7f"&gt;1&lt;/span&gt;
+
+    &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.regex = re.compile(&lt;span style="color: #7f007f"&gt;&amp;#39;|&amp;#39;&lt;/span&gt;.join(regex_parts))
+    &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.skip_whitespace = skip_whitespace
+    &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.re_ws_skip = re.compile(&lt;span style="color: #7f007f"&gt;&amp;#39;\S&amp;#39;&lt;/span&gt;)
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;token&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;):
+    &lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot; Return the next token (a Token object) found in the&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        input buffer. None is returned if the end of the&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        buffer was reached.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        In case of a lexing error (the current chunk of the&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        buffer matches no rule), a LexerError is raised with&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        the position of the error.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;    &amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.pos &amp;gt;= &lt;span style="color: #00007f"&gt;len&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;.buf):
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f"&gt;None&lt;/span&gt;
+    &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt;:
+        &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.skip_whitespace:
+            m = &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.re_ws_skip.search(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;.buf, &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.pos)
+
+            &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; m:
+                &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.pos = m.start()
+            &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt;:
+                &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f"&gt;None&lt;/span&gt;
+
+        m = &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.regex.match(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;.buf, &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.pos)
+        &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; m:
+            groupname = m.lastgroup
+            tok_type = &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.group_type[groupname]
+            tok = Token(tok_type, m.group(groupname), &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.pos)
+            &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.pos = m.end()
+            &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; tok
+
+        &lt;span style="color: #007f00"&gt;# if we&amp;#39;re here, no rule matched&lt;/span&gt;
+        &lt;span style="color: #00007f; font-weight: bold"&gt;raise&lt;/span&gt; LexerError(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;.pos)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The &lt;tt class="docutils literal"&gt;re.MatchObject.lastgroup&lt;/tt&gt; method provides the name of the last group that matched in the regex run, and can be used to efficiently find which rule matched the current token.&lt;/p&gt;
+&lt;p&gt;This optimization makes the lexer more than twice as fast! Why does this make sense? First, if you think about it in the simplest way possible, the iteration over rules moved from Python code to C code (the implementation of the &lt;tt class="docutils literal"&gt;re&lt;/tt&gt; module). Second, it's even more than that. In the regex engine, &lt;tt class="docutils literal"&gt;|&lt;/tt&gt; alternation doesn't simply mean iteration. When the regex is built, all the sub-regexes get combined into a single NFA - some states may be combined, etc. In short, the speedup is not surprising.&lt;/p&gt;
+&lt;div class="section" id="a-word-on-my-benchmark"&gt;
+&lt;h3&gt;A word on my benchmark&lt;/h3&gt;
+&lt;p&gt;My benchmark is pretty simple. I combined a number of &lt;a class="reference external" href="http://llvm.org/docs/TableGenFundamentals.html"&gt;TableGen&lt;/a&gt; source files into a single one that has ~20 KLOC and weighs around 1 MB; then I wrote down the lexical rules needed to tokenize TableGen and ran the lexer on the whole file. TableGen is a simple programming language, so this is a good simulation of reality.&lt;/p&gt;
+&lt;p&gt;The first approach, &amp;quot;multi-regex&amp;quot; runs in 1.23 seconds on my machine. The second, &amp;quot;single-regex&amp;quot; runs in 0.57 seconds - 2.15x speedup.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="javascript"&gt;
+&lt;h3&gt;Javascript&lt;/h3&gt;
+&lt;p&gt;Lately I've been playing with Javascript again, so I decided to rewrite my lexer in that language to practice its regular expression handling.&lt;/p&gt;
+&lt;p&gt;First, the simpler approach that mimics the Python multi-regex lexer:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; Lexer = exports.Lexer = &lt;span style="color: #00007f; font-weight: bold"&gt;function&lt;/span&gt;(rules, skip_ws) {
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.rules = [];
+  &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; (&lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; i = &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;; i &amp;lt; rules.length; ++i) {
+    &lt;span style="color: #007f00"&gt;// The regexps are created with &amp;#39;^&amp;#39; since we want to match at&lt;/span&gt;
+    &lt;span style="color: #007f00"&gt;// an exact offset.&lt;/span&gt;
+    &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.rules.push({pattern: &lt;span style="color: #00007f; font-weight: bold"&gt;new&lt;/span&gt; &lt;span style="color: #00007f"&gt;RegExp&lt;/span&gt;(&lt;span style="color: #7f007f"&gt;&amp;#39;^&amp;#39;&lt;/span&gt; + rules[i].pattern),
+                     name: rules[i].name});
+  }
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.skip_ws = skip_ws ? &lt;span style="color: #00007f; font-weight: bold"&gt;new&lt;/span&gt; &lt;span style="color: #00007f"&gt;RegExp&lt;/span&gt;(&lt;span style="color: #7f007f"&gt;&amp;#39;\\S&amp;#39;&lt;/span&gt;, &lt;span style="color: #7f007f"&gt;&amp;#39;g&amp;#39;&lt;/span&gt;) : &lt;span style="color: #00007f; font-weight: bold"&gt;null&lt;/span&gt;;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos = &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf = &lt;span style="color: #7f007f"&gt;&amp;#39;&amp;#39;&lt;/span&gt;;
+}
+
+&lt;span style="color: #007f00"&gt;// Initialize the Lexer&amp;#39;s buffer. This resets the lexer&amp;#39;s internal state and&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// subsequent tokens will be returned starting with the beginning of the new&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// buffer.&lt;/span&gt;
+Lexer.prototype.input = &lt;span style="color: #00007f; font-weight: bold"&gt;function&lt;/span&gt;(buf) {
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf = buf;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos = &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;;
+}
+
+&lt;span style="color: #007f00"&gt;// Get the next token from the current buffer. A token is an object with&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// the following properties:&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// - name: name of the pattern that this token matched (taken from rules).&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// - value: actual string value of the token.&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// - pos: offset in the current buffer where the token starts.&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;//&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// If there are no more tokens in the buffer, returns null. In case of&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// an error throws Error.&lt;/span&gt;
+Lexer.prototype.token = &lt;span style="color: #00007f; font-weight: bold"&gt;function&lt;/span&gt;() {
+  &lt;span style="color: #007f00"&gt;// End of input?&lt;/span&gt;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (&lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos &amp;gt;= &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf.length) {
+    &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;null&lt;/span&gt;;
+  }
+
+  &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (&lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.skip_ws) {
+    &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.skip_ws.lastIndex = &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos;
+    &lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; match = &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.skip_ws.exec(&lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf);
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (match) {
+      &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos = match.index;
+    } &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt; {
+      &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;null&lt;/span&gt;;
+    }
+  }
+
+  &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; (&lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; i = &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;; i &amp;lt; &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.rules.length; ++i) {
+    &lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; rule = &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.rules[i];
+    &lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; match = rule.pattern.exec(&lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf.substr(&lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos));
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (match) {
+      &lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; the_token = {name: rule.name, value: match[&lt;span style="color: #007f7f"&gt;0&lt;/span&gt;], pos: &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos};
+      &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos += match[&lt;span style="color: #007f7f"&gt;0&lt;/span&gt;].length;
+      &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; the_token;
+    }
+  }
+
+  &lt;span style="color: #007f00"&gt;// If we&amp;#39;re here, no rule matches so it&amp;#39;s an error.&lt;/span&gt;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;throw&lt;/span&gt; &lt;span style="color: #00007f"&gt;Error&lt;/span&gt;(&lt;span style="color: #7f007f"&gt;&amp;#39;Cannot match a token at position &amp;#39;&lt;/span&gt; + &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.pos);
+}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Here I ran into a first serious deficiency of JS's regexes. There's no real equivalent to Python's &amp;quot;match at a position&amp;quot; functionality. This manifests differently in two places above:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;Note that the whitespace skipping now has to define a &amp;quot;global&amp;quot; mode regex (with the &lt;tt class="docutils literal"&gt;&amp;quot;g&amp;quot;&lt;/tt&gt;) flag. This is to be able to use &lt;tt class="docutils literal"&gt;lastIndex&lt;/tt&gt; to tell the regex where to start skipping whitespace from. &lt;tt class="docutils literal"&gt;lastIndex&lt;/tt&gt; works only for the &amp;quot;global&amp;quot; mode.&lt;/li&gt;
+&lt;li&gt;For matching the tokens themselves, the situation is more hairy. I would ideally want to say: match this rule at exactly this position (i.e. it has to start at the position, not later). But Javascript doesn't have that (or at least I didn't find it - feel free to suggest in the comments!), so I had to resort to a trick: first, all rule regexes are defined with a start anchor - &lt;tt class="docutils literal"&gt;^&lt;/tt&gt;. Second, the matching itself has to be done on a substring of the buffer, since &lt;tt class="docutils literal"&gt;^&lt;/tt&gt; matches only in the beginning of the buffer. Luckily, Javascript's &lt;tt class="docutils literal"&gt;substr&lt;/tt&gt; is very efficient so this didn't turn out to be a huge performance problem.&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;The above limitation made the code a bit more complex than I would've hoped for, but it's not really bad. The performance, on the other hand, is terrific. Running this on a recent version of Node.js (in other words, the V8 engine), it runs in 0.23 seconds, 5.3 times faster than the equivalent Python code and 2.5 times faster than even the optimized single-regex version.&lt;/p&gt;
+&lt;p&gt;But what about a single-regex version in Javascript. Here it is:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; Lexer = exports.Lexer = &lt;span style="color: #00007f; font-weight: bold"&gt;function&lt;/span&gt;(rules, skip_ws) {
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.rules = rules;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; regex_parts = [];
+  &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; (&lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; i = &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;; i &amp;lt; rules.length; ++i) {
+    regex_parts.push(&lt;span style="color: #7f007f"&gt;&amp;#39;(&amp;#39;&lt;/span&gt; + rules[i].pattern + &lt;span style="color: #7f007f"&gt;&amp;#39;)&amp;#39;&lt;/span&gt;);
+  }
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.regex = &lt;span style="color: #00007f; font-weight: bold"&gt;new&lt;/span&gt; &lt;span style="color: #00007f"&gt;RegExp&lt;/span&gt;(regex_parts.join(&lt;span style="color: #7f007f"&gt;&amp;#39;|&amp;#39;&lt;/span&gt;), &lt;span style="color: #7f007f"&gt;&amp;#39;g&amp;#39;&lt;/span&gt;);
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.skip_ws = skip_ws ? &lt;span style="color: #00007f; font-weight: bold"&gt;new&lt;/span&gt; &lt;span style="color: #00007f"&gt;RegExp&lt;/span&gt;(&lt;span style="color: #7f007f"&gt;&amp;#39;\\S&amp;#39;&lt;/span&gt;, &lt;span style="color: #7f007f"&gt;&amp;#39;g&amp;#39;&lt;/span&gt;) : &lt;span style="color: #00007f; font-weight: bold"&gt;null&lt;/span&gt;;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf = &lt;span style="color: #7f007f"&gt;&amp;#39;&amp;#39;&lt;/span&gt;;
+}
+
+&lt;span style="color: #007f00"&gt;// Initialize the Lexer&amp;#39;s buffer. This resets the lexer&amp;#39;s internal state and&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// subsequent tokens will be returned starting with the beginning of the new&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// buffer.&lt;/span&gt;
+Lexer.prototype.input = &lt;span style="color: #00007f; font-weight: bold"&gt;function&lt;/span&gt;(buf) {
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf = buf;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.regex.lastIndex = &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;;
+}
+
+&lt;span style="color: #007f00"&gt;// Get the next token from the current buffer. A token is an object with&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// the following properties:&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// - name: name of the pattern that this token matched (taken from rules).&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// - value: actual string value of the token.&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// - pos: offset in the current buffer where the token starts.&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;//&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// If there are no more tokens in the buffer, returns null.&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;// In case of an error, throws Error.&lt;/span&gt;
+Lexer.prototype.token = &lt;span style="color: #00007f; font-weight: bold"&gt;function&lt;/span&gt;() {
+  &lt;span style="color: #007f00"&gt;// End of input?&lt;/span&gt;
+  &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (&lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.regex.lastIndex &amp;gt;= &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf.length) {
+    &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;null&lt;/span&gt;;
+  }
+
+  &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (&lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.skip_ws) {
+    &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.skip_ws.lastIndex = &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.regex.lastIndex;
+    &lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; match = &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.skip_ws.exec(&lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf);
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (match) {
+      &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.regex.lastIndex = match.index;
+    } &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt; {
+      &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;null&lt;/span&gt;;
+    }
+  }
+
+  &lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; result = &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.regex.exec(&lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.buf);
+  &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (result === &lt;span style="color: #00007f; font-weight: bold"&gt;null&lt;/span&gt;) {
+    &lt;span style="color: #00007f; font-weight: bold"&gt;throw&lt;/span&gt; &lt;span style="color: #00007f"&gt;Error&lt;/span&gt;(&lt;span style="color: #7f007f"&gt;&amp;#39;Cannot match a token at position &amp;#39;&lt;/span&gt; + &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.lexer.lastIndex);
+  } &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt; {
+    &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; (&lt;span style="color: #00007f; font-weight: bold"&gt;var&lt;/span&gt; i = &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;; i &amp;lt; &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.rules.length; i++) {
+      &lt;span style="color: #007f00"&gt;// Find the matching rulea SO question&lt;/span&gt;
+      &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (result[i + &lt;span style="color: #007f7f"&gt;1&lt;/span&gt;] !== &lt;span style="color: #00007f; font-weight: bold"&gt;undefined&lt;/span&gt;) {
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; {name: &lt;span style="color: #00007f; font-weight: bold"&gt;this&lt;/span&gt;.rules[i].name,
+                value: result[&lt;span style="color: #007f7f"&gt;0&lt;/span&gt;], pos: result.index};
+      }
+    }
+    &lt;span style="color: #007f00"&gt;// Shouldn&amp;#39;t get here, because at least one rule matched.&lt;/span&gt;
+    &lt;span style="color: #00007f; font-weight: bold"&gt;throw&lt;/span&gt; &lt;span style="color: #00007f"&gt;Error&lt;/span&gt;(&lt;span style="color: #7f007f"&gt;&amp;#39;Internal error&amp;#39;&lt;/span&gt;);
+  }
+}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;You'll notice that the code here bends over backwards to overcome another annoying limitation of JS regexes. There are no named groups, and no way to quickly find out which group matched in a particular run, &lt;em&gt;without stupidly iterating over the results array&lt;/em&gt;! I was very surprised when I found this, and even asked &lt;a class="reference external" href="http://stackoverflow.com/questions/17149995/efficiently-find-which-group-matched-in-a-regexp-search"&gt;a SO question&lt;/a&gt;, where I was told that this is the way things are.&lt;/p&gt;
+&lt;p&gt;The loop over the results object in the end of the &lt;tt class="docutils literal"&gt;token&lt;/tt&gt; method really bothers me a lot. It's so useless! My benchmark Tablegen tokenizer has ~30 rules, many of which have to be iterated over for each matching token.&lt;/p&gt;
+&lt;p&gt;The performance, however, still became much better. This lexer runs the full benchmark in 0.15 seconds, 1.5 times faster than the multi-regex one, and 3.8 times faster than the Python equivalent. Note that the speedup here is smaller than the one experienced by the Python version - I attribute it to the silly result looping :-)&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="conclusion"&gt;
+&lt;h3&gt;Conclusion&lt;/h3&gt;
+&lt;p&gt;This lexer turned out to be a good exercise of the language's regex capabilities. Back in the day, it helped me learn some tricks in the original Python implementation (such as optimizing regexes by combining them into a single one, and also named groups). It also made me run into a couple of deficiencies of JS's regex handling when I was porting the code. And to run into a deficiency you really need to scour the docs and examples carefully making sure you're not missing anything. As I mentioned above already - I'm very interested in feedback - if anything can be done differently, please let me know.&lt;/p&gt;
+&lt;p&gt;Also, the performance comparison was interesting. Here it is again, in more graphical form:&lt;/p&gt;
+&lt;img class="align-center" src="https://eli.thegreenplace.net/images/2013/06/lexer_runtime_chart.png" /&gt;
+&lt;p&gt;There's no doubt that the popularity of Javascript has paid off. Huge efforts were spent by hordes of smart programmers &lt;em&gt;paid to optimize Javascript&lt;/em&gt; and the results are obvious. Even in a benchmark where one wouldn't expect the difference between languages to be large - because it's mostly a regex workload, and regexes are presumably implemented similarly deep down in the C/C++ layer - Javascript V8 effortlessly blows (C)Python out of the water.&lt;/p&gt;
+&lt;/div&gt;
+
+    </content><category term="misc"></category><category term="Compilation"></category><category term="Javascript"></category><category term="Python"></category><category term="Lexer"></category></entry></feed>

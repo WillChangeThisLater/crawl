@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>itoa (integer to string) in WebAssembly - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to itoa (integer to string) in WebAssembly">
+                        itoa (integer to string) in WebAssembly
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> April 17, 2023 at 20:09</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/webassembly.html">WebAssembly</a>
+        ,
+    <a href="../../tag/assembly.html">Assembly</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p><strong>Update (2023-04-22)</strong>: here's a repository with many WAT code samples,
+including this one: <a class="reference external" href="https://github.com/eliben/wasm-wat-samples">wasm-wat-samples</a>.</p>
+<p>This is a brief blog post that mostly consists of a single, well-documented code
+snippet.</p>
+<p>I've been getting more and more interested
+<a class="reference external" href="../../tag/webassembly.html">in WebAssembly recently</a>,
+and found there's a dearth of high-quality WAT (<em>WebAssembly Text</em>
+language) code samples dealing with some of the trickier aspects of WASM like
+working with strings and passing data between WASM and the host <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a> via memory.</p>
+<p>So here's a complete WASM module written in WAT that exports an <tt class="docutils literal">itoa</tt>
+function -- just like its C counterpart, it converts an integer into a string
+representation:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="k">module</span>
+    <span class="c1">;; Logging function imported from the environment; will print a single</span>
+    <span class="c1">;; i32.</span>
+    <span class="p">(</span><span class="k">import</span> <span class="s2">&quot;env&quot;</span> <span class="s2">&quot;log&quot;</span> <span class="p">(</span><span class="k">func</span> <span class="nv">$log</span> <span class="p">(</span><span class="k">param</span> <span class="kt">i32</span><span class="p">)))</span>
+
+    <span class="c1">;; Declare linear memory and export it to host. The offset returned by</span>
+    <span class="c1">;; $itoa is relative to this memory.</span>
+    <span class="p">(</span><span class="k">memory</span> <span class="p">(</span><span class="k">export</span> <span class="s2">&quot;memory&quot;</span><span class="p">)</span> <span class="mi">1</span><span class="p">)</span>
+
+    <span class="c1">;; Using some memory for a number--&gt;digit ASCII lookup-table, and then the</span>
+    <span class="c1">;; space for writing the result of $itoa.</span>
+    <span class="p">(</span><span class="k">data</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mf">8000</span><span class="p">)</span> <span class="s2">&quot;0123456789&quot;</span><span class="p">)</span>
+    <span class="p">(</span><span class="k">global</span> <span class="nv">$itoa_out_buf</span> <span class="kt">i32</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mf">8010</span><span class="p">))</span>
+
+    <span class="c1">;; itoa: convert an integer to its string representation. Only supports</span>
+    <span class="c1">;; numbers &gt;= 0.</span>
+    <span class="c1">;; Parameter: the number to convert</span>
+    <span class="c1">;; Result: address and length of string in memory.</span>
+    <span class="c1">;; Note: this result is only valid until the next call to $itoa which will</span>
+    <span class="c1">;; overwrite it; obviously, this isn&#39;t concurrency-safe either.</span>
+    <span class="p">(</span><span class="k">func</span> <span class="nv">$itoa</span> <span class="p">(</span><span class="k">export</span> <span class="s2">&quot;itoa&quot;</span><span class="p">)</span> <span class="p">(</span><span class="k">param</span> <span class="nv">$num</span> <span class="kt">i32</span><span class="p">)</span> <span class="p">(</span><span class="k">result</span> <span class="kt">i32</span> <span class="kt">i32</span><span class="p">)</span>
+        <span class="p">(</span><span class="k">local</span> <span class="nv">$numtmp</span> <span class="kt">i32</span><span class="p">)</span>
+        <span class="p">(</span><span class="k">local</span> <span class="nv">$numlen</span> <span class="kt">i32</span><span class="p">)</span>
+        <span class="p">(</span><span class="k">local</span> <span class="nv">$writeidx</span> <span class="kt">i32</span><span class="p">)</span>
+        <span class="p">(</span><span class="k">local</span> <span class="nv">$digit</span> <span class="kt">i32</span><span class="p">)</span>
+        <span class="p">(</span><span class="k">local</span> <span class="nv">$dchar</span> <span class="kt">i32</span><span class="p">)</span>
+
+        <span class="c1">;; Count the number of characters in the output, save it in $numlen.</span>
+        <span class="p">(</span><span class="nb">i32.lt_s</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$num</span><span class="p">)</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">10</span><span class="p">))</span>
+        <span class="k">if</span>
+            <span class="p">(</span><span class="nb">local.set</span> <span class="nv">$numlen</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">1</span><span class="p">))</span>
+        <span class="k">else</span>
+            <span class="p">(</span><span class="nb">local.set</span> <span class="nv">$numlen</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">0</span><span class="p">))</span>
+            <span class="p">(</span><span class="nb">local.set</span> <span class="nv">$numtmp</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$num</span><span class="p">))</span>
+            <span class="p">(</span><span class="k">loop</span> <span class="nv">$countloop</span> <span class="p">(</span><span class="k">block</span> <span class="nv">$breakcountloop</span>
+                <span class="p">(</span><span class="nb">i32.eqz</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$numtmp</span><span class="p">))</span>
+                <span class="nb">br_if</span> <span class="nv">$breakcountloop</span>
+
+                <span class="p">(</span><span class="nb">local.set</span> <span class="nv">$numtmp</span> <span class="p">(</span><span class="nb">i32.div_u</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$numtmp</span><span class="p">)</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">10</span><span class="p">)))</span>
+                <span class="p">(</span><span class="nb">local.set</span> <span class="nv">$numlen</span> <span class="p">(</span><span class="nb">i32.add</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$numlen</span><span class="p">)</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">1</span><span class="p">)))</span>
+                <span class="nb">br</span> <span class="nv">$countloop</span>
+            <span class="p">))</span>
+        <span class="k">end</span>
+
+        <span class="c1">;; Now that we know the length of the output, we will start populating</span>
+        <span class="c1">;; digits into the buffer. E.g. suppose $numlen is 4:</span>
+        <span class="c1">;;</span>
+        <span class="c1">;;                     _  _  _  _</span>
+        <span class="c1">;;</span>
+        <span class="c1">;;                     ^        ^</span>
+        <span class="c1">;;  $itoa_out_buf -----|        |---- $writeidx</span>
+        <span class="c1">;;</span>
+        <span class="c1">;;</span>
+        <span class="c1">;; $writeidx starts by pointing to $itoa_out_buf+3 and decrements until</span>
+        <span class="c1">;; all the digits are populated.</span>
+        <span class="p">(</span><span class="nb">local.set</span> <span class="nv">$writeidx</span>
+            <span class="p">(</span><span class="nb">i32.sub</span>
+                <span class="p">(</span><span class="nb">i32.add</span> <span class="p">(</span><span class="nb">global.get</span> <span class="nv">$itoa_out_buf</span><span class="p">)</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$numlen</span><span class="p">))</span>
+                <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">1</span><span class="p">)))</span>
+
+        <span class="p">(</span><span class="k">loop</span> <span class="nv">$writeloop</span> <span class="p">(</span><span class="k">block</span> <span class="nv">$breakwriteloop</span>
+            <span class="c1">;; digit &lt;- $num % 10</span>
+            <span class="p">(</span><span class="nb">local.set</span> <span class="nv">$digit</span> <span class="p">(</span><span class="nb">i32.rem_u</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$num</span><span class="p">)</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">10</span><span class="p">)))</span>
+            <span class="c1">;; set the char value from the lookup table of digit chars</span>
+            <span class="p">(</span><span class="nb">local.set</span> <span class="nv">$dchar</span> <span class="p">(</span><span class="nb">i32.load8_u</span> <span class="k">offset</span><span class="o">=</span><span class="mi">8000</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$digit</span><span class="p">)))</span>
+
+            <span class="c1">;; mem[writeidx] &lt;- dchar</span>
+            <span class="p">(</span><span class="nb">i32.store8</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$writeidx</span><span class="p">)</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$dchar</span><span class="p">))</span>
+
+            <span class="c1">;; num &lt;- num / 10</span>
+            <span class="p">(</span><span class="nb">local.set</span> <span class="nv">$num</span> <span class="p">(</span><span class="nb">i32.div_u</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$num</span><span class="p">)</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">10</span><span class="p">)))</span>
+
+            <span class="c1">;; If after writing a number we see we wrote to the first index in</span>
+            <span class="c1">;; the output buffer, we&#39;re done.</span>
+            <span class="p">(</span><span class="nb">i32.eq</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$writeidx</span><span class="p">)</span> <span class="p">(</span><span class="nb">global.get</span> <span class="nv">$itoa_out_buf</span><span class="p">))</span>
+            <span class="nb">br_if</span> <span class="nv">$breakwriteloop</span>
+
+            <span class="p">(</span><span class="nb">local.set</span> <span class="nv">$writeidx</span> <span class="p">(</span><span class="nb">i32.sub</span> <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$writeidx</span><span class="p">)</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">1</span><span class="p">)))</span>
+            <span class="nb">br</span> <span class="nv">$writeloop</span>
+        <span class="p">))</span>
+
+        <span class="c1">;; return (itoa_out_buf, numlen)</span>
+        <span class="p">(</span><span class="nb">global.get</span> <span class="nv">$itoa_out_buf</span><span class="p">)</span>
+        <span class="p">(</span><span class="nb">local.get</span> <span class="nv">$numlen</span><span class="p">)</span>
+    <span class="p">)</span>
+<span class="p">)</span>
+</pre></div>
+<p>Some notes about this code:</p>
+<ul class="simple">
+<li><tt class="docutils literal">itoa</tt> uses the <a class="reference external" href="https://github.com/WebAssembly/multi-value">multi-value</a>
+feature of WASM to return multiple values. This feature is supported pretty
+<a class="reference external" href="https://webassembly.org/roadmap/">uniformly by WASM hosts</a> at this point.</li>
+<li><tt class="docutils literal">itoa</tt> writes its string output into memory, and returns the address of this
+string and its length to the host. This address (in WASM's linear memory) is
+currently hard-coded; there is no dynamic memory allocation built into WASM.
+It's possible to implement it, and higher-level languages do, but for a simple
+examples this will do.</li>
+<li>The module exports its linear memory to the host so that the host can read
+the string <tt class="docutils literal">itoa</tt> wrote.</li>
+<li>The algorithm is straightforward and unoptimized; it runs one O(log(N)) loop
+to find the output size, and another such loop to populate the output.</li>
+</ul>
+<p>For the accompanying host code and instructions for compiling &amp; running, see
+<a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2023/wasm-itoa">the GitHub repository</a>.</p>
+<div class="section" id="exercises">
+<h2>Exercises</h2>
+<p>The <tt class="docutils literal">itoa</tt> function presented here has a few limitations that can be fixed
+without too much effort; if you're interested in WAT programming, these could
+be good exercises:</p>
+<ul class="simple">
+<li>Extend it to support negative numbers</li>
+<li>Extend it to work for other common bases like hexadecimal (will require an
+additional parameter).</li>
+</ul>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>A note on nomenclature: by <em>host</em> I mean the execution environment a
+WASM module runs in. The most common environment is a web browser, but
+recently it's more and more common to see WASM executed in non-browser
+environments like Node.js, wasmtime (Rust) or wazero (Go).</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

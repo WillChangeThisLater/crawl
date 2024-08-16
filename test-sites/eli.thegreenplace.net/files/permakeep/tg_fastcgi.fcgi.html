@@ -1,0 +1,92 @@
+#!/usr/bin/python
+#
+# File name: tg_fastcgi.fcgi
+#
+# This module provides the glue for running TurboGears applications behind 
+# FastCGI-enabled web servers. 
+#
+
+import cherrypy
+import sys
+import os
+from os.path import *
+import pkg_resources
+import turbogears
+
+pkg_resources.require("TurboGears")
+
+# -- START USER EDIT SECTION
+# -- Users must edit this section -- 
+code_dir = '/home/user/Wiki20'                   # (Required) The base directory of the TG app code.
+root_class_name = 'wiki20.controllers.Root'      # (Required) The fully qualified Root class name.
+project_module_name = 'wiki20.config'            # (Required) The config module name.
+tg_fastcgi_url = '/scripts/tg/tg_fastcgi.fcgi'   # (Required) Web-path of this script
+log_dir = ''                                     # (Optional) The log directory. Default = code_dir.
+
+# -- END USER EDIT SECTION
+
+def tg_init():
+    """ Checks for the required data and initializes the application. """
+
+    global code_dir
+    global root_class_name
+    global log_dir
+    global project_module_name
+    last_mark = 0
+
+    # Input checks
+    if not code_dir or not isdir(code_dir):
+        raise ValueError("""The code directory setting is missing.
+                            The fastcgi code will be unable to find
+                            the TG code without this setting.""")
+
+    if not root_class_name:
+        raise ValueError("""The fully qualified root class name must
+                            be provided.""")
+
+    last_mark = root_class_name.rfind('.')
+    
+    if (last_mark < 1) or (last_mark + 1) == len(root_class_name):
+        raise ValueError("""The user-defined class name is invalid.
+                            Please make sure to include a fully
+                            qualified class name for the root_class
+                            value (e.g. wiki20.controllers.Root).""")    
+
+    sys.path.append(code_dir)
+
+    # Change the directory so the TG log file will not be written to the
+    # web app root.
+    if log_dir and isdir(log_dir):
+        os.chdir(log_dir)
+    else:
+        os.chdir(code_dir)
+        log_dir = code_dir
+
+    sys.stdout = open(join(log_dir, 'stdout.log'),'a')
+    sys.stderr = open(join(log_dir, 'stderr.log'),'a')        
+
+    # This loads the dev.cfg configuration file
+    turbogears.update_config(
+        configfile=join(code_dir, "dev.cfg"),
+        modulename=project_module_name)
+
+    # Set environment to production to disable auto-reload and
+    # add virutal path information.
+    cherrypy.config.update({
+        'global': {'server.environment': 'production'}})
+
+    # Parse out the root class information for Cherrypy Root class.
+    package_name = root_class_name[:last_mark]
+    class_name = root_class_name[last_mark+1:]
+    exec('from %s import %s as Root' % (package_name, class_name))
+    cherrypy.root = Root()
+
+# Main section -
+# Initialize the application, then start the server.
+tg_init()
+
+from flup.server.fcgi import WSGIServer
+cherrypy.server.start(initOnly=True, serverClass=None)
+
+from cherrypy._cpwsgi import wsgiApp
+WSGIServer(application=wsgiApp).run()

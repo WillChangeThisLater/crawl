@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Launching Linux threads and processes with clone - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Launching Linux threads and processes with clone">
+                        Launching Linux threads and processes with clone
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> August 01, 2018 at 06:14</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/concurrency.html">Concurrency</a>
+        ,
+    <a href="../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../tag/linux.html">Linux</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>Due to variation between operating systems and the way OS courses are taught,
+some programmers may have an outdated mental model about the difference between
+processes and threads in Linux. Even the name &quot;thread&quot; suggests something
+extremely lightweight compared to a heavy &quot;process&quot; - a mostly wrong intuition.</p>
+<p>In fact, for the Linux kernel itself there's absolutely no difference between
+what userspace sees as processes (the result of <tt class="docutils literal">fork</tt>) and as threads (the
+result of <tt class="docutils literal">pthread_create</tt>). Both are represented by the same data structures
+and scheduled similarly. In kernel nomenclature this is called <em>tasks</em> (the
+main structure representing a task in the kernel is
+<a class="reference external" href="https://github.com/torvalds/linux/blob/master/include/linux/sched.h">task_struct</a>),
+and I'll be using this term from now on.</p>
+<p>In Linux, threads are just tasks that share some resources, most notably their
+memory space; processes, on the other hand, are tasks that don't share
+resources. For application programmers, proceses and threads are created and
+managed in very different ways. For processes there's a slew of
+process-management APIs like <tt class="docutils literal">fork</tt>, <tt class="docutils literal">wait</tt> and so on. For threads there's
+the <tt class="docutils literal">pthread</tt> library. However, deep in the guts of these APIs and libraries,
+both processes and threads come into existence through a single Linux system
+call - <tt class="docutils literal">clone</tt>.</p>
+<div class="section" id="the-clone-system-call">
+<h2>The <tt class="docutils literal">clone</tt> system call</h2>
+<p>We can think of <tt class="docutils literal">clone</tt> as the unifying implementation shared between
+processes and threads. Whatever perceived difference there is between
+processes and threads on Linux is achieved through passing different flags to
+<tt class="docutils literal">clone</tt>. Therefore, it's most useful to think of processes and threads not
+as two completely different concepts, but rather as two variants of the same
+concept - starting a concurrent task. The differences are mostly about what is
+shared between this new task and the task that started it.</p>
+<p><a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2018/clone/clone-vm-sample.c">Here is a code sample</a>
+demonstrating the most important sharing aspect of threads - memory. It uses
+<tt class="docutils literal">clone</tt> in two ways, once with the <tt class="docutils literal">CLONE_VM</tt> flag and once without.
+<tt class="docutils literal">CLONE_VM</tt> tells <tt class="docutils literal">clone</tt> to share the virtual memory between the calling
+task and the new task <tt class="docutils literal">clone</tt> is about to create <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>. As we'll see later on,
+this is the flag used by <tt class="docutils literal">pthread_create</tt>:</p>
+<div class="highlight"><pre><span></span><span class="k">static</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="nf">child_func</span><span class="p">(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">arg</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">buf</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="p">)</span><span class="n">arg</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Child sees buf = </span><span class="se">\&quot;</span><span class="s">%s</span><span class="se">\&quot;\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">buf</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">strcpy</span><span class="p">(</span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;hello from child&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="o">**</span><span class="w"> </span><span class="n">argv</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Allocate stack for child task.</span>
+<span class="w">  </span><span class="k">const</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">STACK_SIZE</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">65536</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">stack</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">malloc</span><span class="p">(</span><span class="n">STACK_SIZE</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">stack</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">perror</span><span class="p">(</span><span class="s">&quot;malloc&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">exit</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// When called with the command-line argument &quot;vm&quot;, set the CLONE_VM flag on.</span>
+<span class="w">  </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">flags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">argc</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="n">strcmp</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span><span class="w"> </span><span class="s">&quot;vm&quot;</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">flags</span><span class="w"> </span><span class="o">|=</span><span class="w"> </span><span class="n">CLONE_VM</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="kt">char</span><span class="w"> </span><span class="n">buf</span><span class="p">[</span><span class="mi">100</span><span class="p">];</span><span class="w"></span>
+<span class="w">  </span><span class="n">strcpy</span><span class="p">(</span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;hello from parent&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">clone</span><span class="p">(</span><span class="n">child_func</span><span class="p">,</span><span class="w"> </span><span class="n">stack</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">STACK_SIZE</span><span class="p">,</span><span class="w"> </span><span class="n">flags</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">SIGCHLD</span><span class="p">,</span><span class="w"> </span><span class="n">buf</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">perror</span><span class="p">(</span><span class="s">&quot;clone&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">exit</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">status</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">wait</span><span class="p">(</span><span class="o">&amp;</span><span class="n">status</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">perror</span><span class="p">(</span><span class="s">&quot;wait&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">exit</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Child exited with status %d. buf = </span><span class="se">\&quot;</span><span class="s">%s</span><span class="se">\&quot;\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">status</span><span class="p">,</span><span class="w"> </span><span class="n">buf</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Some things to note when <tt class="docutils literal">clone</tt> is invoked:</p>
+<ol class="arabic simple">
+<li>It takes a function pointer to the code the new task will run, similarly
+to threading APIs, and unlike the <tt class="docutils literal">fork</tt> API. This is the glibc
+wrapper for <tt class="docutils literal">clone</tt>. There's also a raw system call which is discussed
+below.</li>
+<li>The stack for the new task has to be allocated by the parent and passed into
+<tt class="docutils literal">clone</tt>.</li>
+<li>The <tt class="docutils literal">SIGCHLD</tt> flag tells the kernel to send the <tt class="docutils literal">SIGCHLD</tt> to the parent
+when the child terminates, which lets the parent use the plain <tt class="docutils literal">wait</tt> call
+to wait for the child to exit. This is the only flag the sample passes into
+<tt class="docutils literal">clone</tt> by default.</li>
+</ol>
+<p>This code sample passes a buffer into the child, and the child writes a string
+into it. When called without the <tt class="docutils literal">vm</tt> command-line argument, the <tt class="docutils literal">CLONE_VM</tt>
+flag is off, and the parent's virtual memory is copied into the child. The child
+sees the message the parent placed in <tt class="docutils literal">buf</tt>, but whatever it writes into
+<tt class="docutils literal">buf</tt> goes into its own copy and the parent can't see it. Here's the output:</p>
+<div class="highlight"><pre><span></span>$ ./clone-vm-sample
+Child sees buf = &quot;hello from parent&quot;
+Child exited with status 0. buf = &quot;hello from parent&quot;
+</pre></div>
+<p>But when the <tt class="docutils literal">vm</tt> argument is passed, <tt class="docutils literal">CLONE_VM</tt> is set and the child
+task shares the parent's memory. Its writing into <tt class="docutils literal">buf</tt> will now be observable
+from the parent:</p>
+<div class="highlight"><pre><span></span>$ ./clone-vm-sample vm
+Child sees buf = &quot;hello from parent&quot;
+Child exited with status 0. buf = &quot;hello from child&quot;
+</pre></div>
+<p>A bunch of other <tt class="docutils literal">CLONE_*</tt> flags can specify other things that will be shared
+with the parent: <tt class="docutils literal">CLONE_FILES</tt> will share the open file descriptors,
+<tt class="docutils literal">CLONE_SIGHAND</tt> will share the signal dispositions, and so on.</p>
+<p>Other flags are there to implement the semantics required by POSIX threads. For
+example, <tt class="docutils literal">CLONE_THREAD</tt> asks the kernel to assign the same <em>thread group id</em>
+to the child as to the parent, in order to comply with POSIX's requirement of
+all threads in a process sharing a single process ID <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.</p>
+</div>
+<div class="section" id="calling-clone-in-process-and-thread-creation">
+<h2>Calling <tt class="docutils literal">clone</tt> in process and thread creation</h2>
+<p>Let's dig through some code in glibc to see how <tt class="docutils literal">clone</tt> is invoked, starting
+with <tt class="docutils literal">fork</tt>, which is routed to <tt class="docutils literal">__libc_fork</tt> in <tt class="docutils literal">sysdeps/nptl/fork.c</tt>. The
+actual implementation is specific to the threading library, hence the location
+in the <tt class="docutils literal">nptl</tt> folder. The first thing <tt class="docutils literal">__libc_fork</tt> does is invoke the
+<em>fork handlers</em> potentially registered beforehead with <tt class="docutils literal">pthread_atfork</tt>.</p>
+<p>The actual cloning happens with:</p>
+<div class="highlight"><pre><span></span><span class="n">pid</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ARCH_FORK</span><span class="w"> </span><span class="p">();</span><span class="w"></span>
+</pre></div>
+<p>Where <tt class="docutils literal">ARCH_FORK</tt> is a macro defined per architecture (exact syscall ABIs are
+architecture-specific). For <tt class="docutils literal">x86_64</tt> it maps to:</p>
+<div class="highlight"><pre><span></span>#define ARCH_FORK() \
+  INLINE_SYSCALL (clone, 4,                                                   \
+                  CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | SIGCHLD, 0,     \
+                  NULL, &amp;THREAD_SELF-&gt;tid)
+</pre></div>
+<p>The <tt class="docutils literal">CLONE_CHILD_*</tt> flags are useful for some threading libraries (though not
+the default on Linux today - NPTL). Otherwise, the invocation is very similar
+to the <tt class="docutils literal">clone</tt> code sample shown in the previous section.</p>
+<p>You may wonder where is the function pointer in this call. Nice catch! This is
+the <em>raw call</em> version of <tt class="docutils literal">clone</tt>, where execution continues from the point
+of the call in both parent and child - close to the usual semantics of <tt class="docutils literal">fork</tt>.</p>
+<p>Now let's turn to <tt class="docutils literal">pthread_create</tt>. Through a dizzying chain of macros it
+reaches a function named <tt class="docutils literal">create_thread</tt> (defined in
+<tt class="docutils literal">sysdeps/unix/sysv/linux/createthread.c</tt>) that calls <tt class="docutils literal">clone</tt> with:</p>
+<div class="highlight"><pre><span></span><span class="k">const</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">clone_flags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">CLONE_VM</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">CLONE_FS</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">CLONE_FILES</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">CLONE_SYSVSEM</span><span class="w"></span>
+<span class="w">                       </span><span class="o">|</span><span class="w"> </span><span class="n">CLONE_SIGHAND</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">CLONE_THREAD</span><span class="w"></span>
+<span class="w">                       </span><span class="o">|</span><span class="w"> </span><span class="n">CLONE_SETTLS</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">CLONE_PARENT_SETTID</span><span class="w"></span>
+<span class="w">                       </span><span class="o">|</span><span class="w"> </span><span class="n">CLONE_CHILD_CLEARTID</span><span class="w"></span>
+<span class="w">                       </span><span class="o">|</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+
+<span class="n">ARCH_CLONE</span><span class="w"> </span><span class="p">(</span><span class="o">&amp;</span><span class="n">start_thread</span><span class="p">,</span><span class="w"> </span><span class="n">STACK_VARIABLES_ARGS</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="n">clone_flags</span><span class="p">,</span><span class="w"> </span><span class="n">pd</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">pd</span><span class="o">-&gt;</span><span class="n">tid</span><span class="p">,</span><span class="w"> </span><span class="n">tp</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">pd</span><span class="o">-&gt;</span><span class="n">tid</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>Browse through <tt class="docutils literal">man 2 clone</tt> to understand the flags passed into the call.
+Briefly, it is asked to share the virtual memory, file system, open files,
+shared memory and signal handlers with the parent thread/process. Additional
+flags are passed to implement proper identification - all threads launched from
+a single process have to share its <em>process ID</em> to be POSIX compliant.</p>
+<p>Reading the glibc source code is quite an exercise in mental resilience, but
+it's really interesting to see how everything fits together &quot;in the real world&quot;.</p>
+</div>
+<div class="section" id="benchmarking-process-vs-thread-creation">
+<h2>Benchmarking process vs. thread creation</h2>
+<p>Given the information presented earlier in the post, I would expect process
+creation to be somewhat more expensive than thread creation, but not
+dramatically so. Since <tt class="docutils literal">fork</tt> and <tt class="docutils literal">pthread_create</tt> route to the same system
+call in Linux, the difference would come from the different
+flags they pass in. When <tt class="docutils literal">pthread_create</tt> passes all these <tt class="docutils literal">CLONE_*</tt> flags,
+it tells the kernel there's no need to copy the virtual memory image, the open
+files, the signal handlers, and so on. Obviously, this saves time.</p>
+<p>For processes, there's a bit of copying to be done when <tt class="docutils literal">fork</tt> is invoked,
+which costs time. The biggest chunk of time probably goes to copying the memory
+image due to the lack of <tt class="docutils literal">CLONE_VM</tt>. Note, however, that it's not just copying
+the whole memory; Linux has an important optimization by using COW (Copy On
+Write) pages. The child's memory pages are initially mapped to the same pages
+shared by the parent, and only when we modify them the copy happens. This is
+very important because processes will often use a lot of shared read-only memory
+(think of the global structures used by the standard library, for example).</p>
+<p>That said, the <a class="reference external" href="https://en.wikipedia.org/wiki/Page_table">page tables</a> still
+have to be copied. The size of a process's page tables can be observed by
+looking in <tt class="docutils literal"><span class="pre">/proc/&lt;pid&gt;/status</span></tt> - the <tt class="docutils literal">VmPTE</tt> indicator. These can be around
+tens of kilobytes for small processes, and higher for larger processes. Not a
+lot of data to copy, but definitely some extra work for the CPU.</p>
+<p>I wrote a <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2018/clone/launch-benchmark.c">benchmark</a>
+that times process and threads launches, as a function of the virtual memory
+allocated before <tt class="docutils literal">fork</tt> or <tt class="docutils literal">pthread_create</tt>. The launch is averaged over
+10,000 instances to remove warm-up effects and jitter:</p>
+<img alt="Launch time for fork/thread as function of memory image" class="align-center" src="../../images/2018/launch-fork-thread.png" />
+<p>Several things to note:</p>
+<ol class="arabic simple">
+<li>Indeed, launching processes is slower than threads, 35 vs. 5 microseconds for
+a 2-MB heap. But it's still very fast! 35 <em>micro</em>-seconds is not a lot of
+time at all. If your latency budget is willing to tolerate a 5 us overhead,
+it will almost certainly be fine with a 35 us overhead, unless you're working
+on some super-tight hard realtime system (in which case you shouldn't be
+using Linux!)</li>
+<li>As expected, the time to launch a process when the heap is larger grows. The
+time delta is the time needed to copy the extra page table entries. For
+threads, on the other hand, there is absolutely no difference since the
+memory is completely shared.</li>
+</ol>
+<p>Interestingly, it's easy to observe from these numbers that not the whole memory
+image is being copied. On the same machine this benchmark was run on, just a
+simple <tt class="docutils literal">memcpy</tt> of 2 MB takes over 60 us, so it couldn't have copied 2 MB of
+heap to the child in the 30 us difference. Copying 64K (a reasonable size for a
+page table) takes 3 us, which makes sense because the cloning involves more than
+a simple <tt class="docutils literal">memcpy</tt>. To me this is another sign of how fast these launches are,
+since we're in the same ballpark of performance with modestly sized memory
+copies.</p>
+<p>Creation time is not the only performance benchmark of importance. It's also
+interesting to measure how long it takes to switch context between tasks when
+using threads or processes. <a class="reference external" href="../measuring-context-switching-and-memory-overheads-for-linux-threads/index.html">This is covered in another post</a>.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>It may be just me, but I find this terminology a bit confusing. In my
+mind the word <em>clone</em> is synonymous to <em>copy</em>, so when we turn on
+a flag named &quot;clone the VM&quot; I'd expect the VM to be copied rather than
+shared. IMHO it would be clearer if this flag was named <tt class="docutils literal">SHARE_VM</tt>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>It's certainly interesting to see this evolution of concepts over time.
+Thread APIs were defined in times where there was a real difference
+between processes and threads and their design reflects that. In modern
+Linux the kernel has to bend over backwards to provide the <em>illusion</em>
+of the difference although very little of it exists.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

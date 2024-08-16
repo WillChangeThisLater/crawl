@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Python internals: Symbol tables, part 1 - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../../index.html" class="navbar-brand">
+                <img src="../../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="../python-internals-symbol-tables-part-1.html"
+                       rel="bookmark"
+                       title="Permalink to Python internals: Symbol tables, part 1">
+                        Python internals: Symbol tables, part 1
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> September 18, 2010 at 08:03</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../../tag/python-internals.html">Python internals</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <div class="section" id="introduction">
+<h3>Introduction</h3>
+<p>This article is the first in a short series in which I intend to explain how CPython <a class="footnote-reference" href="index.html#id5" id="id1">[1]</a> implements and uses symbol tables in its quest to compile Python source code into bytecode. In this part I will explain what a symbol table is and show how the general concepts apply to Python. In the second part I will delve into the implementation of symbol tables in the core of CPython.</p>
+</div>
+<div class="section" id="so-what-is-a-symbol-table">
+<h3>So what is a symbol table?</h3>
+<p>As usual, it's hard to beat <a class="reference external" href="http://en.wikipedia.org/wiki/Symbol_table">Wikipedia</a> for a succinct definition:</p>
+<blockquote>
+In computer science, a symbol table is a data structure used by a language translator such as a compiler or interpreter, where each identifier in a program's source code is associated with information relating to its declaration or appearance in the source, such as its type, scope level and sometimes its location.</blockquote>
+<p>Symbol tables are used by practically all compilers. They're especially important in statically typed languages where all variables have types and type checking by the compiler is an important part of the front-end.</p>
+<p>Consider this C code:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">main</span>()
+{
+    <span style="color: #00007f; font-weight: bold">int</span> aa, bb;
+
+    bb = *aa;
+
+    {
+        <span style="color: #00007f; font-weight: bold">int</span>* aa;
+        bb = *aa;
+    }
+
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">0</span>;
+}
+</pre></div>
+<p>There are two distinct assignments of the form <tt class="docutils literal"><span class="pre">bb</span> <span class="pre">=</span> <span class="pre">*aa</span></tt> here, but only the second one is legal. The compiler throws the following error when it sees the first one:</p>
+<div class="highlight"><pre>error: invalid type argument of ‘unary *’ (have ‘int’)
+</pre></div>
+<p>How does the compiler know that the <tt class="docutils literal"><span class="pre">*</span></tt> operator is given an argument of type <tt class="docutils literal"><span class="pre">int</span></tt>, which is invalid for this operator? The answer is: the symbol table. The compiler sees <tt class="docutils literal"><span class="pre">*aa</span></tt> and asks itself what the type of <tt class="docutils literal"><span class="pre">aa</span></tt> is. To answer this question it consults the symbol table it constructed earlier. The symbol table contains the declared types for all variables the compiler encountered in the code.</p>
+<p>This example demonstrates another important concept - for most languages a single symbol table with information about all variables won't do. The second assignment <em>is</em> valid, because in the internal scope created by the curly braces <tt class="docutils literal"><span class="pre">aa</span></tt> is redefined to be of a pointer type. Thus, to correctly compile such code the C compiler has to keep a separate symbol table per scope <a class="footnote-reference" href="index.html#id6" id="id2">[2]</a>.</p>
+</div>
+<div class="section" id="a-digression-variables-in-python">
+<h3>A digression: &quot;variables&quot; in Python</h3>
+<p>So far I've been using the term &quot;variable&quot; liberally. Just to be on the safe side, let's clarify what is meant by <em>variable</em> in Python. Formally, Python doesn't really have variables in the sense C has. Rather, Python has symbolic names bound to objects:</p>
+<div class="highlight"><pre>aa = [<span style="color: #007f7f">1</span>, <span style="color: #007f7f">2</span>, <span style="color: #007f7f">3</span>]
+bb = aa
+aa[<span style="color: #007f7f">0</span>] = <span style="color: #007f7f">666</span>
+</pre></div>
+<p>In this code, <tt class="docutils literal"><span class="pre">aa</span></tt> is a name bound to a list object. <tt class="docutils literal"><span class="pre">bb</span></tt> is a name bound to the same object. The third line modifies the list through <tt class="docutils literal"><span class="pre">aa</span></tt>, and if we print out <tt class="docutils literal"><span class="pre">bb</span></tt> we'll see the modified list as well.</p>
+<p>Now, once this is understood, I will still use the term &quot;variable&quot; from time to time since it's occasionally convenient and everybody's used to it anyway.</p>
+</div>
+<div class="section" id="symbol-tables-for-python-code">
+<h3>Symbol tables for Python code</h3>
+<p>Alright, so symbol tables are very useful for type checking. But Python doesn't have compile-time type checking (duck typing FTW!), so what does CPython need symbol tables for?</p>
+<p>The CPython compiler still has to resolve what kinds of variables are used in the code. Variables in Python can be local, global or even bound by a lexically enclosing scope. For example:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">outer</span>(aa):
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">inner</span>():
+        bb = <span style="color: #007f7f">1</span>
+        <span style="color: #00007f; font-weight: bold">return</span> aa + bb + cc
+    <span style="color: #00007f; font-weight: bold">return</span> inner
+</pre></div>
+<p>The function <tt class="docutils literal"><span class="pre">inner</span></tt> uses three variables: <tt class="docutils literal"><span class="pre">aa</span></tt>, <tt class="docutils literal"><span class="pre">bb</span></tt> and <tt class="docutils literal"><span class="pre">cc</span></tt>. They're all different from Python's point of view: <tt class="docutils literal"><span class="pre">aa</span></tt> is lexically bound in <tt class="docutils literal"><span class="pre">outer</span></tt>, <tt class="docutils literal"><span class="pre">bb</span></tt> is locally bound in <tt class="docutils literal"><span class="pre">inner</span></tt> itself, and <tt class="docutils literal"><span class="pre">cc</span></tt> is not bound anywhere in sight, so it's treated as global. The bytecode generated for <tt class="docutils literal"><span class="pre">inner</span></tt> shows clearly the different treatment of these variables:</p>
+<div class="highlight"><pre>5           0 LOAD_CONST               1 (1)
+            3 STORE_FAST               0 (bb)
+
+6           6 LOAD_DEREF               0 (aa)
+            9 LOAD_FAST                0 (bb)
+           12 BINARY_ADD
+           13 LOAD_GLOBAL              0 (cc)
+           16 BINARY_ADD
+           17 RETURN_VALUE
+</pre></div>
+<p>As you can see, different opcodes are used for loading the variables onto the stack prior to applying <tt class="docutils literal"><span class="pre">BINARY_ADD</span></tt>. <tt class="docutils literal"><span class="pre">LOAD_DEREF</span></tt> is used for <tt class="docutils literal"><span class="pre">aa</span></tt>, <tt class="docutils literal"><span class="pre">LOAD_FAST</span></tt> for <tt class="docutils literal"><span class="pre">bb</span></tt> and <tt class="docutils literal"><span class="pre">LOAD_GLOBAL</span></tt> for <tt class="docutils literal"><span class="pre">cc</span></tt>.</p>
+<p>At this point, there are three different directions we can pursue on our path to deeper understanding of Python:</p>
+<ol class="arabic simple">
+<li>Figure out the exact semantics of variables in Python - when are they local, when are they global and what exactly makes them lexically bound.</li>
+<li>Understand how the CPython compiler knows the difference.</li>
+<li>Learn about the different bytecode opcodes for these variables and how they affect the way the VM runs code.</li>
+</ol>
+<p>I won't even try going into (1) since it's a broad topic completely out of the scope of this article. There are plenty of resources online - start with the <a class="reference external" href="http://docs.python.org/dev/py3k/reference/executionmodel.html">official</a> and continue Googling until you're fully enlightened. (3) is also out of scope as I'm currently focusing on the front-end of CPython. If you're interested, there's an excellent series of in-depth articles on Python focusing on the back-end, with <a class="reference external" href="http://tech.blog.aknin.name/2010/06/05/pythons-innards-naming">a nice treatment</a> of this very issue.</p>
+<p>To answer (2) we need to understand how CPython uses symbol tables, which is what this series of articles is about.</p>
+</div>
+<div class="section" id="where-symbol-tables-fit-in">
+<h3>Where symbol tables fit in</h3>
+<p>A high-level view of the front-end of CPython is:</p>
+<ol class="arabic simple">
+<li>Parse source code into a parse tree</li>
+<li>Transform parse tree into an Abstract Syntax Tree</li>
+<li>Transform AST into a Control Flow Graph</li>
+<li>Emit bytecode based on the Control Flow Graph</li>
+</ol>
+<p>Symbol tables are created in step 3. The compiler builds a symbol table from the AST representing the Python source code. This symbol table, in conjunction with the AST is then used to generate the control flow graph (CFG) and ultimately the bytecode.</p>
+</div>
+<div class="section" id="exploring-the-symbol-table">
+<h3>Exploring the symbol table</h3>
+<p>CPython does a great job exposing some of its internals via standard-library modules <a class="footnote-reference" href="index.html#id7" id="id3">[3]</a>. Symbol tables is yet another internal data structure that can be explored from the outside in pure Python code, with the help of the <tt class="docutils literal"><span class="pre">symtable</span></tt> module. From its description:</p>
+<blockquote>
+Symbol tables are generated by the compiler from AST just before bytecode is generated. The symbol table is responsible for calculating the scope of every identifier in the code. symtable provides an interface to examine these tables.</blockquote>
+<p>The <tt class="docutils literal"><span class="pre">symtable</span></tt> module provides a lot of information on the various identifiers encountered in Python code. Apart from telling their scope, it allows us to find out which variables are referenced in their scope, assigned in their scope, define new namespaces (like functions) and so on. To help with exploring the symbol table I've written the following function that simplifies working with the module:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">describe_symbol</span>(sym):
+    <span style="color: #00007f; font-weight: bold">assert</span> <span style="color: #00007f">type</span>(sym) == symtable.Symbol
+    <span style="color: #00007f; font-weight: bold">print</span>(<span style="color: #7f007f">&quot;Symbol:&quot;</span>, sym.get_name())
+
+    <span style="color: #00007f; font-weight: bold">for</span> prop <span style="color: #0000aa">in</span> [
+            <span style="color: #7f007f">&#39;referenced&#39;</span>, <span style="color: #7f007f">&#39;imported&#39;</span>, <span style="color: #7f007f">&#39;parameter&#39;</span>,
+            <span style="color: #7f007f">&#39;global&#39;</span>, <span style="color: #7f007f">&#39;declared_global&#39;</span>, <span style="color: #7f007f">&#39;local&#39;</span>,
+            <span style="color: #7f007f">&#39;free&#39;</span>, <span style="color: #7f007f">&#39;assigned&#39;</span>, <span style="color: #7f007f">&#39;namespace&#39;</span>]:
+        <span style="color: #00007f; font-weight: bold">if</span> <span style="color: #00007f">getattr</span>(sym, <span style="color: #7f007f">&#39;is_&#39;</span> + prop)():
+            <span style="color: #00007f; font-weight: bold">print</span>(<span style="color: #7f007f">&#39;    is&#39;</span>, prop)
+</pre></div>
+<p>Let's see what it has to say about the <tt class="docutils literal"><span class="pre">inner</span></tt> function from the example above:</p>
+<div class="highlight"><pre>Symbol: aa
+    is referenced
+    is free
+Symbol: cc
+    is referenced
+    is global
+Symbol: bb
+    is referenced
+    is local
+    is assigned
+</pre></div>
+<p>Indeed, we see that the symbol table marks <tt class="docutils literal"><span class="pre">aa</span></tt> as lexically bound, or &quot;free&quot; (more on this in the next section), <tt class="docutils literal"><span class="pre">bb</span></tt> as local and <tt class="docutils literal"><span class="pre">cc</span></tt> as global. It also tells us that all these variables are referenced in the scope of <tt class="docutils literal"><span class="pre">inner</span></tt> and that <tt class="docutils literal"><span class="pre">bb</span></tt> is assigned in that scope.</p>
+<p>The symbol table contains other useful information as well. For example, it can help distinguish between explicitly declared globals and implicit globals:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">outer</span>():
+    <span style="color: #00007f; font-weight: bold">global</span> gg
+    <span style="color: #00007f; font-weight: bold">return</span> ff + gg
+</pre></div>
+<p>In this code both <tt class="docutils literal"><span class="pre">ff</span></tt> and <tt class="docutils literal"><span class="pre">gg</span></tt> are global to <tt class="docutils literal"><span class="pre">outer</span></tt>, but only <tt class="docutils literal"><span class="pre">gg</span></tt> was explicitly declared <tt class="docutils literal"><span class="pre">global</span></tt>. The symbol table knows this - the output of <tt class="docutils literal"><span class="pre">describe_symbol</span></tt> for this function is:</p>
+<div class="highlight"><pre>Symbol: gg
+    is referenced
+    is global
+    is declared_global
+Symbol: ff
+    is referenced
+    is global
+</pre></div>
+</div>
+<div class="section" id="free-variables">
+<h3>Free variables</h3>
+<p>Unfortunately, there's a shorthand in the core of Python that may initially confuse readers as to exactly what constitutes a &quot;free&quot; variable. Fortunately, it's a very slight confusion that's easy to put in order. The <a class="reference external" href="http://docs.python.org/dev/py3k/reference/executionmodel.html">execution model</a> reference says:</p>
+<blockquote>
+If a variable is used in a code block but not defined there, it is a free variable.</blockquote>
+<p>This is consistent with the <a class="reference external" href="http://en.wikipedia.org/wiki/Free_variables_and_bound_variables">formal definition</a>. In the source, however, &quot;free&quot; is actually used as a shorthand for &quot;lexically bound free variable&quot; (i.e. variables for which a binding has been found in an enclosing scope), with &quot;global&quot; being used to refer to all remaining free variables. So when reading the CPython source code it is important to remember that the full set of free variables includes both the variables tagged specifically as &quot;free&quot;, as well as those tagged as &quot;global&quot;.</p>
+<p>Thus, to avoid a confusion I say &quot;lexically bound&quot; when I want to refer to the variables actually treated in CPython as free.</p>
+</div>
+<div class="section" id="catching-errors">
+<h3>Catching errors</h3>
+<p>Although Python is duck-typed, some things can still be enforced at compile-time. The symbol table is a powerful tool allowing the compiler to catch some errors <a class="footnote-reference" href="index.html#id8" id="id4">[4]</a>.</p>
+<p>For example, it's not allowed to declare function parameters as global:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">outer</span>(aa):
+    <span style="color: #00007f; font-weight: bold">global</span> aa
+</pre></div>
+<p>When compiling this function, the error is caught while constructing the symbol table:</p>
+<div class="highlight"><pre>Traceback (most recent call last):
+  File &quot;symtab_1.py&quot;, line 33, in &lt;module&gt;
+    table = symtable.symtable(code, &#39;&lt;string&gt;&#39;, &#39;exec&#39;)
+  File &quot;symtable.py&quot;, line 13, in symtable
+    raw = _symtable.symtable(code, filename, compile_type)
+  File &quot;&lt;string&gt;&quot;, line 2
+SyntaxError: name &#39;aa&#39; is parameter and global
+</pre></div>
+<p>The symbol table is useful here since it knows that <tt class="docutils literal"><span class="pre">aa</span></tt> is a parameter in the scope of <tt class="docutils literal"><span class="pre">outer</span></tt> and when <tt class="docutils literal"><span class="pre">global</span> <span class="pre">aa</span></tt> is encountered it's a sure sign of an error.</p>
+<p>Other errors are handled by the symbol table: duplicate argument names in functions, using <tt class="docutils literal"><span class="pre">import</span> <span class="pre">*</span></tt> inside functions, returning values inside generators, and a few more.</p>
+</div>
+<div class="section" id="conclusion">
+<h3>Conclusion</h3>
+<p>This article serves mainly as an introduction for the next one, where I plan to explore the actual implementation of symbol tables in the core of CPython. A symbol table is a tool designed to solve some problems for the compiler, and I hope this article did a fair job describing a few of these problems and related terminology.</p>
+<hr class="docutils" />
+<p><em>Special thanks to Nick Coghlan for reviewing this article.</em></p>
+<div align="center" class="align-center"><img class="align-center" src="../../../../images/hline.jpg" style="width: 320px; height: 5px;" /></div>
+<table class="docutils footnote" frame="void" id="id5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id1">[1]</a></td><td>You'll note that in this article I'm using the terms Python and CPython interchangeably. They're not the same - by Python I mean <em>the language</em> (version 3.x) and by CPython I mean the official C implementation of the compiler + VM. There are several implementations of the Python language in existence, and while they all implement the same specification they may do it differently.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id6" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id2">[2]</a></td><td>It's even more complex than that, but we're not here to talk about C compilers. In the next article I will explain exactly the structure of symbol tables used by CPython.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id7" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id3">[3]</a></td><td>I've <a class="reference external" href="../../../../2009/11/28/python-internals-working-with-python-asts/index.html">previously discussed</a> how to use the <tt class="docutils literal"><span class="pre">ast</span></tt> module to tap into the compilation process of CPython.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id8" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id4">[4]</a></td><td>Actually, if you <tt class="docutils literal"><span class="pre">grep</span></tt> the CPython source, you'll find out that a good proportion of <tt class="docutils literal"><span class="pre">SyntaxError</span></tt> exceptions thrown by the compiler are from <tt class="docutils literal"><span class="pre">Python/symtable.c</span></tt>.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../../theme/js/count.js"></script>
+</body>
+</html>

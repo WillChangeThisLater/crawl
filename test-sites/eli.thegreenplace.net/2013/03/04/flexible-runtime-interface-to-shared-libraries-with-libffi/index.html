@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Flexible runtime interface to shared libraries with libffi - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../../index.html" class="navbar-brand">
+                <img src="../../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="../flexible-runtime-interface-to-shared-libraries-with-libffi.html"
+                       rel="bookmark"
+                       title="Permalink to Flexible runtime interface to shared libraries with libffi">
+                        Flexible runtime interface to shared libraries with libffi
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> March 04, 2013 at 05:36</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../../../tag/plugins.html">Plugins</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>Calling code from shared libraries in C is simple with <tt class="docutils literal">dlopen</tt> / <tt class="docutils literal">dlsym</tt> (<tt class="docutils literal">LoadLibrary</tt> on Windows). I provided a comprehensive example in the <a class="reference external" href="../../../../2012/08/24/plugins-in-c/index.html">article on Plugins in C</a>; here, I'll start with a simplified example.</p>
+<p>Here's a sample C library compiled into <tt class="docutils literal">libsomelib.so</tt>. First, the header file <tt class="docutils literal">somelib.h</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">#ifndef SOMELIB_H</span>
+<span style="color: #007f00">#define SOMELIB_H</span>
+
+<span style="color: #00007f; font-weight: bold">typedef</span> <span style="color: #00007f; font-weight: bold">struct</span> {
+    <span style="color: #00007f; font-weight: bold">int</span> num;
+    <span style="color: #00007f; font-weight: bold">double</span> dnum;
+} DataPoint;
+
+DataPoint add_data(<span style="color: #00007f; font-weight: bold">const</span> DataPoint* dps, <span style="color: #00007f; font-weight: bold">unsigned</span> n);
+
+<span style="color: #007f00">#endif /* SOMELIB_H */</span>
+</pre></div>
+<p>And the implementation, <tt class="docutils literal">somelib.c</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">#include &quot;somelib.h&quot;</span>
+
+DataPoint <span style="color: #00007f">add_data</span>(<span style="color: #00007f; font-weight: bold">const</span> DataPoint* dps, <span style="color: #00007f; font-weight: bold">unsigned</span> n) {
+    DataPoint out = {.num = <span style="color: #007f7f">0</span>, .dnum = <span style="color: #007f7f">0.0</span>};
+
+    <span style="color: #00007f; font-weight: bold">for</span> (<span style="color: #00007f; font-weight: bold">unsigned</span> i = <span style="color: #007f7f">0</span>; i &lt; n; ++i) {
+        out.num += dps[i].num;
+        out.dnum += dps[i].dnum;
+    }
+
+    <span style="color: #00007f; font-weight: bold">return</span> out;
+}
+</pre></div>
+<p>Dynamically loading <tt class="docutils literal">libsomelib.so</tt> at runtime and calling <tt class="docutils literal">add_data</tt> from C code is straightforward:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">#include &lt;dlfcn.h&gt;</span>
+<span style="color: #007f00">#include &lt;stdio.h&gt;</span>
+<span style="color: #007f00">#include &lt;stdlib.h&gt;</span>
+
+<span style="color: #007f00">#include &quot;somelib.h&quot;</span>
+
+<span style="color: #007f00">// Prototype for a function pointer for add_data</span>
+<span style="color: #00007f; font-weight: bold">typedef</span> DataPoint (*add_data_fn_t)(<span style="color: #00007f; font-weight: bold">const</span> DataPoint* dps, <span style="color: #00007f; font-weight: bold">unsigned</span> n);
+
+<span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">main</span>(<span style="color: #00007f; font-weight: bold">int</span> argc, <span style="color: #00007f; font-weight: bold">const</span> <span style="color: #00007f; font-weight: bold">char</span>* argv[])
+{
+    <span style="color: #00007f; font-weight: bold">void</span>* libhandle = dlopen(<span style="color: #7f007f">&quot;./libsomelib.so&quot;</span>, RTLD_LAZY);
+    <span style="color: #00007f; font-weight: bold">if</span> (!libhandle) {
+        fprintf(stderr, <span style="color: #7f007f">&quot;dlopen error: %s\n&quot;</span>, dlerror());
+        exit(<span style="color: #007f7f">1</span>);
+    }
+
+    printf(<span style="color: #7f007f">&quot;dlopen success: handle %p\n&quot;</span>, libhandle);
+
+    <span style="color: #007f00">// We know the prototype of add_data so we can directly assign it to a</span>
+    <span style="color: #007f00">// function pointer of the correct type.</span>
+    add_data_fn_t add_data_fn = dlsym(libhandle, <span style="color: #7f007f">&quot;add_data&quot;</span>);
+    <span style="color: #00007f; font-weight: bold">char</span>* err = dlerror();
+    <span style="color: #00007f; font-weight: bold">if</span> (err) {
+        fprintf(stderr, <span style="color: #7f007f">&quot;dlsym failed: %s\n&quot;</span>, err);
+        exit(<span style="color: #007f7f">1</span>);
+    }
+
+    DataPoint dp[<span style="color: #007f7f">4</span>] = {{<span style="color: #007f7f">2</span>, <span style="color: #007f7f">2.2</span>}, {<span style="color: #007f7f">3</span>, <span style="color: #007f7f">3.3</span>}, {<span style="color: #007f7f">4</span>, <span style="color: #007f7f">4.4</span>}, {<span style="color: #007f7f">5</span>, <span style="color: #007f7f">5.5</span>}};
+
+    printf(<span style="color: #7f007f">&quot;Calling add_data\n&quot;</span>);
+    DataPoint dout = add_data_fn(dp, <span style="color: #00007f; font-weight: bold">sizeof</span>(dp) / <span style="color: #00007f; font-weight: bold">sizeof</span>(DataPoint));
+
+    printf(<span style="color: #7f007f">&quot;dout = {%d, %lf}\n&quot;</span>, dout.num, dout.dnum);
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">0</span>;
+}
+</pre></div>
+<p>This works great. However, note a certain lack of flexibility. While the shared library can be discovered and loaded at runtime, the interface of the function we call from it has to be defined statically, <em>at compile time</em> - this is the function pointer prototype in the snippet above.</p>
+<p>But what if we want the interface to be dynamic as well? In other words, what if we don't know <em>until runtime</em> what arguments the called function accepts? Alas, if standard C is all we have, we're stuck. The problem is that to call a function properly, the compiler has to know what arguments it accepts to translate the call to the proper machine code sequence according to the system's calling convention. When I disassemble both <tt class="docutils literal">add_data</tt> and the call in <tt class="docutils literal">main</tt>, I see this call sequence, which is in accordance with the System V AMD64 ABI <a class="footnote-reference" href="index.html#id3" id="id1">[1]</a>:</p>
+<ul class="simple">
+<li><tt class="docutils literal">dps</tt> is passed in <tt class="docutils literal">%rdi</tt></li>
+<li><tt class="docutils literal">n</tt> is passed in <tt class="docutils literal">%esi</tt></li>
+<li>return value is in <tt class="docutils literal">%xmm0</tt></li>
+</ul>
+<p>So to call a function whose signature is determined at runtime, we'd have to implement the calling convention ourselves, packing the arguments into registers and stack as appropriate and unpacking the return value. Moreover, this has to be implemented for each platform the code runs on. And it goes beyond saying that such code is not portable since standard C does not provide direct access to the stack or to the registers.</p>
+<p>Luckily, a library exists that implements all of this for us.</p>
+<div class="section" id="libffi">
+<h3>libffi</h3>
+<p><tt class="docutils literal">libffi</tt> was designed to solve precisely the problem described above - provide a means to call a function from a shared object, while deciding <em>at runtime</em> which arguments the function accepts and which value it returns. Conceivably this can be useful for C code dynamically invoking other C code <a class="footnote-reference" href="index.html#id4" id="id2">[2]</a>, but the main users of <tt class="docutils literal">libffi</tt> are dynamic VM languages. Python uses <tt class="docutils literal">libffi</tt> in its <tt class="docutils literal">ctypes</tt> library, and other languages like Java, Ruby and Scheme use it in similar C FFI (Foreign Function Interface) libraries.</p>
+<p>Without further ado, here's a version of the main program from above that uses <tt class="docutils literal">libffi</tt> to call <tt class="docutils literal">add_data</tt> from its shared library:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">#include &lt;dlfcn.h&gt;</span>
+<span style="color: #007f00">#include &lt;ffi.h&gt;</span>
+<span style="color: #007f00">#include &lt;stdio.h&gt;</span>
+<span style="color: #007f00">#include &lt;stdlib.h&gt;</span>
+
+<span style="color: #007f00">#include &quot;somelib.h&quot;  // For the DataPoint type.</span>
+
+<span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">main</span>(<span style="color: #00007f; font-weight: bold">int</span> argc, <span style="color: #00007f; font-weight: bold">const</span> <span style="color: #00007f; font-weight: bold">char</span>* argv[])
+{
+    <span style="color: #00007f; font-weight: bold">void</span>* libhandle = dlopen(<span style="color: #7f007f">&quot;./libsomelib.so&quot;</span>, RTLD_LAZY);
+    <span style="color: #00007f; font-weight: bold">if</span> (!libhandle) {
+        fprintf(stderr, <span style="color: #7f007f">&quot;dlopen error: %s\n&quot;</span>, dlerror());
+        exit(<span style="color: #007f7f">1</span>);
+    }
+
+    printf(<span style="color: #7f007f">&quot;dlopen success: handle %p\n&quot;</span>, libhandle);
+
+    <span style="color: #007f00">// Assuming we don&#39;t know the prototype of add_data at compile-time, we</span>
+    <span style="color: #007f00">// have to save the output of dlsym in a void* and then prepare the</span>
+    <span style="color: #007f00">// calling sequence using libffi.</span>
+    <span style="color: #00007f; font-weight: bold">void</span>* add_data_fn = dlsym(libhandle, <span style="color: #7f007f">&quot;add_data&quot;</span>);
+    <span style="color: #00007f; font-weight: bold">char</span>* err = dlerror();
+    <span style="color: #00007f; font-weight: bold">if</span> (err) {
+        fprintf(stderr, <span style="color: #7f007f">&quot;dlsym failed: %s\n&quot;</span>, err);
+        exit(<span style="color: #007f7f">1</span>);
+    }
+
+    <span style="color: #007f00">// Describe the function arguments. Note that ffi_type_pointer is used</span>
+    <span style="color: #007f00">// for any C pointer (the pointee type does not matter in the ABI).</span>
+    ffi_type* args[] = {&amp;ffi_type_pointer, &amp;ffi_type_uint};
+
+    <span style="color: #007f00">// Describe the DataPoint struct to libffi. Elements are described by a</span>
+    <span style="color: #007f00">// NULL-terminated array of pointers to ffi_type.</span>
+    ffi_type* dp_elements[] = {&amp;ffi_type_sint, &amp;ffi_type_double, <span style="color: #00007f">NULL</span>};
+    ffi_type dp_type = {.size = <span style="color: #007f7f">0</span>, .alignment = <span style="color: #007f7f">0</span>,
+                        .type = FFI_TYPE_STRUCT, .elements = dp_elements};
+
+    <span style="color: #007f00">// Describe the interface of add_data to libffi.</span>
+    ffi_cif cif;
+    ffi_status status = ffi_prep_cif(&amp;cif, FFI_DEFAULT_ABI, <span style="color: #007f7f">2</span>, &amp;dp_type,
+                                     args);
+    <span style="color: #00007f; font-weight: bold">if</span> (status != FFI_OK) {
+        fprintf(stderr, <span style="color: #7f007f">&quot;ffi_prep_cif failed: %d\n&quot;</span>, status);
+        exit(<span style="color: #007f7f">1</span>);
+    }
+
+    <span style="color: #007f00">// The avalues argument of ffi_call holds the addresses of arguments.</span>
+    <span style="color: #007f00">// Since our first argument is a pointer itself, we can&#39;t just pass</span>
+    <span style="color: #007f00">// &amp;dp (since in C &amp;array == array). So we create a pointer to dp and</span>
+    <span style="color: #007f00">// pass its address.</span>
+    DataPoint dp[<span style="color: #007f7f">4</span>] = {{<span style="color: #007f7f">2</span>, <span style="color: #007f7f">2.2</span>}, {<span style="color: #007f7f">3</span>, <span style="color: #007f7f">3.3</span>}, {<span style="color: #007f7f">4</span>, <span style="color: #007f7f">4.4</span>}, {<span style="color: #007f7f">5</span>, <span style="color: #007f7f">5.5</span>}};
+    DataPoint* pdp = dp;
+    <span style="color: #00007f; font-weight: bold">unsigned</span> nelems = <span style="color: #00007f; font-weight: bold">sizeof</span>(dp) / <span style="color: #00007f; font-weight: bold">sizeof</span>(DataPoint);
+    <span style="color: #00007f; font-weight: bold">void</span>* values[] = {&amp;pdp, &amp;nelems};
+
+    printf(<span style="color: #7f007f">&quot;Calling add_data via libffi\n&quot;</span>);
+    DataPoint dout;
+    ffi_call(&amp;cif, FFI_FN(add_data_fn), &amp;dout, values);
+
+    printf(<span style="color: #7f007f">&quot;dout = {%d, %lf}\n&quot;</span>, dout.num, dout.dnum);
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">0</span>;
+}
+</pre></div>
+<p>The code is heavily commented, so it should be easy to figure out what's going on. I just want to focus on a few interesting points:</p>
+<ul class="simple">
+<li>The shared library is loaded as before. <tt class="docutils literal">dlopen</tt> and <tt class="docutils literal">dlsym</tt> are used. The result of <tt class="docutils literal">dlsym</tt> is just placed in a <tt class="docutils literal">void*</tt>, since we don't know the actual function pointer signature at compile time.</li>
+<li><tt class="docutils literal">somelib.h</tt> is included just for the definition of the <tt class="docutils literal">DataPoint</tt> type, since we want to actually pass data to <tt class="docutils literal">add_data</tt> and get a result.</li>
+<li>The signature of <tt class="docutils literal">add_data</tt> is described dynamically, at runtime, by filling the <tt class="docutils literal">ffi_cif</tt> data structure.</li>
+</ul>
+<p>In terms of its implementation, <tt class="docutils literal">libffi</tt> does as much as possible in portable C, but eventually has to resort to assembly routines written for each architecture and calling convention it supports. There routines perform the actual register and stack modifications around the call to the given function to make sure the call conforms to the calling convention. Note also that due to this extra work, calls via <tt class="docutils literal">libffi</tt> are much slower than direct calls created by the compiler. In theory, it's possible to use JIT-ing to dynamically generate efficient calling code once the function signature is known, but AFAIK <tt class="docutils literal">libffi</tt> does not implement this.</p>
+<img class="align-center" src="../../../../images/hline.jpg" style="width: 320px; height: 5px;" />
+<table class="docutils footnote" frame="void" id="id3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id1">[1]</a></td><td>I've compiled this example on my x64 Linux machine.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id2">[2]</a></td><td>I'm curious to hear about use cases, though. It seems to me that if you want to call code from C and don't even know the function signatures at compile time, other solutions (like serializing the arguments and return values, or some sort of message passing) is more commonplace.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../../theme/js/count.js"></script>
+</body>
+</html>

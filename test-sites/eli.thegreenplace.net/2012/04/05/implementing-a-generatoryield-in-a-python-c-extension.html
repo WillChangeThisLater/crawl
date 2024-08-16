@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Implementing a generator/yield in a Python C extension - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="implementing-a-generatoryield-in-a-python-c-extension.html"
+                       rel="bookmark"
+                       title="Permalink to Implementing a generator/yield in a Python C extension">
+                        Implementing a generator/yield in a Python C extension
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> April 05, 2012 at 06:35</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/python.html">Python</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>In Python, a generator is a function that returns an iterator object. There are a couple of ways to do this, but the most elegant and common one is to use the <tt class="docutils literal">yield</tt> statement.</p>
+<p>For example, here is a simple synthetic example:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">pyrevgen</span>(seq):
+    <span style="color: #00007f; font-weight: bold">for</span> i, elem <span style="color: #0000aa">in</span> <span style="color: #00007f">enumerate</span>(<span style="color: #00007f">reversed</span>(seq)):
+        <span style="color: #00007f; font-weight: bold">yield</span> i, elem
+</pre></div>
+<p>The <tt class="docutils literal">pyrevgen</tt> function is a generator. Given any sequence, it returns an iterator that yields the sequences's elements in reversed order, and also enumerates them. For example:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">&gt;&gt;&gt; <span style="color: #00007f; font-weight: bold">for</span> i, e <span style="color: #0000aa">in</span> pyrevgen([<span style="color: #7f007f">&#39;a&#39;</span>, <span style="color: #7f007f">&#39;b&#39;</span>, <span style="color: #7f007f">&#39;c&#39;</span>]):
+...   <span style="color: #00007f; font-weight: bold">print</span>(i, e)
+...
+<span style="color: #007f7f">0</span> c
+<span style="color: #007f7f">1</span> b
+<span style="color: #007f7f">2</span> a
+</pre></div>
+<p>The goal of this post is to demonstrate how to achieve the same effect using the Python C API; in other words, in a C extension module. The focus is on Python 3 - for Python 2 the principle is the same although there may be some differences in the details.</p>
+<p><tt class="docutils literal">yield</tt> is a very powerful construct in Python. In C there is no equivalent ability (unless you use some co-routine macro-fu, but this is outside our scope here). Therefore, we have to explicitly return an iterator object and let it handle the details of the iteration.</p>
+<p>To write <a class="reference external" href="http://docs.python.org/dev/library/stdtypes.html#iterator-types">an iterator</a> in Python we have to create a class that implements the <tt class="docutils literal">__iter__</tt> and <tt class="docutils literal">__next__</tt> special methods. The equivalent methods in the C API are <tt class="docutils literal">tp_iter</tt> and <tt class="docutils literal">tp_iternext</tt>, respectively.</p>
+<p>We'll create a new extension module, named <tt class="docutils literal">spam</tt>. It will export a single object - the <tt class="docutils literal">revgen</tt> type which will be callable similarly to the Python code above. In other words, the client Python code will be able to do:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">import</span> <span style="color: #00007f">spam</span>
+<span style="color: #00007f; font-weight: bold">for</span> i, e <span style="color: #0000aa">in</span> spam.revgen([<span style="color: #7f007f">&#39;a&#39;</span>, <span style="color: #7f007f">&#39;b&#39;</span>, <span style="color: #7f007f">&#39;c&#39;</span>]):
+  <span style="color: #00007f; font-weight: bold">print</span>(i, e)
+</pre></div>
+<p>Let's begin (a link to the full source code is available at the end of this post):</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">PyTypeObject PyRevgen_Type = {
+    PyVarObject_HEAD_INIT(&amp;PyType_Type, <span style="color: #007f7f">0</span>)
+    <span style="color: #7f007f">&quot;revgen&quot;</span>,                       <span style="color: #007f00">/* tp_name */</span>
+    <span style="color: #00007f; font-weight: bold">sizeof</span>(RevgenState),            <span style="color: #007f00">/* tp_basicsize */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_itemsize */</span>
+    (destructor)revgen_dealloc,     <span style="color: #007f00">/* tp_dealloc */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_print */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_getattr */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_setattr */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_reserved */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_repr */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_as_number */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_as_sequence */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_as_mapping */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_hash */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_call */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_str */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_getattro */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_setattro */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_as_buffer */</span>
+    Py_TPFLAGS_DEFAULT,             <span style="color: #007f00">/* tp_flags */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_doc */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_traverse */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_clear */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_richcompare */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_weaklistoffset */</span>
+    PyObject_SelfIter,              <span style="color: #007f00">/* tp_iter */</span>
+    (iternextfunc)revgen_next,      <span style="color: #007f00">/* tp_iternext */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_methods */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_members */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_getset */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_base */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_dict */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_descr_get */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_descr_set */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_dictoffset */</span>
+    <span style="color: #007f7f">0</span>,                              <span style="color: #007f00">/* tp_init */</span>
+    PyType_GenericAlloc,            <span style="color: #007f00">/* tp_alloc */</span>
+    revgen_new,                     <span style="color: #007f00">/* tp_new */</span>
+};
+
+
+<span style="color: #00007f; font-weight: bold">static</span> <span style="color: #00007f; font-weight: bold">struct</span> PyModuleDef spammodule = {
+   PyModuleDef_HEAD_INIT,
+   <span style="color: #7f007f">&quot;spam&quot;</span>,                  <span style="color: #007f00">/* m_name */</span>
+   <span style="color: #7f007f">&quot;&quot;</span>,                      <span style="color: #007f00">/* m_doc */</span>
+   -<span style="color: #007f7f">1</span>,                      <span style="color: #007f00">/* m_size */</span>
+};
+
+
+PyMODINIT_FUNC
+<span style="color: #00007f">PyInit_spam</span>(<span style="color: #00007f; font-weight: bold">void</span>)
+{
+    PyObject *module = PyModule_Create(&amp;spammodule);
+    <span style="color: #00007f; font-weight: bold">if</span> (!module)
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">NULL</span>;
+
+    <span style="color: #00007f; font-weight: bold">if</span> (PyType_Ready(&amp;PyRevgen_Type) &lt; <span style="color: #007f7f">0</span>)
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">NULL</span>;
+    Py_INCREF((PyObject *)&amp;PyRevgen_Type);
+    PyModule_AddObject(module, <span style="color: #7f007f">&quot;revgen&quot;</span>, (PyObject *)&amp;PyRevgen_Type);
+
+    <span style="color: #00007f; font-weight: bold">return</span> module;
+}
+</pre></div>
+<p>This is standard code for creating a new module and a new type in it. The module initialization function (<tt class="docutils literal">PyInit_spam</tt>) adds a single object to the module, named <tt class="docutils literal">revgen</tt>. This object is the <tt class="docutils literal">PyRevgen_Type</tt> type. By &quot;calling&quot; this object, the user is able to create new instances of the type.</p>
+<p>The following structure (&quot;subclass&quot; of <tt class="docutils literal">PyObject</tt>) is going to represent an instance of <tt class="docutils literal">revgen</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">/* RevgenState - reverse generator instance.</span>
+<span style="color: #007f00"> *</span>
+<span style="color: #007f00"> * sequence: ref to the sequence that&#39;s being iterated</span>
+<span style="color: #007f00"> * seq_index: index of the next element in the sequence to yield</span>
+<span style="color: #007f00"> * enum_index: next enumeration index to yield</span>
+<span style="color: #007f00"> *</span>
+<span style="color: #007f00"> * In pseudo-notation, the yielded tuple at each step is:</span>
+<span style="color: #007f00"> *  enum_index, sequence[seq_index]</span>
+<span style="color: #007f00"> *</span>
+<span style="color: #007f00">*/</span>
+<span style="color: #00007f; font-weight: bold">typedef</span> <span style="color: #00007f; font-weight: bold">struct</span> {
+    PyObject_HEAD
+    Py_ssize_t seq_index, enum_index;
+    PyObject *sequence;
+} RevgenState;
+</pre></div>
+<p>The most interesting thing to note here is the reference to the sequence we're iterating on. The iterator needs this instance to be able to access the sequence each time <tt class="docutils literal">next</tt> is called on it.</p>
+<p>And here is the function responsible for creating new instances. It is assigned to the <tt class="docutils literal">tp_new</tt> slot of the type. Note that we don't assign <tt class="docutils literal">tp_init</tt>, so the default &quot;do-nothing&quot; initializer will be used:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">static</span> PyObject *
+<span style="color: #00007f">revgen_new</span>(PyTypeObject *type, PyObject *args, PyObject *kwargs)
+{
+    PyObject *sequence;
+
+    <span style="color: #00007f; font-weight: bold">if</span> (!PyArg_UnpackTuple(args, <span style="color: #7f007f">&quot;revgen&quot;</span>, <span style="color: #007f7f">1</span>, <span style="color: #007f7f">1</span>, &amp;sequence))
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">NULL</span>;
+
+    <span style="color: #007f00">/* We expect an argument that supports the sequence protocol */</span>
+    <span style="color: #00007f; font-weight: bold">if</span> (!PySequence_Check(sequence)) {
+        PyErr_SetString(PyExc_TypeError, <span style="color: #7f007f">&quot;revgen() expects a sequence&quot;</span>);
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">NULL</span>;
+    }
+
+    Py_ssize_t len = PySequence_Length(sequence);
+    <span style="color: #00007f; font-weight: bold">if</span> (len == -<span style="color: #007f7f">1</span>)
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">NULL</span>;
+
+    <span style="color: #007f00">/* Create a new RevgenState and initialize its state - pointing to the last</span>
+<span style="color: #007f00">     * index in the sequence.</span>
+<span style="color: #007f00">    */</span>
+    RevgenState *rgstate = (RevgenState *)type-&gt;tp_alloc(type, <span style="color: #007f7f">0</span>);
+    <span style="color: #00007f; font-weight: bold">if</span> (!rgstate)
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">NULL</span>;
+
+    Py_INCREF(sequence);
+    rgstate-&gt;sequence = sequence;
+    rgstate-&gt;seq_index = len - <span style="color: #007f7f">1</span>;
+    rgstate-&gt;enum_index = <span style="color: #007f7f">0</span>;
+
+    <span style="color: #00007f; font-weight: bold">return</span> (PyObject *)rgstate;
+}
+</pre></div>
+<p>This is a straightforward <tt class="docutils literal">tp_new</tt> implementation. It makes sure the object it's expected to iterate on is a sequence, and initializes the state to prepare returning the last element in the first <tt class="docutils literal">next</tt> call. The corresponding de-allocation function is also unsurprising:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">static</span> <span style="color: #00007f; font-weight: bold">void</span>
+<span style="color: #00007f">revgen_dealloc</span>(RevgenState *rgstate)
+{
+    <span style="color: #007f00">/* We need XDECREF here because when the generator is exhausted,</span>
+<span style="color: #007f00">     * rgstate-&gt;sequence is cleared with Py_CLEAR which sets it to NULL.</span>
+<span style="color: #007f00">    */</span>
+    Py_XDECREF(rgstate-&gt;sequence);
+    Py_TYPE(rgstate)-&gt;tp_free(rgstate);
+}
+</pre></div>
+<p>Now what's left to see is the implementations of the <tt class="docutils literal">tp_iter</tt> and <tt class="docutils literal">tp_iternext</tt> slots. Since our type is an iterator, it can just assign <tt class="docutils literal">PyObject_SelfIter</tt> function for the <tt class="docutils literal">tp_iter</tt> slot. <tt class="docutils literal">tp_iternext</tt> is where the interesting work is happening. This is what gets invoked when the <tt class="docutils literal">next</tt> built-in is called on the iterator, and by extension also when the iterator is consumed by a <tt class="docutils literal">for</tt> loop:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">static</span> PyObject *
+<span style="color: #00007f">revgen_next</span>(RevgenState *rgstate)
+{
+    <span style="color: #007f00">/* seq_index &lt; 0 means that the generator is exhausted.</span>
+<span style="color: #007f00">     * Returning NULL in this case is enough. The next() builtin will raise the</span>
+<span style="color: #007f00">     * StopIteration error for us.</span>
+<span style="color: #007f00">    */</span>
+    <span style="color: #00007f; font-weight: bold">if</span> (rgstate-&gt;seq_index &gt;= <span style="color: #007f7f">0</span>) {
+        PyObject *elem = PySequence_GetItem(rgstate-&gt;sequence,
+                                            rgstate-&gt;seq_index);
+        <span style="color: #007f00">/* Exceptions from PySequence_GetItem are propagated to the caller</span>
+<span style="color: #007f00">         * (elem will be NULL so we also return NULL).</span>
+<span style="color: #007f00">        */</span>
+        <span style="color: #00007f; font-weight: bold">if</span> (elem) {
+            PyObject *result = Py_BuildValue(<span style="color: #7f007f">&quot;lO&quot;</span>, rgstate-&gt;enum_index, elem);
+            rgstate-&gt;seq_index--;
+            rgstate-&gt;enum_index++;
+            <span style="color: #00007f; font-weight: bold">return</span> result;
+        }
+    }
+
+    <span style="color: #007f00">/* The reference to the sequence is cleared in the first generator call</span>
+<span style="color: #007f00">     * after its exhaustion (after the call that returned the last element).</span>
+<span style="color: #007f00">     * Py_CLEAR will be harmless for subsequent calls since it&#39;s idempotent</span>
+<span style="color: #007f00">     * on NULL.</span>
+<span style="color: #007f00">    */</span>
+    rgstate-&gt;seq_index = -<span style="color: #007f7f">1</span>;
+    Py_CLEAR(rgstate-&gt;sequence);
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">NULL</span>;
+}
+</pre></div>
+<p>The most important point to remember here is this - the state of the iteration should be wholly kept in the iterator object. Comparing to the Python implementation, this means quite a bit more work. The Python <tt class="docutils literal">yield</tt> statement allows us to use the Python interpreter itself to keep the state of execution for us. This is what makes <a class="reference external" href="../../../2009/08/29/co-routines-as-an-alternative-to-state-machines/index.html">co-routines in Python so powerful</a> - very little explicit state has to be kept manually. As I mentioned in the beginning of the post, in C extensions we don't have this luxury, so we have to go the manual way. Since the current example is very simple and linear, this is relatively easy. In more complex examples, some ingenuity is often required to design the state object and <tt class="docutils literal">tp_iternext</tt> function correctly.</p>
+<p>The full code of this post, together with a simple Python test script and a <tt class="docutils literal">setup.py</tt> for building the extension with distutils is <a href="https://github.com/eliben/code-for-blog/tree/main/2012/generator-c-extension">available for download here.</a></p>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="implementing-a-generatoryield-in-a-python-c-extension.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

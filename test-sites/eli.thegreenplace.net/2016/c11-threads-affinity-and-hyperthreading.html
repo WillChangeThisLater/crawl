@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>C++11 threads, affinity and hyperthreading - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../theme/css/style.css" type="text/css"/>
+
+        <link href="../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../index.html" class="navbar-brand">
+                <img src="../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="c11-threads-affinity-and-hyperthreading/index.html"
+                       rel="bookmark"
+                       title="Permalink to C++11 threads, affinity and hyperthreading">
+                        C++11 threads, affinity and hyperthreading
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> January 17, 2016 at 16:38</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../tag/concurrency.html">Concurrency</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <div class="section" id="background-and-introduction">
+<h2>Background and introduction</h2>
+<p>For decades, the C and C++ standards treated multi-threading and concurrency as
+something existing outside the standard sphere - in that &quot;target-dependent&quot;
+world of shades which the &quot;abstract machine&quot; targeted by the standards doesn't
+cover. The immediate, cold-blooded replies of &quot;C++ doesn't know what a thread
+is&quot; in mountains of mailing list and newsgroup questions dealing with
+parallelism will forever serve as a reminder of this past.</p>
+<p>But all of that came to an end with C++11. The C++ standards commitee realized
+the language won't be able to stay relevant for much longer unless it aligns
+itself with the times and finally recognizes the existence of threads,
+synchronization mechanisms, atomic operations and memory models - right there in
+the standard, forcing C++ compiler and library vendors to implement these for
+all supported platforms. This is, IMHO, one of the biggest positive changes in
+the avalanche of improvements delivered by the C++11 edition of the language.</p>
+<p>This post is not a tutorial on C++11 threads, but it uses them as the main
+threading mechanism to demonstrate its points. It starts with a basic example
+but then quickly veers off into the specialized area of thread affinities,
+hardware topologies and performance implications of hyperthreading. It does as
+much as feasible in portable C++, clearly marking the deviations into
+platform-specific calls for the really specialized stuff.</p>
+</div>
+<div class="section" id="logical-cpus-cores-and-threads">
+<h2>Logical CPUs, cores and threads</h2>
+<p>Most modern machines are multi-CPU. Whether these CPUs are divided into sockets
+and hardware cores depends on the machine, of course, but the OS sees a number
+of &quot;logical&quot; CPUs that can execute tasks concurrently.</p>
+<p>The easiest way to get this information on Linux is to <tt class="docutils literal">cat /proc/cpuinfo</tt>,
+which lists the system's CPUs in order, providing some infromation about each
+(such as current frequency, cache size, etc). On my (8-CPU) machine:</p>
+<div class="highlight"><pre><span></span>$ cat /proc/cpuinfo
+processor   : 0
+vendor_id   : GenuineIntel
+cpu family  : 6
+model               : 60
+model name  : Intel(R) Core(TM) i7-4771 CPU @ 3.50GHz
+[...]
+stepping    : 3
+microcode   : 0x7
+cpu MHz             : 3501.000
+cache size  : 8192 KB
+physical id : 0
+siblings    : 8
+core id             : 0
+cpu cores   : 4
+apicid              : 0
+[...]
+
+processor   : 1
+vendor_id   : GenuineIntel
+cpu family  : 6
+[...]
+
+[...]
+processor   : 7
+vendor_id   : GenuineIntel
+cpu family  : 6
+</pre></div>
+<p>A summary output can be obtained from <tt class="docutils literal">lscpu</tt>:</p>
+<div class="highlight"><pre><span></span>$ lscpu
+Architecture:          x86_64
+CPU op-mode(s):        32-bit, 64-bit
+Byte Order:            Little Endian
+CPU(s):                8
+On-line CPU(s) list:   0-7
+Thread(s) per core:    2
+Core(s) per socket:    4
+Socket(s):             1
+NUMA node(s):          1
+Vendor ID:             GenuineIntel
+CPU family:            6
+Model:                 60
+Stepping:              3
+CPU MHz:               3501.000
+BogoMIPS:              6984.09
+Virtualization:        VT-x
+L1d cache:             32K
+L1i cache:             32K
+L2 cache:              256K
+L3 cache:              8192K
+NUMA node0 CPU(s):     0-7
+</pre></div>
+<p>Here it's also very easy to see that the machine has 4 cores, each having
+two HW threads (see <a class="reference external" href="https://en.wikipedia.org/wiki/Hyper-threading">hyperthreading</a>).
+And yet the OS sees them as 8 &quot;CPUs&quot; numbered 0-7.</p>
+</div>
+<div class="section" id="launching-a-thread-per-cpu">
+<h2>Launching a thread per CPU</h2>
+<p>The C++11 threading library gracefully made available a utility function that we
+can use to find out how many CPUs the machine has, so that we could plan our
+parallelism strategy. The function is called <tt class="docutils literal">hardware_concurrency</tt>, and here
+is a complete example that uses it to launch an appropriate number of threads.
+The following is just a code snippet; full code samples for this post, along
+with a Makefile for Linux can be found <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2016/threads-affinity">in this repository</a>.</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">**</span><span class="w"> </span><span class="n">argv</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kt">unsigned</span><span class="w"> </span><span class="n">num_cpus</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="o">::</span><span class="n">hardware_concurrency</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Launching &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">num_cpus</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot; threads</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// A mutex ensures orderly access to std::cout from multiple threads.</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="w"> </span><span class="n">iomutex</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="o">&gt;</span><span class="w"> </span><span class="n">threads</span><span class="p">(</span><span class="n">num_cpus</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">num_cpus</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">threads</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="p">([</span><span class="o">&amp;</span><span class="n">iomutex</span><span class="p">,</span><span class="w"> </span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// Use a lexical scope and lock_guard to safely lock the mutex only for</span>
+<span class="w">        </span><span class="c1">// the duration of std::cout usage.</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">lock_guard</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="o">&gt;</span><span class="w"> </span><span class="n">iolock</span><span class="p">(</span><span class="n">iomutex</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Thread #&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot; is running</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">      </span><span class="c1">// Simulate important work done by the tread by sleeping for a bit...</span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">this_thread</span><span class="o">::</span><span class="n">sleep_for</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">chrono</span><span class="o">::</span><span class="n">milliseconds</span><span class="p">(</span><span class="mi">200</span><span class="p">));</span><span class="w"></span>
+
+<span class="w">    </span><span class="p">});</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">threads</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">t</span><span class="p">.</span><span class="n">join</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>A <tt class="docutils literal"><span class="pre">std::thread</span></tt> is a thin wrapper around a platform-specific thread
+object; this is something we'll use to our advantage shortly. So when we launch
+a <tt class="docutils literal"><span class="pre">std::thread</span></tt>, and actual OS thread is launched. This is fairly low-level
+thread control, but in this article I won't detour into higher-level constructs
+like <em>task-based parallelism</em>, leaving this to some future post.</p>
+</div>
+<div class="section" id="thread-affinity">
+<h2>Thread affinity</h2>
+<p>So we know how to query the system for the number of CPUs it has, and how to
+launch any number of threads. Now let's do something a bit more advanced.</p>
+<p>All modern OSes support setting CPU <em>affinity</em> per thread. Affinity means that
+instead of being free to run the thread on any CPU it feels like, the OS
+scheduler is asked to only schedule a given thread to a single CPU or a
+pre-defined set of CPUs. By default, the affinity covers all logical CPUs in
+the system, so the OS can pick any of them for any thread, based on its
+scheduling considerations. In addition, the OS will sometimes migrate threads
+between CPUs if it makes sense to the scheduler (though it should try to
+miminize migrations because of the loss of warm caches on the core from which
+the thread was migrated). Let's observe this in action with another code sample:</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">**</span><span class="w"> </span><span class="n">argv</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">constexpr</span><span class="w"> </span><span class="kt">unsigned</span><span class="w"> </span><span class="n">num_threads</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// A mutex ensures orderly access to std::cout from multiple threads.</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="w"> </span><span class="n">iomutex</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="o">&gt;</span><span class="w"> </span><span class="n">threads</span><span class="p">(</span><span class="n">num_threads</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">num_threads</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">threads</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="p">([</span><span class="o">&amp;</span><span class="n">iomutex</span><span class="p">,</span><span class="w"> </span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="c1">// Use a lexical scope and lock_guard to safely lock the mutex only</span>
+<span class="w">          </span><span class="c1">// for the duration of std::cout usage.</span>
+<span class="w">          </span><span class="n">std</span><span class="o">::</span><span class="n">lock_guard</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="o">&gt;</span><span class="w"> </span><span class="n">iolock</span><span class="p">(</span><span class="n">iomutex</span><span class="p">);</span><span class="w"></span>
+<span class="w">          </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Thread #&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;: on CPU &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">sched_getcpu</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">        </span><span class="c1">// Simulate important work done by the tread by sleeping for a bit...</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">this_thread</span><span class="o">::</span><span class="n">sleep_for</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">chrono</span><span class="o">::</span><span class="n">milliseconds</span><span class="p">(</span><span class="mi">900</span><span class="p">));</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">});</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">threads</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">t</span><span class="p">.</span><span class="n">join</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This sample launches four threads that loop infinitely, sleeping and reporting
+which CPU they run on. The reporting is done via the <tt class="docutils literal">sched_getcpu</tt> function
+(glibc specific - other platforms will have other APIs with similar
+functionality). Here's a sample run:</p>
+<div class="highlight"><pre><span></span>$ ./launch-threads-report-cpu
+Thread #0: on CPU 5
+Thread #1: on CPU 5
+Thread #2: on CPU 2
+Thread #3: on CPU 5
+Thread #0: on CPU 2
+Thread #1: on CPU 5
+Thread #2: on CPU 3
+Thread #3: on CPU 5
+Thread #0: on CPU 3
+Thread #2: on CPU 7
+Thread #1: on CPU 5
+Thread #3: on CPU 0
+Thread #0: on CPU 3
+Thread #2: on CPU 7
+Thread #1: on CPU 5
+Thread #3: on CPU 0
+Thread #0: on CPU 3
+Thread #2: on CPU 7
+Thread #1: on CPU 5
+Thread #3: on CPU 0
+^C
+</pre></div>
+<p>Some observations: the threads are sometimes scheduled onto the same CPU,
+and sometimes onto different CPUs. Also, there's quite a bit of migration going
+on. Eventually, the scheduler managed to place each thread onto a different CPU,
+and keep it there. Different constraints (such as system load) could result in a
+different scheduling, of course.</p>
+<p>Now let's rerun the same sample, but this time using <tt class="docutils literal">taskset</tt> to restrict the
+affinity of the process to only two CPUs - 5 and 6:</p>
+<div class="highlight"><pre><span></span>$ taskset -c 5,6 ./launch-threads-report-cpu
+Thread #0: on CPU 5
+Thread #2: on CPU 6
+Thread #1: on CPU 5
+Thread #3: on CPU 6
+Thread #0: on CPU 5
+Thread #2: on CPU 6
+Thread #1: on CPU 5
+Thread #3: on CPU 6
+Thread #0: on CPU 5
+Thread #1: on CPU 5
+Thread #2: on CPU 6
+Thread #3: on CPU 6
+Thread #0: on CPU 5
+Thread #1: on CPU 6
+Thread #2: on CPU 6
+Thread #3: on CPU 6
+^C
+</pre></div>
+<p>As expected, though there's some migration happening here, all threads remain
+faithfully locked to CPUs 5 and 6, as instructed.</p>
+</div>
+<div class="section" id="detour-thread-ids-and-native-handles">
+<h2>Detour - thread IDs and native handles</h2>
+<p>Even though the C++11 standard added a thread library, it can't standardize
+<em>everything</em>. OSes differ in how they implement and manage
+threads, and exposing every possible thread implementation detail in the C++
+standard can be overly restrictive. Instead, in addition to defining many
+threading concepts in a standard way, the thread library also lets us interact
+with platform-specific threading APIs by exposing <em>native handles</em>.
+These handles can then be passed into low-level platform-specific APIs (such
+as POSIX threads on Linux or Windows API on Windows) to exert finer grained
+control over the program.</p>
+<p>Here's an example program that launches a single thread, and then queries its
+thread ID along with the native handle:</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">**</span><span class="w"> </span><span class="n">argv</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="w"> </span><span class="n">iomutex</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="p">([</span><span class="o">&amp;</span><span class="n">iomutex</span><span class="p">]</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">lock_guard</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="o">&gt;</span><span class="w"> </span><span class="n">iolock</span><span class="p">(</span><span class="n">iomutex</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Thread: my id = &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">this_thread</span><span class="o">::</span><span class="n">get_id</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;</span><span class="se">\n</span><span class="s">&quot;</span><span class="w"></span>
+<span class="w">                </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;        my pthread id = &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">pthread_self</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">});</span><span class="w"></span>
+
+<span class="w">  </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">lock_guard</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="o">&gt;</span><span class="w"> </span><span class="n">iolock</span><span class="p">(</span><span class="n">iomutex</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Launched t: id = &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">t</span><span class="p">.</span><span class="n">get_id</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;</span><span class="se">\n</span><span class="s">&quot;</span><span class="w"></span>
+<span class="w">              </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;            native_handle = &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">t</span><span class="p">.</span><span class="n">native_handle</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">t</span><span class="p">.</span><span class="n">join</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The output of one particular run on my machine is:</p>
+<div class="highlight"><pre><span></span>$ ./thread-id-native-handle
+Launched t: id = 140249046939392
+            native_handle = 140249046939392
+Thread: my id = 140249046939392
+        my pthread id = 140249046939392
+</pre></div>
+<p>Both the main thread (the default thread running <tt class="docutils literal">main</tt> on entry) and the
+spawned thread obtain the thread's ID - a <a class="reference external" href="http://en.cppreference.com/w/cpp/thread/thread/id">standard defined concept</a> for an opaque type that we
+can print, hold in a container (for example, mapping it to something in a
+<tt class="docutils literal">hash_map</tt>), but not much other than that. Moreover, the thread object has the
+<tt class="docutils literal">native_handle</tt> method that returns an &quot;implementation defined type&quot; for a
+handle that will be recognized by the platform-speficic APIs. In the output
+shown above two things are notable:</p>
+<ol class="arabic simple">
+<li>The thread ID is actually equal to the native handle.</li>
+<li>Moreover, both are equal to the numeric pthread ID returned by
+<tt class="docutils literal">pthread_self</tt>.</li>
+</ol>
+<p>While the equality of <tt class="docutils literal">native_handle</tt> to the pthread ID is something the
+standard definitely implies <a class="footnote-reference" href="c11-threads-affinity-and-hyperthreading.html#footnote-1" id="footnote-reference-1">[1]</a>, the first one is surprising. It looks like an
+implementation artifact one definitely shouldn't rely upon. I examined the
+source code of a recent <a class="reference external" href="http://libcxx.llvm.org/">libc++</a> and found that a
+<tt class="docutils literal">pthread_t id</tt> is used as both the &quot;native&quot; handle and the actual &quot;id&quot; of a
+<tt class="docutils literal">thread</tt> object <a class="footnote-reference" href="c11-threads-affinity-and-hyperthreading.html#footnote-2" id="footnote-reference-2">[2]</a>.</p>
+<p>All of this is taking us pretty far off the main topic of this article, so let's
+recap. The most important take-away from this detour section is that the
+underlying platform-specific thread handle is available by means of the
+<tt class="docutils literal">native_handle</tt> method of a <tt class="docutils literal"><span class="pre">std::thread</span></tt>. This native handle on POSIX
+platforms is, in fact, the <tt class="docutils literal">pthread_t</tt> ID of the thread, so a call to
+<tt class="docutils literal">pthread_self</tt> within the thread itself is a perfectly valid way to obtain the
+same handle.</p>
+</div>
+<div class="section" id="setting-cpu-affinity-programatically">
+<h2>Setting CPU affinity programatically</h2>
+<p>As we've seen earlier, command-line tools like <tt class="docutils literal">taskset</tt> let us control the
+CPU affinity of a whole process. Sometimes, however, we'd like to do something
+more fine-grained and set the affinities of specific threads from <em>within</em> the
+program. How do we do that?</p>
+<p>On Linux, we can use the pthread-specific <a class="reference external" href="http://man7.org/linux/man-pages/man3/pthread_setaffinity_np.3.html">pthread_setaffinity_np</a> function.
+Here's an example that reproduces what we did before, but this time from inside
+the program. In fact, let's go a bit more fancy and pin each thread to a single
+known CPU by setting its affinity:</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">**</span><span class="w"> </span><span class="n">argv</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">constexpr</span><span class="w"> </span><span class="kt">unsigned</span><span class="w"> </span><span class="n">num_threads</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">4</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// A mutex ensures orderly access to std::cout from multiple threads.</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="w"> </span><span class="n">iomutex</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="o">&gt;</span><span class="w"> </span><span class="n">threads</span><span class="p">(</span><span class="n">num_threads</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">unsigned</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">num_threads</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">threads</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="kr">thread</span><span class="p">([</span><span class="o">&amp;</span><span class="n">iomutex</span><span class="p">,</span><span class="w"> </span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">this_thread</span><span class="o">::</span><span class="n">sleep_for</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">chrono</span><span class="o">::</span><span class="n">milliseconds</span><span class="p">(</span><span class="mi">20</span><span class="p">));</span><span class="w"></span>
+<span class="w">      </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="c1">// Use a lexical scope and lock_guard to safely lock the mutex only</span>
+<span class="w">          </span><span class="c1">// for the duration of std::cout usage.</span>
+<span class="w">          </span><span class="n">std</span><span class="o">::</span><span class="n">lock_guard</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">mutex</span><span class="o">&gt;</span><span class="w"> </span><span class="n">iolock</span><span class="p">(</span><span class="n">iomutex</span><span class="p">);</span><span class="w"></span>
+<span class="w">          </span><span class="n">std</span><span class="o">::</span><span class="n">cout</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Thread #&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;: on CPU &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">sched_getcpu</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">        </span><span class="c1">// Simulate important work done by the tread by sleeping for a bit...</span>
+<span class="w">        </span><span class="n">std</span><span class="o">::</span><span class="n">this_thread</span><span class="o">::</span><span class="n">sleep_for</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">chrono</span><span class="o">::</span><span class="n">milliseconds</span><span class="p">(</span><span class="mi">900</span><span class="p">));</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">});</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// Create a cpu_set_t object representing a set of CPUs. Clear it and mark</span>
+<span class="w">    </span><span class="c1">// only CPU i as set.</span>
+<span class="w">    </span><span class="kt">cpu_set_t</span><span class="w"> </span><span class="n">cpuset</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">CPU_ZERO</span><span class="p">(</span><span class="o">&amp;</span><span class="n">cpuset</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">CPU_SET</span><span class="p">(</span><span class="n">i</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">cpuset</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">rc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">pthread_setaffinity_np</span><span class="p">(</span><span class="n">threads</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">native_handle</span><span class="p">(),</span><span class="w"></span>
+<span class="w">                                    </span><span class="k">sizeof</span><span class="p">(</span><span class="kt">cpu_set_t</span><span class="p">),</span><span class="w"> </span><span class="o">&amp;</span><span class="n">cpuset</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">rc</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">std</span><span class="o">::</span><span class="n">cerr</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;Error calling pthread_setaffinity_np: &quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">rc</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="k">auto</span><span class="o">&amp;</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">threads</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">t</span><span class="p">.</span><span class="n">join</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Note how we use the <tt class="docutils literal">native_handle</tt> method discussed earlier in order to pass
+the underlying native handle to the pthread call (it takes a <tt class="docutils literal">pthread_t</tt> ID
+as its first argument). The output of this program on my machine is:</p>
+<div class="highlight"><pre><span></span>$ ./set-affinity
+Thread #0: on CPU 0
+Thread #1: on CPU 1
+Thread #2: on CPU 2
+Thread #3: on CPU 3
+Thread #0: on CPU 0
+Thread #1: on CPU 1
+Thread #2: on CPU 2
+Thread #3: on CPU 3
+Thread #0: on CPU 0
+Thread #1: on CPU 1
+Thread #2: on CPU 2
+Thread #3: on CPU 3
+^C
+</pre></div>
+<p>The threads get pinned to single CPUs exactly as requested.</p>
+</div>
+<div class="section" id="sharing-a-core-with-hyperthreading">
+<h2>Sharing a core with hyperthreading</h2>
+<p>Now's time for the really fun stuff. We've learned about CPU topologies a bit,
+and then developed progressively more complex programs using the C++ threading
+library and POSIX calls to fine-tune our use of the CPUs in a given machine, up
+to selecting exactly which thread runs on which CPU.</p>
+<p>But why any of this matters? Why would you want to pin threads to certain CPUs?
+Doesn't it make more sense to let the OS do what it's good at and manage the
+threads for you? Well, in most cases yes, but not always.</p>
+<p>See, not all CPUs are alike. If you have a modern processor in your machine, it
+most likely has multiple cores, each with multiple hardware threads - usually 2.
+For example as I've shown in the beginning of the article, my (Haswell)
+processor has 4 cores, each with 2 threads, for a total of HW 8-threads - 8
+logical CPUs for the OS. I can use the excellent <tt class="docutils literal">lstopo</tt> tool to display the
+topology of my processor:</p>
+<img alt="lstopo topology of my home CPU" class="align-center" src="../images/2016/home-pc-lstopo.png" />
+<p>An alternative non-graphical way to see which threads share the same core is to
+look at a special system file that exists per logical CPU. For example, for CPU
+0:</p>
+<div class="highlight"><pre><span></span>$ cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list
+0,4
+</pre></div>
+<p>More powerful (server-class) processors will have multiple sockets, each with a
+multi-core CPU. For example, at work I have a machine with 2 sockets, each of
+which is a 8-core CPU with hyper-threading enabled: a total of 32 hardware
+threads. An even more general case is usually brought under the umberlla of
+<a class="reference external" href="https://en.wikipedia.org/wiki/Non-uniform_memory_access">NUMA</a>, where the OS
+can take charge of multiple very-loosely connected CPUs that don't even share
+the same system memory and bus.</p>
+<p>The important question to ask is - what <em>do</em> hardware threads share, and how
+does it affect the programs we write. Take another look at the <tt class="docutils literal">lstopo</tt>
+diagram shown above. It's easy to see that L1 and L2 caches are shared between
+the two threads in every core. L3 is shared among all cores. For multi-socket
+machines. cores on the same socket share L3 but each socket usually has its own
+L3. In NUMA, each processor usually has access to its own DRAM, and some
+communication mechanism is used for one processor to access the DRAM of another
+processor.</p>
+<p>Caches isn't the only thing threads within a core share, however. They also
+share many of the core's execution resources, like the execution engine, system
+bus interface, instruction fetch and decode units, branch predictors and so on
+<a class="footnote-reference" href="c11-threads-affinity-and-hyperthreading.html#footnote-3" id="footnote-reference-3">[3]</a>.</p>
+<p>So if you've wondered why hyper-threading is sometimes considered a trick played
+by CPU vendors, now you know. Since the two threads on a core share so much,
+they are not fully independent CPUs in the general sense. True, for some
+workloads this arrangement is beneficial, but for some it's not. Sometimes it
+can even be harmful, as the hordes of &quot;how to disable hyper-threading to improve
+app X's performance&quot; threads online imply.</p>
+</div>
+<div class="section" id="performance-demos-of-core-sharing-vs-separate-cores">
+<h2>Performance demos of core sharing vs. separate cores</h2>
+<p>I've implemented a benchmark that lets me run different floating-point
+&quot;workloads&quot; on different logical CPUs in parallel threads, and compare how long
+these workloads take to finish. Each workload gets its own large <tt class="docutils literal">float</tt>
+array, and has to compute a single <tt class="docutils literal">float</tt> result. The benchmark figures out
+which workloads to run and on which CPUs from the user's input, prepares the
+inputs and then unleashes all the workloads in parallel in separate threads,
+using the APIs we've seen earlier to set the precise CPU affinity of each thread
+as requested. If you're interested, the full benchmark along with a <tt class="docutils literal">Makefile</tt>
+for Linux is <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2016/threads-affinity">available here</a>;
+in the rest of the post I'll just paste short code snippets and results.</p>
+<p>I'll be focusing on two workloads. The first is a simple accumulator:</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">workload_accum</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">float</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="kt">float</span><span class="o">&amp;</span><span class="w"> </span><span class="n">result</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">t1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">hires_clock</span><span class="o">::</span><span class="n">now</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="kt">float</span><span class="w"> </span><span class="n">rt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">data</span><span class="p">.</span><span class="n">size</span><span class="p">();</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">rt</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">data</span><span class="p">[</span><span class="n">i</span><span class="p">];</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rt</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// ... runtime reporting code</span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It adds up all the floats in the input array together. This is akin to what
+<tt class="docutils literal"><span class="pre">std::accumulate</span></tt> would do.</p>
+<p>Now I'll run three tests:</p>
+<ol class="arabic simple">
+<li>Run <tt class="docutils literal">accum</tt> on a single CPU, to get a baseline performance number. Measure
+how long it takes.</li>
+<li>Run two <tt class="docutils literal">accum</tt> instances on different cores. Measure how long each
+instance takes.</li>
+<li>Run two <tt class="docutils literal">accum</tt> instances on two threads of the same core <a class="footnote-reference" href="c11-threads-affinity-and-hyperthreading.html#footnote-4" id="footnote-reference-4">[4]</a>. Measure
+how long each instance takes.</li>
+</ol>
+<p>The reported numbers (here and in what follows) is execution time for an array
+of 100 million floats as input of a single workload. I'll average them over a
+few runs:</p>
+<img alt="accum runtime chart" class="align-center" src="../images/2016/accum-chart.png" />
+<p>This clearly shows that when a thread running <tt class="docutils literal">accum</tt> shares a core with
+another thread running <tt class="docutils literal">accum</tt>, its runtime doesn't change at all. This has
+good news and bad news. The good news is that this particular workload is well
+suitable for hyper-threading, because apparently two threads running on the same
+core manage not to disturb each other. The bad news is that precisely for the
+same reason it's not a great single-thread implementation, since quite
+obviously it doesn't use the processor's resources optimally.</p>
+<p>To give a bit more details, let's look at the disassembly of the inner loop of
+<tt class="docutils literal">workload_accum</tt>:</p>
+<div class="highlight"><pre><span></span>4028b0:       f3 41 0f 58 04 90       addss  (%r8,%rdx,4),%xmm0
+4028b6:       48 83 c2 01             add    $0x1,%rdx
+4028ba:       48 39 ca                cmp    %rcx,%rdx
+4028bd:       75 f1                   jne    4028b0
+</pre></div>
+<p>Pretty straightforward. The compiler uses the <tt class="docutils literal">addss</tt> SSE instruction to add
+floats together in the low 32 bits of a SSE (128-bit) register. On Haswell, the
+latency of this instruction is 3 cycles. The latency, and not the throughput, is
+important here because we keep adding into <tt class="docutils literal">xmm0</tt>. So one addition has to
+finish entirely before the next one begins <a class="footnote-reference" href="c11-threads-affinity-and-hyperthreading.html#footnote-5" id="footnote-reference-5">[5]</a>. Moreover, while Haswell has 8
+execution units, <tt class="docutils literal">addss</tt> uses only one of them. This is a fairly low
+utilization of the hardware. Therefore, it makes sense that two threads running
+on the same core manage not to trample over each other.</p>
+<p>As a different example, consider a slightly more complex workload:</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">workload_sin</span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">float</span><span class="o">&gt;&amp;</span><span class="w"> </span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="kt">float</span><span class="o">&amp;</span><span class="w"> </span><span class="n">result</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">t1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">hires_clock</span><span class="o">::</span><span class="n">now</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="kt">float</span><span class="w"> </span><span class="n">rt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">data</span><span class="p">.</span><span class="n">size</span><span class="p">();</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">rt</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">std</span><span class="o">::</span><span class="n">sin</span><span class="p">(</span><span class="n">data</span><span class="p">[</span><span class="n">i</span><span class="p">]);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="n">result</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">rt</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// ... runtime reporting code</span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Here instead of just adding the numbers up, we add their sines up. Now,
+<tt class="docutils literal"><span class="pre">std::sin</span></tt> is a pretty convoluted function that runs a reduced Taylor series
+polynomial approximation, and has a lot of number crunching inside it (along
+with a lookup table, usually). This should keep the execution units of a core
+more busy than simple addition. Let's check the three different modes of running
+again:</p>
+<img alt="sin runtime chart" class="align-center" src="../images/2016/sin-chart.png" />
+<p>This is more interesting. While running on different cores didn't harm the
+performance of a single thread (so the computation is nicely parallelizable),
+running on the same core <em>did</em> hurt it - a lot (by more than 75%).</p>
+<p>Again, there's good news here and bad news here. The good news is that even
+on the same core, if you want to crunch as many numbers as possible, two threads
+put together will be faster than a single thread (945 ms to crunch two input
+arrays, while a single thread would take 540 * 2 = 1080 ms to achieve the same).
+The bad news is that if you care about latency, running multiple threads on
+the same core actually <em>hurts</em> it - the threads compete over the execution units
+of the core and slow each other down.</p>
+</div>
+<div class="section" id="a-note-on-portability">
+<h2>A note on portability</h2>
+<p>So far the examples in this article were Linux-specific. However, everything we
+went through here is available for multiple platforms, and there are portable
+libraries one can use to leverage this. They will be a bit more cumbersome and
+verbose to use than the native APIs, but if you need cross-platform portability,
+that's not a big price to pay. A good portable library I found useful is <a class="reference external" href="https://www.open-mpi.org/projects/hwloc/">hwloc</a>, which is part of the Open MPI
+project. It's highly portable - running on Linux, Solaris, *BSD, Windows, you
+name it. In fact, the <tt class="docutils literal">lstopo</tt> tool I mentioned earlier is built on <tt class="docutils literal">hwloc</tt>.</p>
+<p><tt class="docutils literal">hwloc</tt> is a generic C API that enables one to query the topology of the
+system (including sockets, cores, caches, NUMA nodes, etc.) as well as setting
+and querying affinities. I won't spend much time on it, but I did include a
+<a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2016/threads-affinity/hwloc-example.cpp">simple example</a>
+with the source repository for this article. It shows the system's topology and
+binds the calling thread to a certain logical processor. It also shows how to
+build a program using <tt class="docutils literal">hwloc</tt>. If you care about portability, I hope you will
+find the example useful. And if you know of any other cool uses for <tt class="docutils literal">hwloc</tt>,
+or about other portable libraries for this purpose - drop me a line!</p>
+</div>
+<div class="section" id="closing-words">
+<h2>Closing words</h2>
+<p>So, what have we learned? We've seen how to examine and set thread affinity.
+We've also learned how to control placement of threads on logical CPUs by using
+the C++ standard threading library in conjunction with POSIX calls, and the
+bridging native handles exposed by the C++ threading library for this purpose.
+Next we've seen how we can figure out the exact hardware topology of the
+processor and select which threads share a core, and which threads run on
+different cores, and why this really matters.</p>
+<p>The conclusion, as it always is with performance-critical code, is that
+measurement is the single most important thing. There are so many variables to
+control in modern performance tuning that it's very hard to predict in advance
+what will be faster, and why. Different workloads have very different CPU
+utilization characteristics, which makes them more or less suitable for sharing
+a CPU core, sharing a socket or sharing a NUMA node. Yes, the OS sees 8 CPUs on
+my machine, and the standard threading library even lets me query this number in
+a portable way; but not all of these CPUs are alike - and this is important to
+understand in order to squeeze the best performance out of the machine.</p>
+<p>I haven't gone very deep into analyzing the micro-op level performance of the
+two presented workloads, because that's really not the focus of this article.
+That said, I hope this article provides another angle to figure out what matters
+in multi-threaded performance. Physical resource sharing is not always taking
+into account when figuring out how to parallelize an algorithm - but as we've
+seen here, <em>it really should</em>.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="c11-threads-affinity-and-hyperthreading.html#footnote-reference-1">[1]</a></td><td>Though it can't guarantee it, since the C++ standard &quot;doesn't know&quot; what
+POSIX is.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="c11-threads-affinity-and-hyperthreading.html#footnote-reference-2">[2]</a></td><td>The same is done in the POSIX port of libstdc++ (though the
+code is somewhat more convoluted if you want to check on your own).</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="c11-threads-affinity-and-hyperthreading.html#footnote-reference-3">[3]</a></td><td>For more details see the <a class="reference external" href="https://en.wikipedia.org/wiki/Hyper-threading">Wikipedia page on hyper-threading</a> and <a class="reference external" href="http://www.agner.org/optimize/blog/read.php?i=6">this post</a> by Agner Fog.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="c11-threads-affinity-and-hyperthreading.html#footnote-reference-4">[4]</a></td><td>The knowledge of which CPUs belong to the same core or different cores is
+taken from the <tt class="docutils literal">lstopo</tt> diagram for my machine.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="c11-threads-affinity-and-hyperthreading.html#footnote-reference-5">[5]</a></td><td>There are ways to optimize this loop, like manually unrolling it to use
+several XMM registers, or even better - use the <tt class="docutils literal">addps</tt> instruction to
+add up 4 floats at the same time. This isn't strictly safe, though, since
+floating-point addition is not associative. The compiler would need to
+see a <tt class="docutils literal"><span class="pre">-ffast-math</span></tt> flag to enable such optimizations.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="c11-threads-affinity-and-hyperthreading.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../theme/js/count.js"></script>
+</body>
+</html>

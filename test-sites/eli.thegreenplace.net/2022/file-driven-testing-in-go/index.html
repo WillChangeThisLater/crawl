@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>File-driven testing in Go - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to File-driven testing in Go">
+                        File-driven testing in Go
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> February 12, 2022 at 20:20</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/testing.html">Testing</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This is a quick post about a testing pattern I've found useful in multiple
+programming languages; Go's <tt class="docutils literal">testing</tt> package makes it particularly easy
+to use and implement.</p>
+<p><em>Table-driven tests</em> are a well-known and recommended technique for structuring
+unit tests in Go. I assume the reader is familiar with table-driven tests; if
+not, check out <a class="reference external" href="https://gobyexample.com/testing-and-benchmarking">this basic example</a> or google for the many
+tutorials available online.</p>
+<p>In some cases, the input to a test can be more data than we're willing
+to paste into a <tt class="docutils literal">_test.go</tt> file, or the input can be non-text. For these
+cases, file-driven tests are a useful extension to the table-driven technique.</p>
+<p>Suppose - for the sake of demonstration - that we want to test Go's
+<tt class="docutils literal">go/format</tt> package. This package provides programmatic access to <tt class="docutils literal">gofmt</tt>'s
+capabilities with the <a class="reference external" href="https://pkg.go.dev/go/format#Source">Source function</a>
+that takes unformatted Go text as input and produces formatted text. We could
+use table-driven tests for this, but some inputs may be large - whole Go files,
+or significant chunks thereof. It can be more convenient to have these inputs in
+external files the test can read and invoke <tt class="docutils literal">format.Source</tt> on.</p>
+<p><a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2022/filetest">This toy GitHub repository</a> shows how
+it's done. Here is the directory structure:</p>
+<div class="highlight"><pre><span></span>$ tree
+.
+├── go.mod
+└── somepackage
+    ├── somepackage_test.go
+    └── testdata
+        ├── funcs.golden
+        ├── funcs.input
+        ├── simple-expr.golden
+        └── simple-expr.input
+</pre></div>
+<p>Our test code is in <tt class="docutils literal">somepackage_test.go</tt> - we'll get to it shortly. Alongside
+it is the <tt class="docutils literal">testdata</tt> directory with pairs of files named <tt class="docutils literal"><span class="pre">&lt;name&gt;.input</span></tt>
+and <tt class="docutils literal"><span class="pre">&lt;name&gt;.golden</span></tt>. Each pair serves as a test: the input file is fed into
+the formatter, and the formatter's output is compared to the golden file.</p>
+<p>This is the entirety of our test code:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">TestFormatFiles</span><span class="p">(</span><span class="nx">t</span><span class="w"> </span><span class="o">*</span><span class="nx">testing</span><span class="p">.</span><span class="nx">T</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Find the paths of all input files in the data directory.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">paths</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">filepath</span><span class="p">.</span><span class="nx">Glob</span><span class="p">(</span><span class="nx">filepath</span><span class="p">.</span><span class="nx">Join</span><span class="p">(</span><span class="s">&quot;testdata&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;*.input&quot;</span><span class="p">))</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">t</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">path</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">paths</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">filename</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">filepath</span><span class="p">.</span><span class="nx">Split</span><span class="p">(</span><span class="nx">path</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">testname</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">filename</span><span class="p">[:</span><span class="nb">len</span><span class="p">(</span><span class="nx">filename</span><span class="p">)</span><span class="o">-</span><span class="nb">len</span><span class="p">(</span><span class="nx">filepath</span><span class="p">.</span><span class="nx">Ext</span><span class="p">(</span><span class="nx">path</span><span class="p">))]</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// Each path turns into a test: the test name is the filename without the</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// extension.</span><span class="w"></span>
+<span class="w">    </span><span class="nx">t</span><span class="p">.</span><span class="nx">Run</span><span class="p">(</span><span class="nx">testname</span><span class="p">,</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">t</span><span class="w"> </span><span class="o">*</span><span class="nx">testing</span><span class="p">.</span><span class="nx">T</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">source</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">ReadFile</span><span class="p">(</span><span class="nx">path</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">t</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;error reading source file:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">      </span><span class="c1">// &gt;&gt;&gt; This is the actual code under test.</span><span class="w"></span>
+<span class="w">      </span><span class="nx">output</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">format</span><span class="p">.</span><span class="nx">Source</span><span class="p">(</span><span class="nx">source</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">t</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;error formatting:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="c1">// &lt;&lt;&lt;</span><span class="w"></span>
+
+<span class="w">      </span><span class="c1">// Each input file is expected to have a &quot;golden output&quot; file, with the</span><span class="w"></span>
+<span class="w">      </span><span class="c1">// same path except the .input extension is replaced by .golden</span><span class="w"></span>
+<span class="w">      </span><span class="nx">goldenfile</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">filepath</span><span class="p">.</span><span class="nx">Join</span><span class="p">(</span><span class="s">&quot;testdata&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">testname</span><span class="o">+</span><span class="s">&quot;.golden&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="nx">want</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">ReadFile</span><span class="p">(</span><span class="nx">goldenfile</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">t</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;error reading golden file:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">!</span><span class="nx">bytes</span><span class="p">.</span><span class="nx">Equal</span><span class="p">(</span><span class="nx">output</span><span class="p">,</span><span class="w"> </span><span class="nx">want</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">t</span><span class="p">.</span><span class="nx">Errorf</span><span class="p">(</span><span class="s">&quot;\n==== got:\n%s\n==== want:\n%s\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">output</span><span class="p">,</span><span class="w"> </span><span class="nx">want</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">})</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The code is well commented, but here are a few highlights:</p>
+<ul class="simple">
+<li>The test file pairs are <em>auto-discovered</em> using <tt class="docutils literal">filepath.Glob</tt>. Placing
+additional file pairs in the <tt class="docutils literal">testdata</tt> directory will automatically ensure
+they are used by subsequent test executions. When we run <tt class="docutils literal">go test</tt>, the
+current working directory will be set to the package that's being tested, so
+finding the <tt class="docutils literal">testdata</tt> directory is easy.</li>
+<li>The <tt class="docutils literal">testdata</tt> name is special for the Go toolchain, which will
+ignore files in it (so you can place files named <tt class="docutils literal">*.go</tt> there,
+for example, and they won't be built or analyzed).</li>
+<li>For each file pair we create a <em>subtest</em>
+with <a class="reference external" href="https://pkg.go.dev/testing#T.Run">T.Run</a>. This means it's a separate
+test as far as the test runner is concerned - reported on its own in verbose
+output, can be run in parallel with other tests, etc.</li>
+</ul>
+<p>If we run the tests, we get:</p>
+<div class="highlight"><pre><span></span>$ go test -v ./...
+=== RUN   TestFormatFiles
+=== RUN   TestFormatFiles/funcs
+=== RUN   TestFormatFiles/simple-expr
+--- PASS: TestFormatFiles (0.00s)
+    --- PASS: TestFormatFiles/funcs (0.00s)
+    --- PASS: TestFormatFiles/simple-expr (0.00s)
+PASS
+ok    example.com/somepackage 0.002s
+</pre></div>
+<p>Note how each input file in <tt class="docutils literal">testdata</tt> generated its own test with a distinct
+name.</p>
+<p>The &quot;golden file&quot; approach shown here is just one of the possible patterns for
+using file-driven tests. Often there is no separate file for the expected
+output, and instead the input file itself contains some special markers that
+drive the test's expectations. It's really dependent on the specific testing
+scenario; the Go project and subprojects (such as <tt class="docutils literal">x/tools</tt>) use several
+variations of this testing pattern.</p>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

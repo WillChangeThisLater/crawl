@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Concurrent Servers: Part 4 - libuv - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Concurrent Servers: Part 4 - libuv">
+                        Concurrent Servers: Part 4 - libuv
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> November 09, 2017 at 05:30</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/concurrency.html">Concurrency</a>
+        ,
+    <a href="../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../tag/network-programming.html">Network Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This is part 4 of a series of posts on writing concurrent network servers. In
+this part we're going to use <tt class="docutils literal">libuv</tt> to rewrite our server once again, and
+also talk about handling time-consuming tasks in callbacks using a thread pool.
+Finally, we're going to look under the hood of <tt class="docutils literal">libuv</tt> for a bit to study how
+it wraps blocking file-system operations with an asynchronous API.</p>
+<p>All posts in the series:</p>
+<ul class="simple">
+<li><a class="reference external" href="../concurrent-servers-part-1-introduction/index.html">Part 1 - Introduction</a></li>
+<li><a class="reference external" href="../concurrent-servers-part-2-threads/index.html">Part 2 - Threads</a></li>
+<li><a class="reference external" href="../concurrent-servers-part-3-event-driven/index.html">Part 3 - Event-driven</a></li>
+<li><a class="reference external" href="index.html">Part 4 - libuv</a></li>
+<li><a class="reference external" href="../concurrent-servers-part-5-redis-case-study/index.html">Part 5 - Redis case study</a></li>
+<li><a class="reference external" href="../../2018/concurrent-servers-part-6-callbacks-promises-and-asyncawait/index.html">Part 6 - Callbacks, Promises and async/await</a></li>
+</ul>
+<div class="section" id="abstracting-away-event-driven-loops-with-libuv">
+<h2>Abstracting away event-driven loops with libuv</h2>
+<p>In <a class="reference external" href="../concurrent-servers-part-3-event-driven/index.html">part 3</a>,
+we've seen how similar <tt class="docutils literal">select</tt>-based and <tt class="docutils literal">epoll</tt>-based servers are, and I
+mentioned it's very tempting to abstract away the minor differences between
+them. Numerous libraries are already doing this, however, so in this part I'm
+going to pick one and use it. The library I'm picking is <a class="reference external" href="http://libuv.org/">libuv</a>, which was originally designed to serve as the underlying
+portable platform layer for Node.js, and has since found use in additional
+projects. <tt class="docutils literal">libuv</tt> is written in C, which makes it highly portable and very
+suitable for tying into high-level languages like JavaScript and Python.</p>
+<p>While <tt class="docutils literal">libuv</tt> has grown to be a fairly large framework for abstracting
+low-level platform details, it remains centered on the concept of an <em>event
+loop</em>. In our event-driven servers in part 3, the event loop was explicit
+in the <tt class="docutils literal">main</tt> function; when using <tt class="docutils literal">libuv</tt>, the loop is usually hidden
+inside the library itself, and user code just registers event handlers (as
+callback functions) and runs the loop. Furthermore, <tt class="docutils literal">libuv</tt> will use the
+fastest event loop implementation for a given platform: for Linux this is
+<tt class="docutils literal">epoll</tt>, etc.</p>
+<img alt="libuv loop" class="align-center" src="../../images/2017/libuvloop.png" />
+<p><tt class="docutils literal">libuv</tt> supports multiple event loops, and thus an event loop is
+a first class citizen within the library; it has a handle - <tt class="docutils literal">uv_loop_t</tt>, and
+functions for creating/destroying/starting/stopping loops. That said, I will
+only use the &quot;default&quot; loop in this post, which <tt class="docutils literal">libuv</tt> makes available via
+<tt class="docutils literal">uv_default_loop()</tt>; multiple loops are mosly useful for multi-threaded
+event-driven servers, a more advanced topic I'll leave for future parts in the
+series.</p>
+</div>
+<div class="section" id="a-concurrent-server-using-libuv">
+<h2>A concurrent server using libuv</h2>
+<p>To get a better feel for <tt class="docutils literal">libuv</tt>, let's jump to our trusty protocol server
+that we've been vigorously reimplementing throughout the series. The structure
+of this server is going to be somewhat similar to the <tt class="docutils literal">select</tt> and
+<tt class="docutils literal">epoll</tt>-based servers of part 3, since it also relies on callbacks. The full
+<a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/async-socket-server/uv-server.c">code sample is here</a>;
+we start with setting up the server socket bound to a local port:</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span><span class="w"> </span><span class="n">portnum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">9090</span><span class="p">;</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">argc</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">portnum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">atoi</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="n">printf</span><span class="p">(</span><span class="s">&quot;Serving on port %d</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">portnum</span><span class="p">);</span><span class="w"></span>
+
+<span class="kt">int</span><span class="w"> </span><span class="n">rc</span><span class="p">;</span><span class="w"></span>
+<span class="n">uv_tcp_t</span><span class="w"> </span><span class="n">server_stream</span><span class="p">;</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">rc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_tcp_init</span><span class="p">(</span><span class="n">uv_default_loop</span><span class="p">(),</span><span class="w"> </span><span class="o">&amp;</span><span class="n">server_stream</span><span class="p">))</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">die</span><span class="p">(</span><span class="s">&quot;uv_tcp_init failed: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">rc</span><span class="p">));</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr_in</span><span class="w"> </span><span class="n">server_address</span><span class="p">;</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">rc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_ip4_addr</span><span class="p">(</span><span class="s">&quot;0.0.0.0&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">portnum</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">server_address</span><span class="p">))</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">die</span><span class="p">(</span><span class="s">&quot;uv_ip4_addr failed: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">rc</span><span class="p">));</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">rc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_tcp_bind</span><span class="p">(</span><span class="o">&amp;</span><span class="n">server_stream</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="k">const</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">server_address</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">))</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">die</span><span class="p">(</span><span class="s">&quot;uv_tcp_bind failed: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">rc</span><span class="p">));</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Fairly standard socket fare here, except that it's all wrapped in <tt class="docutils literal">libuv</tt>
+APIs. In return we get a portable interface that should work on any platform
+<tt class="docutils literal">libuv</tt> supports.</p>
+<p>This code also demonstrates conscientious error handling; most <tt class="docutils literal">libuv</tt>
+functions return an integer status, with a negative number meaning an error. In
+our server we treat these errors as fatals, but one may imagine a more graceful
+recovery.</p>
+<p>Now that the socket is bound, it's time to listen on it. Here we run into our
+first callback registration:</p>
+<div class="highlight"><pre><span></span><span class="c1">// Listen on the socket for new peers to connect. When a new peer connects,</span>
+<span class="c1">// the on_peer_connected callback will be invoked.</span>
+<span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">rc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_listen</span><span class="p">((</span><span class="n">uv_stream_t</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">server_stream</span><span class="p">,</span><span class="w"> </span><span class="n">N_BACKLOG</span><span class="p">,</span><span class="w"> </span><span class="n">on_peer_connected</span><span class="p">))</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">die</span><span class="p">(</span><span class="s">&quot;uv_listen failed: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">rc</span><span class="p">));</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p><tt class="docutils literal">uv_listen</tt> registers a callback that the event loop will invoke when new
+peers connect to the socket. Our callback here is called <tt class="docutils literal">on_peer_connected</tt>,
+and we'll examine it soon.</p>
+<p>Finally, <tt class="docutils literal">main</tt> runs the <tt class="docutils literal">libuv</tt> loop until it's stopped (<tt class="docutils literal">uv_run</tt> only
+returns when the loop has stopped or some error occurred).</p>
+<div class="highlight"><pre><span></span><span class="c1">// Run the libuv event loop.</span>
+<span class="n">uv_run</span><span class="p">(</span><span class="n">uv_default_loop</span><span class="p">(),</span><span class="w"> </span><span class="n">UV_RUN_DEFAULT</span><span class="p">);</span><span class="w"></span>
+
+<span class="c1">// If uv_run returned, close the default loop before exiting.</span>
+<span class="k">return</span><span class="w"> </span><span class="n">uv_loop_close</span><span class="p">(</span><span class="n">uv_default_loop</span><span class="p">());</span><span class="w"></span>
+</pre></div>
+<p>Note that only a single callback was registered by <tt class="docutils literal">main</tt> prior to running the
+event loop; we'll soon see how additional callbacks are added. It's not a
+problem to add and remove callbacks throughout the runtime of the event loop -
+in fact, this is how most servers are expected to be written.</p>
+<p>This is <tt class="docutils literal">on_peer_connected</tt>, which handles new client connections to the
+server:</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">on_peer_connected</span><span class="p">(</span><span class="n">uv_stream_t</span><span class="o">*</span><span class="w"> </span><span class="n">server_stream</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">status</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">status</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">fprintf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Peer connection error: %s</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">status</span><span class="p">));</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// client will represent this peer; it&#39;s allocated on the heap and only</span>
+<span class="w">  </span><span class="c1">// released when the client disconnects. The client holds a pointer to</span>
+<span class="w">  </span><span class="c1">// peer_state_t in its data field; this peer state tracks the protocol state</span>
+<span class="w">  </span><span class="c1">// with this client throughout interaction.</span>
+<span class="w">  </span><span class="n">uv_tcp_t</span><span class="o">*</span><span class="w"> </span><span class="n">client</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">uv_tcp_t</span><span class="o">*</span><span class="p">)</span><span class="n">xmalloc</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">client</span><span class="p">));</span><span class="w"></span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">rc</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">rc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_tcp_init</span><span class="p">(</span><span class="n">uv_default_loop</span><span class="p">(),</span><span class="w"> </span><span class="n">client</span><span class="p">))</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">die</span><span class="p">(</span><span class="s">&quot;uv_tcp_init failed: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">rc</span><span class="p">));</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="n">client</span><span class="o">-&gt;</span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">uv_accept</span><span class="p">(</span><span class="n">server_stream</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="n">uv_stream_t</span><span class="o">*</span><span class="p">)</span><span class="n">client</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr_storage</span><span class="w"> </span><span class="n">peername</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">namelen</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">peername</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">rc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_tcp_getpeername</span><span class="p">(</span><span class="n">client</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">peername</span><span class="p">,</span><span class="w"></span>
+<span class="w">                                 </span><span class="o">&amp;</span><span class="n">namelen</span><span class="p">))</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">die</span><span class="p">(</span><span class="s">&quot;uv_tcp_getpeername failed: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">rc</span><span class="p">));</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="n">report_peer_connected</span><span class="p">((</span><span class="k">const</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr_in</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">peername</span><span class="p">,</span><span class="w"> </span><span class="n">namelen</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// Initialize the peer state for a new client: we start by sending the peer</span>
+<span class="w">    </span><span class="c1">// the initial &#39;*&#39; ack.</span>
+<span class="w">    </span><span class="n">peer_state_t</span><span class="o">*</span><span class="w"> </span><span class="n">peerstate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">peer_state_t</span><span class="o">*</span><span class="p">)</span><span class="n">xmalloc</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">peerstate</span><span class="p">));</span><span class="w"></span>
+<span class="w">    </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">INITIAL_ACK</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendbuf</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="sc">&#39;*&#39;</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendbuf_end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">client</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">client</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">client</span><span class="o">-&gt;</span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">peerstate</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// Enqueue the write request to send the ack; when it&#39;s done,</span>
+<span class="w">    </span><span class="c1">// on_wrote_init_ack will be called. The peer state is passed to the write</span>
+<span class="w">    </span><span class="c1">// request via the data pointer; the write request does not own this peer</span>
+<span class="w">    </span><span class="c1">// state - it&#39;s owned by the client handle.</span>
+<span class="w">    </span><span class="n">uv_buf_t</span><span class="w"> </span><span class="n">writebuf</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_buf_init</span><span class="p">(</span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendbuf</span><span class="p">,</span><span class="w"> </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendbuf_end</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">uv_write_t</span><span class="o">*</span><span class="w"> </span><span class="n">req</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">uv_write_t</span><span class="o">*</span><span class="p">)</span><span class="n">xmalloc</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">req</span><span class="p">));</span><span class="w"></span>
+<span class="w">    </span><span class="n">req</span><span class="o">-&gt;</span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">peerstate</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">rc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_write</span><span class="p">(</span><span class="n">req</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="n">uv_stream_t</span><span class="o">*</span><span class="p">)</span><span class="n">client</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">writebuf</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"></span>
+<span class="w">                       </span><span class="n">on_wrote_init_ack</span><span class="p">))</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">die</span><span class="p">(</span><span class="s">&quot;uv_write failed: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">rc</span><span class="p">));</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">uv_close</span><span class="p">((</span><span class="n">uv_handle_t</span><span class="o">*</span><span class="p">)</span><span class="n">client</span><span class="p">,</span><span class="w"> </span><span class="n">on_client_closed</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This code is well commented, but there are a couple of important <tt class="docutils literal">libuv</tt>
+idioms I'd like to highlight:</p>
+<ul class="simple">
+<li>Passing custom data into callbacks: since C has no closures, this can be
+challenging. <tt class="docutils literal">libuv</tt> has a <tt class="docutils literal">void* data</tt> field in all its handle types;
+these fields can be used to pass user data. For example, note how
+<tt class="docutils literal"><span class="pre">client-&gt;data</span></tt> is made to point to a <tt class="docutils literal">peer_state_t</tt> structure so that the
+callbacks registered by <tt class="docutils literal">uv_write</tt> and <tt class="docutils literal">uv_read_start</tt> can know which peer
+data they're dealing with.</li>
+<li>Memory management: event-driven programming is much easier in languages with
+garbage collection, because callbacks usually run in a completely different
+stack frame from where they were registered, making stack-based memory
+management difficult. It's almost always necessary to pass heap-allocated data
+to <tt class="docutils literal">libuv</tt> callbacks (except in <tt class="docutils literal">main</tt>, which remains alive on the stack
+when all callbacks run), and to avoid leaks much care is required about when
+these data are safe to <tt class="docutils literal">free()</tt>. This is something that comes with a bit of
+practice <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>.</li>
+</ul>
+<p>The peer state for this server is:</p>
+<div class="highlight"><pre><span></span><span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">ProcessingState</span><span class="w"> </span><span class="n">state</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kt">char</span><span class="w"> </span><span class="n">sendbuf</span><span class="p">[</span><span class="n">SENDBUF_SIZE</span><span class="p">];</span><span class="w"></span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">sendbuf_end</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">uv_tcp_t</span><span class="o">*</span><span class="w"> </span><span class="n">client</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"> </span><span class="n">peer_state_t</span><span class="p">;</span><span class="w"></span>
+</pre></div>
+<p>It's fairly similar to the state in part 3; we no longer need <tt class="docutils literal">sendptr</tt>,
+since <tt class="docutils literal">uv_write</tt> will make sure to send the whole buffer it's given before
+invoking the &quot;done writing&quot; callback. We also keep a pointer to the client for
+other callbacks to use. Here's <tt class="docutils literal">on_wrote_init_ack</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">on_wrote_init_ack</span><span class="p">(</span><span class="n">uv_write_t</span><span class="o">*</span><span class="w"> </span><span class="n">req</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">status</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">status</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">die</span><span class="p">(</span><span class="s">&quot;Write error: %s</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">status</span><span class="p">));</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="n">peer_state_t</span><span class="o">*</span><span class="w"> </span><span class="n">peerstate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">peer_state_t</span><span class="o">*</span><span class="p">)</span><span class="n">req</span><span class="o">-&gt;</span><span class="n">data</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Flip the peer state to WAIT_FOR_MSG, and start listening for incoming data</span>
+<span class="w">  </span><span class="c1">// from this peer.</span>
+<span class="w">  </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">WAIT_FOR_MSG</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendbuf_end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">rc</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">rc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_read_start</span><span class="p">((</span><span class="n">uv_stream_t</span><span class="o">*</span><span class="p">)</span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">client</span><span class="p">,</span><span class="w"> </span><span class="n">on_alloc_buffer</span><span class="p">,</span><span class="w"></span>
+<span class="w">                          </span><span class="n">on_peer_read</span><span class="p">))</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">die</span><span class="p">(</span><span class="s">&quot;uv_read_start failed: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">rc</span><span class="p">));</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Note: the write request doesn&#39;t own the peer state, hence we only free the</span>
+<span class="w">  </span><span class="c1">// request itself, not the state.</span>
+<span class="w">  </span><span class="n">free</span><span class="p">(</span><span class="n">req</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Then we know for sure that the initial <tt class="docutils literal">'*'</tt> was sent to the peer, we start
+listening to incoming data from this peer by calling <tt class="docutils literal">uv_read_start</tt>, which
+registers a callback (<tt class="docutils literal">on_peer_read</tt>) that will be invoked by the event loop
+whenever new data is received on the socket from the client:</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">on_peer_read</span><span class="p">(</span><span class="n">uv_stream_t</span><span class="o">*</span><span class="w"> </span><span class="n">client</span><span class="p">,</span><span class="w"> </span><span class="kt">ssize_t</span><span class="w"> </span><span class="n">nread</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="n">uv_buf_t</span><span class="o">*</span><span class="w"> </span><span class="n">buf</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">nread</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">nread</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">uv_eof</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">fprintf</span><span class="p">(</span><span class="n">stderr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;read error: %s</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">nread</span><span class="p">));</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="n">uv_close</span><span class="p">((</span><span class="n">uv_handle_t</span><span class="o">*</span><span class="p">)</span><span class="n">client</span><span class="p">,</span><span class="w"> </span><span class="n">on_client_closed</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">nread</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// from the documentation of uv_read_cb: nread might be 0, which does not</span>
+<span class="w">    </span><span class="c1">// indicate an error or eof. this is equivalent to eagain or ewouldblock</span>
+<span class="w">    </span><span class="c1">// under read(2).</span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// nread &gt; 0</span>
+<span class="w">    </span><span class="n">assert</span><span class="p">(</span><span class="n">buf</span><span class="o">-&gt;</span><span class="n">len</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">nread</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">peer_state_t</span><span class="o">*</span><span class="w"> </span><span class="n">peerstate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">peer_state_t</span><span class="o">*</span><span class="p">)</span><span class="n">client</span><span class="o">-&gt;</span><span class="n">data</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">state</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">initial_ack</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="c1">// if the initial ack hasn&#39;t been sent for some reason, ignore whatever</span>
+<span class="w">      </span><span class="c1">// the client sends in.</span>
+<span class="w">      </span><span class="n">free</span><span class="p">(</span><span class="n">buf</span><span class="o">-&gt;</span><span class="n">base</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// run the protocol state machine.</span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">nread</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">state</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="no">initial_ack</span><span class="p">:</span><span class="w"></span>
+<span class="w">        </span><span class="n">assert</span><span class="p">(</span><span class="mi">0</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="s">&quot;can&#39;t reach here&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="no">wait_for_msg</span><span class="p">:</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">buf</span><span class="o">-&gt;</span><span class="n">base</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;^&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">in_msg</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="no">in_msg</span><span class="p">:</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">buf</span><span class="o">-&gt;</span><span class="n">base</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;$&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">wait_for_msg</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="n">assert</span><span class="p">(</span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendbuf_end</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">sendbuf_size</span><span class="p">);</span><span class="w"></span>
+<span class="w">          </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendbuf</span><span class="p">[</span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendbuf_end</span><span class="o">++</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">buf</span><span class="o">-&gt;</span><span class="n">base</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendbuf_end</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="c1">// we have data to send. the write buffer will point to the buffer stored</span>
+<span class="w">      </span><span class="c1">// in the peer state for this client.</span>
+<span class="w">      </span><span class="n">uv_buf_t</span><span class="w"> </span><span class="n">writebuf</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">          </span><span class="n">uv_buf_init</span><span class="p">(</span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendbuf</span><span class="p">,</span><span class="w"> </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendbuf_end</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="n">uv_write_t</span><span class="o">*</span><span class="w"> </span><span class="n">writereq</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">uv_write_t</span><span class="o">*</span><span class="p">)</span><span class="n">xmalloc</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">writereq</span><span class="p">));</span><span class="w"></span>
+<span class="w">      </span><span class="n">writereq</span><span class="o">-&gt;</span><span class="n">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">peerstate</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="kt">int</span><span class="w"> </span><span class="n">rc</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">((</span><span class="n">rc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_write</span><span class="p">(</span><span class="n">writereq</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="n">uv_stream_t</span><span class="o">*</span><span class="p">)</span><span class="n">client</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">writebuf</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"></span>
+<span class="w">                         </span><span class="n">on_wrote_buf</span><span class="p">))</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">die</span><span class="p">(</span><span class="s">&quot;uv_write failed: %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">uv_strerror</span><span class="p">(</span><span class="n">rc</span><span class="p">));</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="n">free</span><span class="p">(</span><span class="n">buf</span><span class="o">-&gt;</span><span class="n">base</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The runtime behavior of this server is very similar to the event-driven servers
+of part 3: all clients are handled concurrently in a single thread. Also
+similarly, a certain discipline has to be maintained in the server's code: the
+server's logic is implemented as an ensemble of callbacks, and long-running
+operations are a big no-no since they block the event loop. Let's explore this
+issue a bit further.</p>
+</div>
+<div class="section" id="long-running-operations-in-event-driven-loops">
+<h2>Long-running operations in event-driven loops</h2>
+<p>The single-threaded nature of event-driven code makes it very susceptible to a
+common issue: long-running code blocks the entire loop. Consider this program:</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">on_timer</span><span class="p">(</span><span class="n">uv_timer_t</span><span class="o">*</span><span class="w"> </span><span class="n">timer</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">timestamp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_hrtime</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;on_timer [%&quot;</span><span class="w"> </span><span class="n">PRIu64</span><span class="w"> </span><span class="s">&quot; ms]</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="n">timestamp</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">1000000</span><span class="p">)</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mi">100000</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// &quot;Work&quot;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">random</span><span class="p">()</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Sleeping...</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">sleep</span><span class="p">(</span><span class="mi">3</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">**</span><span class="w"> </span><span class="n">argv</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">uv_timer_t</span><span class="w"> </span><span class="n">timer</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">uv_timer_init</span><span class="p">(</span><span class="n">uv_default_loop</span><span class="p">(),</span><span class="w"> </span><span class="o">&amp;</span><span class="n">timer</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">uv_timer_start</span><span class="p">(</span><span class="o">&amp;</span><span class="n">timer</span><span class="p">,</span><span class="w"> </span><span class="n">on_timer</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">1000</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">uv_run</span><span class="p">(</span><span class="n">uv_default_loop</span><span class="p">(),</span><span class="w"> </span><span class="n">UV_RUN_DEFAULT</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It runs a <tt class="docutils literal">libuv</tt> event loop with a single registered callback: <tt class="docutils literal">on_timer</tt>,
+which is invoked by the loop every second. The callback reports a timestamp, and
+once in a while simulates some long-running task by sleeping for 3 seconds.
+Here's a sample run:</p>
+<div class="highlight"><pre><span></span>$ ./uv-timer-sleep-demo
+on_timer [4840 ms]
+on_timer [5842 ms]
+on_timer [6843 ms]
+on_timer [7844 ms]
+Sleeping...
+on_timer [11845 ms]
+on_timer [12846 ms]
+Sleeping...
+on_timer [16847 ms]
+on_timer [17849 ms]
+on_timer [18850 ms]
+...
+</pre></div>
+<p><tt class="docutils literal">on_timer</tt> dutifully fires every second, until the random sleep hits in. At
+that point, <tt class="docutils literal">on_timer</tt> is not invoked again until the sleep is over; in fact,
+<em>no other callbacks</em> will be invoked in this time frame. The <tt class="docutils literal">sleep</tt> call
+blocks the current thread, which is the only thread involved and is also the
+thread the event loop uses. When this thread is blocked, the event loop is
+blocked.</p>
+<p>This example demonstrates why it's so important for callbacks to never block in
+event-driven calls, and applies equally to Node.js servers, client-side
+Javascript, most GUI programming frameworks, and many other asynchronous
+programming models.</p>
+<p>But sometimes running time-consuming tasks is unavoidable. Not all tasks
+have asynchronous APIs; for example, we may be dealing with some library that
+only has a synchronous API, or just have to perform a potentially long
+computation. How can we combine such code with event-driven programming? Threads
+to the rescue!</p>
+</div>
+<div class="section" id="threads-for-converting-blocking-calls-into-asynchronous-calls">
+<h2>Threads for &quot;converting&quot; blocking calls into asynchronous calls</h2>
+<p>A thread pool can be used to turn blocking calls into asynchronous calls, by
+running alongside the event loop and posting events onto it when tasks are
+completed. Here's how it works, for a given blocking function <tt class="docutils literal">do_work()</tt>:</p>
+<ol class="arabic simple">
+<li>Instead of directly calling <tt class="docutils literal">do_work()</tt> in a callback, we package it into a
+&quot;task&quot; and ask the thread pool to execute the task. We also register a
+callback for the loop to invoke when the task has finished; let's call it
+<tt class="docutils literal">on_work_done()</tt>.</li>
+<li>At this point our callback can return and the event loop keeps spinning; at
+the same time, a thread in the pool is executing the task.</li>
+<li>Once the task has finished executing, the main thread (the one running the
+event loop) is notified and <tt class="docutils literal">on_work_done()</tt> is invoked by the event
+loop.</li>
+</ol>
+<p>Let's see how this solves our previous timer/sleep example, using <tt class="docutils literal">libuv</tt>'s
+work scheduling API:</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">on_after_work</span><span class="p">(</span><span class="n">uv_work_t</span><span class="o">*</span><span class="w"> </span><span class="n">req</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">status</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">free</span><span class="p">(</span><span class="n">req</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">on_work</span><span class="p">(</span><span class="n">uv_work_t</span><span class="o">*</span><span class="w"> </span><span class="n">req</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// &quot;Work&quot;</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">random</span><span class="p">()</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Sleeping...</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">sleep</span><span class="p">(</span><span class="mi">3</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">on_timer</span><span class="p">(</span><span class="n">uv_timer_t</span><span class="o">*</span><span class="w"> </span><span class="n">timer</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kt">uint64_t</span><span class="w"> </span><span class="n">timestamp</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv_hrtime</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;on_timer [%&quot;</span><span class="w"> </span><span class="n">PRIu64</span><span class="w"> </span><span class="s">&quot; ms]</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="n">timestamp</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">1000000</span><span class="p">)</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mi">100000</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">uv_work_t</span><span class="o">*</span><span class="w"> </span><span class="n">work_req</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">uv_work_t</span><span class="o">*</span><span class="p">)</span><span class="n">malloc</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">work_req</span><span class="p">));</span><span class="w"></span>
+<span class="w">  </span><span class="n">uv_queue_work</span><span class="p">(</span><span class="n">uv_default_loop</span><span class="p">(),</span><span class="w"> </span><span class="n">work_req</span><span class="p">,</span><span class="w"> </span><span class="n">on_work</span><span class="p">,</span><span class="w"> </span><span class="n">on_after_work</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">**</span><span class="w"> </span><span class="n">argv</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">uv_timer_t</span><span class="w"> </span><span class="n">timer</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">uv_timer_init</span><span class="p">(</span><span class="n">uv_default_loop</span><span class="p">(),</span><span class="w"> </span><span class="o">&amp;</span><span class="n">timer</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">uv_timer_start</span><span class="p">(</span><span class="o">&amp;</span><span class="n">timer</span><span class="p">,</span><span class="w"> </span><span class="n">on_timer</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">1000</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">uv_run</span><span class="p">(</span><span class="n">uv_default_loop</span><span class="p">(),</span><span class="w"> </span><span class="n">UV_RUN_DEFAULT</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Instead of calling <tt class="docutils literal">sleep</tt> directly in <tt class="docutils literal">on_timer</tt>, we enqueue a task,
+represented by a handle of type <tt class="docutils literal">work_req</tt> <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>, the function to run in the
+task (<tt class="docutils literal">on_work</tt>) and the function to invoke once the task is completed
+(<tt class="docutils literal">on_after_work</tt>). <tt class="docutils literal">on_work</tt> is where the &quot;work&quot; (the
+blocking/time-consuming operation) happens. Note a crucial difference between
+the two callbacks passed into <tt class="docutils literal">uv_queue_work</tt>: <tt class="docutils literal">on_work</tt> runs in the thread
+pool, while <tt class="docutils literal">on_after_work</tt> runs on the main thread which also runs the event
+loop - just like any other callback.</p>
+<p>Let's see this version run:</p>
+<div class="highlight"><pre><span></span>$ ./uv-timer-work-demo
+on_timer [89571 ms]
+on_timer [90572 ms]
+on_timer [91573 ms]
+on_timer [92575 ms]
+Sleeping...
+on_timer [93576 ms]
+on_timer [94577 ms]
+Sleeping...
+on_timer [95577 ms]
+on_timer [96578 ms]
+on_timer [97578 ms]
+...
+</pre></div>
+<p>The timer ticks every second, even though the sleeping function is still
+invoked; sleeping is now done on a separate thread and doesn't block the
+event loop.</p>
+</div>
+<div class="section" id="a-primality-testing-server-with-exercises">
+<h2>A primality-testing server, with exercises</h2>
+<p>Since <tt class="docutils literal">sleep</tt> isn't a very exciting way to simulate work, I've prepared a more
+comprehensive example - a server that accepts numbers from clients over a
+socket, checks whether these numbers are prime and sends back either &quot;prime&quot; or
+&quot;composite&quot;. The full <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/async-socket-server/uv-isprime-server.c">code for this server is here</a>
+- I won't post it here since it's long, but will rather give readers the
+opportunity to explore it on their own with a couple of exercises.</p>
+<p>The server deliberatly uses a naive primality test algorithm, so for large
+primes it can take quite a while to return an answer. On my machine it takes ~5
+seconds to compute the answer for 2305843009213693951, but YMMV.</p>
+<p>Exercise 1: the server has a setting (via an environment variable named
+<tt class="docutils literal">MODE</tt>) to either run the primality test in the socket callback (meaning on
+the main thread) or in the <tt class="docutils literal">libuv</tt> work queue. Play with this setting to
+observe the server's behavior when multiple clients are connecting
+simultaneously. In blocking mode, the server will not answer other clients while
+it's computing a big task; in non-blocking mode it will.</p>
+<p>Exercise 2: <tt class="docutils literal">libuv</tt> has a default thread-pool size, and it can be configured
+via an environment variable. Can you use multiple clients to discover
+experimentally what the default size is? Having found the default thread-pool
+size, play with different settings to see how it affects the server's
+responsiveness under heavy load.</p>
+</div>
+<div class="section" id="non-blocking-file-system-operations-using-work-queues">
+<h2>Non-blocking file-system operations using work queues</h2>
+<p>Delegating potentially-blocking operations to a thread pool isn't good for just
+silly demos and CPU-intensive computations; <tt class="docutils literal">libuv</tt> itself makes heavy use of
+this capability in its file-system APIs. This way, <tt class="docutils literal">libuv</tt> accomplishes the
+superpower of exposing the file-system with an asynchronous API, in a portable
+way.</p>
+<p>Let's take <tt class="docutils literal">uv_fs_read()</tt>, for example. This function reads from a file
+(represented by a <tt class="docutils literal">uv_fs_t</tt> handle) into a buffer <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>, and invokes a
+callback when the reading is completed. That is, <tt class="docutils literal">uv_fs_read()</tt> always returns
+immediately, even if the file sits on an NFS-like system and it may take a while
+for the data to get to the buffer. In other words, this API is asynchronous in
+the way other <tt class="docutils literal">libuv</tt> APIs are. How does this work?</p>
+<p>At this point we're going to look under the hood of <tt class="docutils literal">libuv</tt>; the internals are
+actually fairly straightforward, and it's a good exercise. Being a portable
+library, <tt class="docutils literal">libuv</tt> has different implementations of many of its functions for
+Windows and Unix systems. We're going to be looking at <tt class="docutils literal">src/unix/fs.c</tt> in the
+<tt class="docutils literal">libuv</tt> source tree.</p>
+<p>The code for <tt class="docutils literal">uv_fs_read</tt> is:</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">uv_fs_read</span><span class="p">(</span><span class="n">uv_loop_t</span><span class="o">*</span><span class="w"> </span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">uv_fs_t</span><span class="o">*</span><span class="w"> </span><span class="n">req</span><span class="p">,</span><span class="w"></span>
+<span class="w">               </span><span class="n">uv_file</span><span class="w"> </span><span class="n">file</span><span class="p">,</span><span class="w"></span>
+<span class="w">               </span><span class="k">const</span><span class="w"> </span><span class="n">uv_buf_t</span><span class="w"> </span><span class="n">bufs</span><span class="p">[],</span><span class="w"></span>
+<span class="w">               </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">nbufs</span><span class="p">,</span><span class="w"></span>
+<span class="w">               </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">off</span><span class="p">,</span><span class="w"></span>
+<span class="w">               </span><span class="n">uv_fs_cb</span><span class="w"> </span><span class="n">cb</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">bufs</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nb">NULL</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">nbufs</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="o">-</span><span class="n">EINVAL</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">INIT</span><span class="p">(</span><span class="n">READ</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">req</span><span class="o">-&gt;</span><span class="n">file</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">file</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">req</span><span class="o">-&gt;</span><span class="n">nbufs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">nbufs</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">req</span><span class="o">-&gt;</span><span class="n">bufs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">req</span><span class="o">-&gt;</span><span class="n">bufsml</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">nbufs</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">ARRAY_SIZE</span><span class="p">(</span><span class="n">req</span><span class="o">-&gt;</span><span class="n">bufsml</span><span class="p">))</span><span class="w"></span>
+<span class="w">    </span><span class="n">req</span><span class="o">-&gt;</span><span class="n">bufs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">uv__malloc</span><span class="p">(</span><span class="n">nbufs</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">bufs</span><span class="p">));</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">req</span><span class="o">-&gt;</span><span class="n">bufs</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nb">NULL</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">cb</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="n">uv__req_unregister</span><span class="p">(</span><span class="n">loop</span><span class="p">,</span><span class="w"> </span><span class="n">req</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="o">-</span><span class="n">ENOMEM</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">memcpy</span><span class="p">(</span><span class="n">req</span><span class="o">-&gt;</span><span class="n">bufs</span><span class="p">,</span><span class="w"> </span><span class="n">bufs</span><span class="p">,</span><span class="w"> </span><span class="n">nbufs</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="o">*</span><span class="n">bufs</span><span class="p">));</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">req</span><span class="o">-&gt;</span><span class="n">off</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">off</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">POST</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It may seem puzzling at first, because it defers the real work to the <tt class="docutils literal">INIT</tt>
+and <tt class="docutils literal">POST</tt> macros, with some local variable setup for <tt class="docutils literal">POST</tt>. This is done
+to avoid too much code duplication within the file.</p>
+<p>The <tt class="docutils literal">INIT</tt> macro is:</p>
+<div class="highlight"><pre><span></span>#define INIT(subtype)                                                         \
+  do {                                                                        \
+    req-&gt;type = UV_FS;                                                        \
+    if (cb != NULL)                                                           \
+      uv__req_init(loop, req, UV_FS);                                         \
+    req-&gt;fs_type = UV_FS_ ## subtype;                                         \
+    req-&gt;result = 0;                                                          \
+    req-&gt;ptr = NULL;                                                          \
+    req-&gt;loop = loop;                                                         \
+    req-&gt;path = NULL;                                                         \
+    req-&gt;new_path = NULL;                                                     \
+    req-&gt;cb = cb;                                                             \
+  }                                                                           \
+  while (0)
+</pre></div>
+<p>It sets up the request, and most importantly sets the <tt class="docutils literal"><span class="pre">req-&gt;fs_type</span></tt> field to
+the actual FS request type. Since <tt class="docutils literal">uv_fs_read</tt> invokes <tt class="docutils literal">INIT(READ)</tt>, it
+means <tt class="docutils literal"><span class="pre">req-&gt;fs_type</span></tt> gets assigned the constant <tt class="docutils literal">UV_FS_READ</tt>.</p>
+<p>The <tt class="docutils literal">POST</tt> macro is:</p>
+<div class="highlight"><pre><span></span>#define POST                                                                  \
+  do {                                                                        \
+    if (cb != NULL) {                                                         \
+      uv__work_submit(loop, &amp;req-&gt;work_req, uv__fs_work, uv__fs_done);        \
+      return 0;                                                               \
+    }                                                                         \
+    else {                                                                    \
+      uv__fs_work(&amp;req-&gt;work_req);                                            \
+      return req-&gt;result;                                                     \
+    }                                                                         \
+  }                                                                           \
+  while (0)
+</pre></div>
+<p>What it does depends on whether the callback is NULL. In <tt class="docutils literal">libuv</tt> file-system
+APIs, a <tt class="docutils literal">NULL</tt> callback means we actually want to perform the operation
+<em>synchronously</em>. In this case <tt class="docutils literal">POST</tt> invokes <tt class="docutils literal">uv__fs_work</tt> directly (we'll
+get to what this function does in just a bit), whereas for a non-<tt class="docutils literal">NULL</tt>
+callback, it submits <tt class="docutils literal">uv__fs_work</tt> as a work item to the work queue (which is
+the thread pool), and registers <tt class="docutils literal">uv__fs_done</tt> as the callback; that function
+does a bit of book-keeping and invokes the user-provided callback.</p>
+<p>If we look at the code of <tt class="docutils literal">uv__fs_work</tt>, we'll see it uses more macros to
+route work to the actual file-system call as needed. In our case, for
+<tt class="docutils literal">UV_FS_READ</tt> the call will be made to <tt class="docutils literal">uv__fs_read</tt>, which (at last!) does
+the reading using regular POSIX APIs. This function can be safely implemented in
+a <em>blocking</em> manner, since it's placed on a thread-pool when called through the
+asynchronous API.</p>
+<p>In Node.js, the <tt class="docutils literal">fs.readFile</tt> function is mapped to <tt class="docutils literal">uv_fs_read</tt>. Thus,
+reading files can be done in a non-blocking fashion even though the underlying
+file-system API is blocking.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>To ensure that this server doesn't leak memory, I ran it under Valgrind
+with the leak checker enabled. Since servers are often designed to run
+forever, this was a bit challenging; to overcome this issue I've added
+a &quot;kill switch&quot; to the server - a special sequence received from a client
+makes it stop the event loop and exit. The code for this is in the
+<tt class="docutils literal">on_wrote_buf</tt> handler.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>Here we don't use <tt class="docutils literal">work_req</tt> for much; the primality testing server
+discussed next will show how it's used to pass context information into
+the callback.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td><tt class="docutils literal">uv_fs_read()</tt> provides a generalized API similar to the
+<tt class="docutils literal">preadv</tt> Linux system call: it takes multiple buffers which it fills in
+order, and supports an offset into the file. We can ignore these
+features for the sake of our discussion.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

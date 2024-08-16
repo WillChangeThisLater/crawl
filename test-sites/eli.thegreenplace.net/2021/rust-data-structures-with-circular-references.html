@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Rust data structures with circular references - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../theme/css/style.css" type="text/css"/>
+
+        <link href="../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../index.html" class="navbar-brand">
+                <img src="../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="rust-data-structures-with-circular-references/index.html"
+                       rel="bookmark"
+                       title="Permalink to Rust data structures with circular references">
+                        Rust data structures with circular references
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> November 12, 2021 at 20:30</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../tag/rust.html">Rust</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>To implement its safety guarantees, the Rust compiler keeps careful track
+of ownership and references throughout a program. This makes writing certain
+kinds of data structures challenging; in particular, data structures that have
+circular references.</p>
+<p>Let's start with a simple binary tree:</p>
+<div class="highlight"><pre><span></span><span class="k">struct</span> <span class="nc">Tree</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">root</span>: <span class="nb">Option</span><span class="o">&lt;</span><span class="n">Node</span><span class="o">&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">struct</span> <span class="nc">Node</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">data</span>: <span class="kt">i32</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">left</span>: <span class="nb">Option</span><span class="o">&lt;</span><span class="nb">Box</span><span class="o">&lt;</span><span class="n">Node</span><span class="o">&gt;&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">right</span>: <span class="nb">Option</span><span class="o">&lt;</span><span class="nb">Box</span><span class="o">&lt;</span><span class="n">Node</span><span class="o">&gt;&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Since the Rust compiler should be able to calculate the size of a struct at
+compile-time, <tt class="docutils literal">left</tt> and <tt class="docutils literal">right</tt> typically use a heap-allocated <tt class="docutils literal">Box</tt>.
+These boxes are wrapped in an <tt class="docutils literal">Option</tt> because a node's left or right child
+might be empty.</p>
+<p>Now suppose we want to add a <em>parent</em> link to every node. This is useful for
+certain tree structures; for example, in a <a class="reference external" href="https://en.wikipedia.org/wiki/Binary_search_tree">binary search tree</a> (BST), a parent link can
+be used to efficiently find the successor of a node. How can we do that?</p>
+<div class="section" id="the-obvious-approach-fails">
+<h2>The &quot;obvious&quot; approach fails</h2>
+<p>We can't just add a <tt class="docutils literal">parent: Option&lt;Box&lt;Node&gt;&gt;</tt> field to <tt class="docutils literal">Node</tt>, because
+that would imply that a node owns its parent; this is clearly wrong. In fact,
+our original <tt class="docutils literal">Node</tt> definition already makes it clear that a parent owns its
+children, not the other way around.</p>
+<p>So we probably want to add a <em>reference</em> instead; a parent owns its children,
+but a child may <em>refert to</em> a parent. That sounds right; let's try it:</p>
+<div class="highlight"><pre><span></span><span class="k">struct</span> <span class="nc">Node</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">data</span>: <span class="kt">i32</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">left</span>: <span class="nb">Option</span><span class="o">&lt;</span><span class="nb">Box</span><span class="o">&lt;</span><span class="n">Node</span><span class="o">&gt;&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">right</span>: <span class="nb">Option</span><span class="o">&lt;</span><span class="nb">Box</span><span class="o">&lt;</span><span class="n">Node</span><span class="o">&gt;&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">parent</span>: <span class="nb">Option</span><span class="o">&lt;&amp;</span><span class="n">Node</span><span class="o">&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Rust will refuse to compile this, asking for an explicit lifetime parameter.
+When we store a reference in a struct field, Rust wants to know how the lifetime
+of this reference relates to the lifetime of the struct itself. Fair enough, we
+can do that:</p>
+<div class="highlight"><pre><span></span><span class="k">struct</span> <span class="nc">Tree</span><span class="o">&lt;&#39;</span><span class="na">a</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">root</span>: <span class="nb">Option</span><span class="o">&lt;</span><span class="n">Node</span><span class="o">&lt;&#39;</span><span class="na">a</span><span class="o">&gt;&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">struct</span> <span class="nc">Node</span><span class="o">&lt;&#39;</span><span class="na">a</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">data</span>: <span class="kt">i32</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">left</span>: <span class="nb">Option</span><span class="o">&lt;</span><span class="nb">Box</span><span class="o">&lt;</span><span class="n">Node</span><span class="o">&lt;&#39;</span><span class="na">a</span><span class="o">&gt;&gt;&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">right</span>: <span class="nb">Option</span><span class="o">&lt;</span><span class="nb">Box</span><span class="o">&lt;</span><span class="n">Node</span><span class="o">&lt;&#39;</span><span class="na">a</span><span class="o">&gt;&gt;&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">parent</span>: <span class="nb">Option</span><span class="o">&lt;&amp;&#39;</span><span class="na">a</span><span class="w"> </span><span class="n">Node</span><span class="o">&lt;&#39;</span><span class="na">a</span><span class="o">&gt;&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Now the lifetime is explicit: we tell the compiler that the lifetime of the
+<tt class="docutils literal">parent</tt> reference is the same as the <tt class="docutils literal">Node</tt> itself. This struct definition
+will compile, but writing actual code manipulating it will very quickly get into
+an altercation with the borrow checker. Consider the code that would insert a
+new child node into the current node; to mutate the current node, a mutable
+reference to it has to be in scope. At the same time, the new child's parent
+link is a reference to the node. The borrow checker won't let us create a
+reference to an object which already has a live mutable reference to it; it also
+won't let us mutate an object while any other reference to it is alive.</p>
+<p>As an exercise, try to write an insertion method for the tree using this
+<tt class="docutils literal">Node</tt> definition; you'll run into the problem fairly quickly.</p>
+</div>
+<div class="section" id="now-what">
+<h2>Now what?</h2>
+<p>Clearly, the &quot;obvious&quot; way doesn't work. And indeed, thinking about it from
+first principles, it shouldn't. In this post I'm using BSTs with parent links as
+a simple case study, but there are even more obvious (and perhaps more useful)
+examples. Consider a graph data structure; a node has edges pointing to other
+nodes, and two nodes can easily point to each other. Who owns whom? Since this
+question cannot be answered at compile-time in the general case, it means we
+can't just use plain Rust references for these &quot;points to&quot; relations. We need to
+be somewhat more clever.</p>
+<p>Having tackled this issue over and over again, Rust programmers
+have settled on three potential solutions:</p>
+<ol class="arabic simple">
+<li>Defer borrow checking to <em>run-time</em>, by using a
+reference-counted pointer (<tt class="docutils literal"><span class="pre">std::rc::Rc</span></tt>) to a <tt class="docutils literal"><span class="pre">std::cell:RefCell</span></tt>.</li>
+<li>Centralize the ownership (e.g. all nodes are owned by a vector of nodes
+in the <tt class="docutils literal">Tree</tt>), and then references become <em>handles</em> (indices into
+the abovementioned vector).</li>
+<li>Use raw pointers and <tt class="docutils literal">unsafe</tt> blocks.</li>
+</ol>
+<p>In this post, I'll present each of these approaches, applied to implementing
+a reasonably feature-complete BST with insertion, deletion, a &quot;get successor&quot;
+method and inorder traversal. The full code for this post is available in
+<a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2021/rust-bst">this repository</a>; the post
+only presents a few snippets of interest for each approach. Refer to the code
+repository for the complete implementations with comments and extensive tests.</p>
+</div>
+<div class="section" id="run-time-borrow-checking-with-rc-and-refcell">
+<h2>Run-time borrow checking with Rc and RefCell</h2>
+<p>This approach uses a combination of two data structures from the Rust standard
+library:</p>
+<ul>
+<li><p class="first"><tt class="docutils literal"><span class="pre">std::rc::Rc</span></tt> is a reference-counted pointer, providing shared ownership of
+heap-allocated data. Multiple instances of <tt class="docutils literal">Rc</tt> can refer to the same
+data; when all references are gone, the heap allication is dropped <a class="footnote-reference" href="rust-data-structures-with-circular-references.html#footnote-1" id="footnote-reference-1">[1]</a>. This
+is quite similar to a <tt class="docutils literal">shared_ptr</tt> in C++.</p>
+<p><tt class="docutils literal">Rc</tt> has a <em>weak dual</em>, <tt class="docutils literal"><span class="pre">std::rc::Weak</span></tt>; this represents a weak pointer
+to data owned by some other <tt class="docutils literal">Rc</tt>. While we can access the data through a
+<tt class="docutils literal">Weak</tt>, if only weak pointers remain the allocation will be dropped. In
+C++ this would be a <tt class="docutils literal">weak_ptr</tt>.</p>
+</li>
+<li><p class="first"><tt class="docutils literal"><span class="pre">std::cell::RefCell</span></tt> is a mutable memory location with <em>dynamically</em>
+checked borrow rules. <tt class="docutils literal">RefCell</tt> allows us to take and pass around
+references to heap data without the scrutiny of the borrow checker. However,
+it's still safe; all the same borrow rules are enforced by <tt class="docutils literal">RefCell</tt> at
+run-time.</p>
+</li>
+</ul>
+<p>You can see the full code implementing this approach <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2021/rust-bst/src/rcrefcell.rs">here</a>.
+In what follows, I'll highlight some interesting parts.</p>
+<p>This is how can define our BST data structure <a class="footnote-reference" href="rust-data-structures-with-circular-references.html#footnote-2" id="footnote-reference-2">[2]</a>:</p>
+<div class="highlight"><pre><span></span><span class="k">use</span><span class="w"> </span><span class="n">std</span>::<span class="n">cell</span>::<span class="n">RefCell</span><span class="p">;</span><span class="w"></span>
+<span class="k">use</span><span class="w"> </span><span class="n">std</span>::<span class="n">rc</span>::<span class="p">{</span><span class="n">Rc</span><span class="p">,</span><span class="w"> </span><span class="n">Weak</span><span class="p">};</span><span class="w"></span>
+
+<span class="k">pub</span><span class="w"> </span><span class="k">struct</span> <span class="nc">Tree</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">count</span>: <span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">root</span>: <span class="nb">Option</span><span class="o">&lt;</span><span class="n">NodeLink</span><span class="o">&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">type</span> <span class="nc">NodeLink</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Rc</span><span class="o">&lt;</span><span class="n">RefCell</span><span class="o">&lt;</span><span class="n">Node</span><span class="o">&gt;&gt;</span><span class="p">;</span><span class="w"></span>
+
+<span class="cp">#[derive(Debug)]</span><span class="w"></span>
+<span class="k">struct</span> <span class="nc">Node</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">data</span>: <span class="kt">i32</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">left</span>: <span class="nb">Option</span><span class="o">&lt;</span><span class="n">NodeLink</span><span class="o">&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">right</span>: <span class="nb">Option</span><span class="o">&lt;</span><span class="n">NodeLink</span><span class="o">&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">parent</span>: <span class="nb">Option</span><span class="o">&lt;</span><span class="n">Weak</span><span class="o">&lt;</span><span class="n">RefCell</span><span class="o">&lt;</span><span class="n">Node</span><span class="o">&gt;&gt;&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Owning &quot;links&quot; are represented by a <tt class="docutils literal"><span class="pre">Option&lt;Rc&lt;RefCell&lt;Node&gt;&gt;&gt;</span></tt>; non-owning
+links are represented by <tt class="docutils literal"><span class="pre">Option&lt;Weak&lt;RefCell&lt;Node&gt;&gt;&gt;</span></tt>. Let's look at some
+representative code samples:</p>
+<div class="highlight"><pre><span></span><span class="sd">/// Insert a new item into the tree; returns `true` if the insertion</span>
+<span class="sd">/// happened, and `false` if the given data was already present in the</span>
+<span class="sd">/// tree.</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">insert</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">data</span>: <span class="kt">i32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">bool</span> <span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="kd">let</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="n">root</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="bp">self</span><span class="p">.</span><span class="n">root</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="o">!</span><span class="bp">self</span><span class="p">.</span><span class="n">insert_at</span><span class="p">(</span><span class="n">root</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="k">return</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="n">root</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="n">Node</span>::<span class="n">new</span><span class="p">(</span><span class="n">data</span><span class="p">));</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="bp">self</span><span class="p">.</span><span class="n">count</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="kc">true</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="c1">// Insert a new item into the subtree rooted at `atnode`.</span>
+<span class="k">fn</span> <span class="nf">insert_at</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">atnode</span>: <span class="kp">&amp;</span><span class="nc">NodeLink</span><span class="p">,</span><span class="w"> </span><span class="n">data</span>: <span class="kt">i32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">bool</span> <span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">node</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">atnode</span><span class="p">.</span><span class="n">borrow_mut</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">node</span><span class="p">.</span><span class="n">data</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kc">false</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">node</span><span class="p">.</span><span class="n">data</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">match</span><span class="w"> </span><span class="o">&amp;</span><span class="n">node</span><span class="p">.</span><span class="n">left</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="nb">None</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="kd">let</span><span class="w"> </span><span class="n">new_node</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Node</span>::<span class="n">new_with_parent</span><span class="p">(</span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="n">atnode</span><span class="p">);</span><span class="w"></span>
+<span class="w">                </span><span class="n">node</span><span class="p">.</span><span class="n">left</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="n">new_node</span><span class="p">);</span><span class="w"></span>
+<span class="w">                </span><span class="kc">true</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">            </span><span class="nb">Some</span><span class="p">(</span><span class="n">lnode</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">insert_at</span><span class="p">(</span><span class="n">lnode</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">),</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">match</span><span class="w"> </span><span class="o">&amp;</span><span class="n">node</span><span class="p">.</span><span class="n">right</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="nb">None</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="kd">let</span><span class="w"> </span><span class="n">new_node</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Node</span>::<span class="n">new_with_parent</span><span class="p">(</span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="n">atnode</span><span class="p">);</span><span class="w"></span>
+<span class="w">                </span><span class="n">node</span><span class="p">.</span><span class="n">right</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">Some</span><span class="p">(</span><span class="n">new_node</span><span class="p">);</span><span class="w"></span>
+<span class="w">                </span><span class="kc">true</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">            </span><span class="nb">Some</span><span class="p">(</span><span class="n">rnode</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">insert_at</span><span class="p">(</span><span class="n">rnode</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">),</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>For simplicity, the code samples in this post separate the operation on the
+root into a top level function/method, which then calls a recursive method
+that operates at the node level. In this case, <tt class="docutils literal">insert_at</tt> takes a link
+and inserts the new data as the child of that node. It preserves the BST
+invariant (smaller implies left child, larger implies right child). The
+interesting thing to note here is the <tt class="docutils literal">borrow_mut()</tt> call at the very
+beginning. It obtains a mutable reference from the <tt class="docutils literal">RefCell</tt> pointed to by
+<tt class="docutils literal">atnode</tt>. But this isn't just a regular Rust mutable reference, as in
+<tt class="docutils literal">&amp;mut</tt>; instead, it's a special type called <tt class="docutils literal"><span class="pre">std::cell::RefMut</span></tt>. This is
+where the mutability magic happens - there is no <tt class="docutils literal">&amp;mut</tt> in sight, yet the
+code can actually mutate the underlying data <a class="footnote-reference" href="rust-data-structures-with-circular-references.html#footnote-3" id="footnote-reference-3">[3]</a>.</p>
+<p>To reiterate, this code remains safe; if you attempt to do another
+<tt class="docutils literal">borrow_mut()</tt> on the <tt class="docutils literal">RefCell</tt> while the previous <tt class="docutils literal">RefMut</tt> is in scope,
+you'll get a run-time panic. The safety is guaranteed at run-time.</p>
+<p>Another interesting example is the private <tt class="docutils literal">find_node</tt> method, which finds
+and returns a node with the given data, starting from some node:</p>
+<div class="highlight"><pre><span></span><span class="sd">/// Find the item in the tree; returns `true` iff the item is found.</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">find</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">data</span>: <span class="kt">i32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">bool</span> <span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="bp">self</span><span class="p">.</span><span class="n">root</span><span class="w"></span>
+<span class="w">        </span><span class="p">.</span><span class="n">as_ref</span><span class="p">()</span><span class="w"></span>
+<span class="w">        </span><span class="p">.</span><span class="n">map_or</span><span class="p">(</span><span class="kc">false</span><span class="p">,</span><span class="w"> </span><span class="o">|</span><span class="n">root</span><span class="o">|</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">find_node</span><span class="p">(</span><span class="n">root</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">).</span><span class="n">is_some</span><span class="p">())</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">fn</span> <span class="nf">find_node</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">fromnode</span>: <span class="kp">&amp;</span><span class="nc">NodeLink</span><span class="p">,</span><span class="w"> </span><span class="n">data</span>: <span class="kt">i32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nb">Option</span><span class="o">&lt;</span><span class="n">NodeLink</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">node</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fromnode</span><span class="p">.</span><span class="n">borrow</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">node</span><span class="p">.</span><span class="n">data</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nb">Some</span><span class="p">(</span><span class="n">fromnode</span><span class="p">.</span><span class="n">clone</span><span class="p">())</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">node</span><span class="p">.</span><span class="n">data</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">node</span><span class="p">.</span><span class="n">left</span><span class="w"></span>
+<span class="w">            </span><span class="p">.</span><span class="n">as_ref</span><span class="p">()</span><span class="w"></span>
+<span class="w">            </span><span class="p">.</span><span class="n">and_then</span><span class="p">(</span><span class="o">|</span><span class="n">lnode</span><span class="o">|</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">find_node</span><span class="p">(</span><span class="n">lnode</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">))</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">node</span><span class="p">.</span><span class="n">right</span><span class="w"></span>
+<span class="w">            </span><span class="p">.</span><span class="n">as_ref</span><span class="p">()</span><span class="w"></span>
+<span class="w">            </span><span class="p">.</span><span class="n">and_then</span><span class="p">(</span><span class="o">|</span><span class="n">rnode</span><span class="o">|</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">find_node</span><span class="p">(</span><span class="n">rnode</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">))</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The <tt class="docutils literal">.borrow()</tt> call at the beginning is how we ask a <tt class="docutils literal">RefCell</tt> to provide
+a immutable reference to the internal data (naturally, this cannot coexist at
+run-time with any mutable references). When we return a node that was found, we
+<tt class="docutils literal">clone</tt> the <tt class="docutils literal">Rc</tt>, because we need a separate shared owner for the node. This
+lets Rust guarantee that the node cannot just be dropped while the returned
+<tt class="docutils literal">Rc</tt> is still alive.</p>
+<p>As the full code sample demonstrates, this approach is workable. It takes a lot
+of practice and patience to get right though, at least for inexperienced Rust
+programmers. Since each node is wrapped in three levels of indirection
+(<tt class="docutils literal">Option</tt>, <tt class="docutils literal">Rc</tt> and <tt class="docutils literal">RefCell</tt>) writing the code can be somewhat tricky,
+since at any point you have to remember which level of inderection you're
+&quot;currently in&quot;.</p>
+<p>Another downside of this approach is that getting a plain reference to data
+stored in the tree isn't easy. As you can see in the sample above, the top-level
+<tt class="docutils literal">find</tt> method doesn't return the node or its contents, but simply a boolean.
+This isn't great; for example, it makes the <tt class="docutils literal">successor</tt> method sub-optimal.
+The problem here is that with <tt class="docutils literal">RefCell</tt> we can't just return a regular <tt class="docutils literal">&amp;</tt>
+reference to the data, since the <tt class="docutils literal">RefCell</tt> must keep a run-time track of all
+the borrows. We can only return a <tt class="docutils literal"><span class="pre">std::cell::Ref</span></tt>, but this leaks
+implementation details. This isn't a fatal flaw, but just something to keep in
+mind while writing code using these types.</p>
+</div>
+<div class="section" id="using-handles-into-a-vector-as-node-references">
+<h2>Using handles into a vector as Node references</h2>
+<p>The second approach we're going to dicuss has the <tt class="docutils literal">Tree</tt> owning all the nodes
+created in it, using a simple <tt class="docutils literal">Vec</tt>. Then, all node references become
+&quot;handles&quot; - indices into this vector. Here are the data structures:</p>
+<div class="highlight"><pre><span></span><span class="k">pub</span><span class="w"> </span><span class="k">struct</span> <span class="nc">Tree</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// All the nodes are owned by the `nodes` vector. Throughout the code, a</span>
+<span class="w">    </span><span class="c1">// NodeHandle value of 0 means &quot;none&quot;.</span>
+<span class="w">    </span><span class="n">root</span>: <span class="nc">NodeHandle</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">nodes</span>: <span class="nb">Vec</span><span class="o">&lt;</span><span class="n">Node</span><span class="o">&gt;</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">count</span>: <span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">type</span> <span class="nc">NodeHandle</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">usize</span><span class="p">;</span><span class="w"></span>
+
+<span class="cp">#[derive(Debug)]</span><span class="w"></span>
+<span class="k">struct</span> <span class="nc">Node</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">data</span>: <span class="kt">i32</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">left</span>: <span class="nc">NodeHandle</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">right</span>: <span class="nc">NodeHandle</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">parent</span>: <span class="nc">NodeHandle</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Once again, the full code is available <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2021/rust-bst/src/nodehandle.rs">on GitHub</a>;
+here I'll show some salient parts. Here's insertion:</p>
+<div class="highlight"><pre><span></span><span class="sd">/// Insert a new item into the tree; returns `true` if the insertion</span>
+<span class="sd">/// happened, and `false` if the given data was already present in the</span>
+<span class="sd">/// tree.</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">insert</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">data</span>: <span class="kt">i32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">bool</span> <span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">root</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="n">root</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">alloc_node</span><span class="p">(</span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="o">!</span><span class="bp">self</span><span class="p">.</span><span class="n">insert_at</span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="n">root</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">return</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="bp">self</span><span class="p">.</span><span class="n">count</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="kc">true</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="c1">// Insert a new item into the subtree rooted at `atnode`.</span>
+<span class="k">fn</span> <span class="nf">insert_at</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">atnode</span>: <span class="nc">NodeHandle</span><span class="p">,</span><span class="w"> </span><span class="n">data</span>: <span class="kt">i32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">bool</span> <span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">nodes</span><span class="p">[</span><span class="n">atnode</span><span class="p">].</span><span class="n">data</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kc">false</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">nodes</span><span class="p">[</span><span class="n">atnode</span><span class="p">].</span><span class="n">data</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">nodes</span><span class="p">[</span><span class="n">atnode</span><span class="p">].</span><span class="n">left</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="bp">self</span><span class="p">.</span><span class="n">nodes</span><span class="p">[</span><span class="n">atnode</span><span class="p">].</span><span class="n">left</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">alloc_node</span><span class="p">(</span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="n">atnode</span><span class="p">);</span><span class="w"></span>
+<span class="w">            </span><span class="kc">true</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="bp">self</span><span class="p">.</span><span class="n">insert_at</span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="n">nodes</span><span class="p">[</span><span class="n">atnode</span><span class="p">].</span><span class="n">left</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">nodes</span><span class="p">[</span><span class="n">atnode</span><span class="p">].</span><span class="n">right</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="bp">self</span><span class="p">.</span><span class="n">nodes</span><span class="p">[</span><span class="n">atnode</span><span class="p">].</span><span class="n">right</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">alloc_node</span><span class="p">(</span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="n">atnode</span><span class="p">);</span><span class="w"></span>
+<span class="w">            </span><span class="kc">true</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="bp">self</span><span class="p">.</span><span class="n">insert_at</span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="n">nodes</span><span class="p">[</span><span class="n">atnode</span><span class="p">].</span><span class="n">right</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Where <tt class="docutils literal">alloc_node</tt> is:</p>
+<div class="highlight"><pre><span></span><span class="c1">// Allocates a new node in the tree and returns its handle.</span>
+<span class="k">fn</span> <span class="nf">alloc_node</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">data</span>: <span class="kt">i32</span><span class="p">,</span><span class="w"> </span><span class="n">parent</span>: <span class="nc">NodeHandle</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">NodeHandle</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="bp">self</span><span class="p">.</span><span class="n">nodes</span><span class="p">.</span><span class="n">push</span><span class="p">(</span><span class="n">Node</span>::<span class="n">new_with_parent</span><span class="p">(</span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="n">parent</span><span class="p">));</span><span class="w"></span>
+<span class="w">    </span><span class="bp">self</span><span class="p">.</span><span class="n">nodes</span><span class="p">.</span><span class="n">len</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>After writing code with <tt class="docutils literal"><span class="pre">Option&lt;Rc&lt;RefCell&lt;...&gt;&gt;&gt;</span></tt>, this handle approach feels
+<em>very simple</em>. There are no layers of indirection; a handle is an index; a
+reference to a node is a handle; handle 0 means &quot;none&quot;, that's it <a class="footnote-reference" href="rust-data-structures-with-circular-references.html#footnote-4" id="footnote-reference-4">[4]</a>.</p>
+<p>This version is also likely to be much more efficient than the linked version,
+because it has far fewer heap allocations and the single vector is very cache
+friendly.</p>
+<p>That said, there are some issues here as well.</p>
+<p>First, we take some of the safety into our own hands. While this approach won't
+result in corrupted memory, double frees or accessing freed pointers, it
+can lead to run-time panics and other problems because we deal in &quot;raw&quot; indices
+to a vector. Due to bugs, these incides may point past the vector's bounds,
+or point at the wrong slot, etc. For example, nothing prevents us from modifying
+a slot while there are &quot;live handles&quot; to it.</p>
+<p>The other issue is removing tree nodes. Right now, the code &quot;removes&quot; a node
+simply by not pointing to it with any live handle. This makes the node
+unreachable through the tree's methods, but it does not deallocate memory. In
+fact, this BST implementation never deallocates anything:</p>
+<div class="highlight"><pre><span></span><span class="c1">// Replaces `node` with `r` in the tree, by setting `node`&#39;s parent&#39;s</span>
+<span class="c1">// left/right link to `node` with a link to `r`, and setting `r`&#39;s parent</span>
+<span class="c1">// link to `node`&#39;s parent.</span>
+<span class="c1">// Note that this code doesn&#39;t actually deallocate anything. It just</span>
+<span class="c1">// makes self.nodes[node] unused (in the sense that nothing points to</span>
+<span class="c1">// it).</span>
+<span class="k">fn</span> <span class="nf">replace_node</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">node</span>: <span class="nc">NodeHandle</span><span class="p">,</span><span class="w"> </span><span class="n">r</span>: <span class="nc">NodeHandle</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">parent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">nodes</span><span class="p">[</span><span class="n">node</span><span class="p">].</span><span class="n">parent</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Set the parent&#39;s appropriate link to `r` instead of `node`.</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">parent</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">nodes</span><span class="p">[</span><span class="n">parent</span><span class="p">].</span><span class="n">left</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">node</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="bp">self</span><span class="p">.</span><span class="n">nodes</span><span class="p">[</span><span class="n">parent</span><span class="p">].</span><span class="n">left</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">r</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">nodes</span><span class="p">[</span><span class="n">parent</span><span class="p">].</span><span class="n">right</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">node</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="bp">self</span><span class="p">.</span><span class="n">nodes</span><span class="p">[</span><span class="n">parent</span><span class="p">].</span><span class="n">right</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">r</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="n">root</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">r</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// r&#39;s parent is now node&#39;s parent.</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">r</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="n">nodes</span><span class="p">[</span><span class="n">r</span><span class="p">].</span><span class="n">parent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">parent</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This is obviously wrong for real-world applications. At the very least, this
+implementation can be improved by creating a &quot;free list&quot; of unused indices which
+can be reused when nodes are added. A more ambitious approach could be to
+implement a full-fledged garbage collector for the nodes. If you're up for a
+challenge, give it a try ;-)</p>
+</div>
+<div class="section" id="using-raw-pointers-and-unsafe-blocks">
+<h2>Using raw pointers and unsafe blocks</h2>
+<p>The third and final approach to discuss is using <em>raw pointers</em> and <tt class="docutils literal">unsafe</tt>
+blocks to implement our BST. This approach feels very familiar if you're coming
+from a C / C++ background. The full code is <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2021/rust-bst/src/unsafeall.rs">here</a>.</p>
+<div class="highlight"><pre><span></span><span class="k">pub</span><span class="w"> </span><span class="k">struct</span> <span class="nc">Tree</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">count</span>: <span class="kt">usize</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">root</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">Node</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="cp">#[derive(Debug)]</span><span class="w"></span>
+<span class="k">struct</span> <span class="nc">Node</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">data</span>: <span class="kt">i32</span><span class="p">,</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// Null pointer means &quot;None&quot; here; right.is_null() ==&gt; no right child, etc.</span>
+<span class="w">    </span><span class="n">left</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">Node</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">right</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">Node</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">parent</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">Node</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Node links become <tt class="docutils literal">*mut Node</tt>, which is a raw pointer to a mutable <tt class="docutils literal">Node</tt>.
+Working with raw pointers is quite similar to writing C code, with a few
+idiosyncracies around allocating, deallocating and accsesing data through these
+pointers. Let's start with allocation; here are the <tt class="docutils literal">Node</tt> constructors:</p>
+<div class="highlight"><pre><span></span><span class="k">impl</span><span class="w"> </span><span class="n">Node</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">new</span><span class="p">(</span><span class="n">data</span>: <span class="kt">i32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="bp">Self</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nb">Box</span>::<span class="n">into_raw</span><span class="p">(</span><span class="nb">Box</span>::<span class="n">new</span><span class="p">(</span><span class="bp">Self</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="n">data</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="n">left</span>: <span class="nc">std</span>::<span class="n">ptr</span>::<span class="n">null_mut</span><span class="p">(),</span><span class="w"></span>
+<span class="w">            </span><span class="n">right</span>: <span class="nc">std</span>::<span class="n">ptr</span>::<span class="n">null_mut</span><span class="p">(),</span><span class="w"></span>
+<span class="w">            </span><span class="n">parent</span>: <span class="nc">std</span>::<span class="n">ptr</span>::<span class="n">null_mut</span><span class="p">(),</span><span class="w"></span>
+<span class="w">        </span><span class="p">}))</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">fn</span> <span class="nf">new_with_parent</span><span class="p">(</span><span class="n">data</span>: <span class="kt">i32</span><span class="p">,</span><span class="w"> </span><span class="n">parent</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">Node</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="bp">Self</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nb">Box</span>::<span class="n">into_raw</span><span class="p">(</span><span class="nb">Box</span>::<span class="n">new</span><span class="p">(</span><span class="bp">Self</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="n">data</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="n">left</span>: <span class="nc">std</span>::<span class="n">ptr</span>::<span class="n">null_mut</span><span class="p">(),</span><span class="w"></span>
+<span class="w">            </span><span class="n">right</span>: <span class="nc">std</span>::<span class="n">ptr</span>::<span class="n">null_mut</span><span class="p">(),</span><span class="w"></span>
+<span class="w">            </span><span class="n">parent</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="p">}))</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The simplest way I found to allocate new memory for a raw pointer is using
+<tt class="docutils literal"><span class="pre">Box::into_raw</span></tt>, and it works well as long as we remember that deallocating
+this memory is on us from that point on (more on this later).</p>
+<p>Let's see how insertion works:</p>
+<div class="highlight"><pre><span></span><span class="sd">/// Insert a new item into the tree; returns `true` if the insertion</span>
+<span class="sd">/// happened, and `false` if the given data was already present in the</span>
+<span class="sd">/// tree.</span>
+<span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">insert</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">data</span>: <span class="kt">i32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">bool</span> <span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">root</span><span class="p">.</span><span class="n">is_null</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="n">root</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Node</span>::<span class="n">new</span><span class="p">(</span><span class="n">data</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="o">!</span><span class="n">insert_node</span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="n">root</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="k">return</span><span class="w"> </span><span class="kc">false</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="bp">self</span><span class="p">.</span><span class="n">count</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="kc">true</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+
+<span class="c1">// Inserts `data` into a new node at the `node` subtree.</span>
+<span class="k">fn</span> <span class="nf">insert_node</span><span class="p">(</span><span class="n">node</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">Node</span><span class="p">,</span><span class="w"> </span><span class="n">data</span>: <span class="kt">i32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">bool</span> <span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">node</span><span class="p">).</span><span class="n">data</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="kc">false</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">data</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">node</span><span class="p">).</span><span class="n">data</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">node</span><span class="p">).</span><span class="n">left</span><span class="p">.</span><span class="n">is_null</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="p">(</span><span class="o">*</span><span class="n">node</span><span class="p">).</span><span class="n">left</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Node</span>::<span class="n">new_with_parent</span><span class="p">(</span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="n">node</span><span class="p">);</span><span class="w"></span>
+<span class="w">                </span><span class="kc">true</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="n">insert_node</span><span class="p">((</span><span class="o">*</span><span class="n">node</span><span class="p">).</span><span class="n">left</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">)</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">node</span><span class="p">).</span><span class="n">right</span><span class="p">.</span><span class="n">is_null</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="p">(</span><span class="o">*</span><span class="n">node</span><span class="p">).</span><span class="n">right</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Node</span>::<span class="n">new_with_parent</span><span class="p">(</span><span class="n">data</span><span class="p">,</span><span class="w"> </span><span class="n">node</span><span class="p">);</span><span class="w"></span>
+<span class="w">                </span><span class="kc">true</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="n">insert_node</span><span class="p">((</span><span class="o">*</span><span class="n">node</span><span class="p">).</span><span class="n">right</span><span class="p">,</span><span class="w"> </span><span class="n">data</span><span class="p">)</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The interesting point to notice here is the <tt class="docutils literal">unsafe</tt> block the body of
+<tt class="docutils literal">insert_node</tt> is wrapped in. This is required because this code dereferences
+raw pointers. In Rust it's OK to assign pointers and pass them around
+without special provisions, but dereferencing requires <tt class="docutils literal">unsafe</tt>.</p>
+<p>Let's see how removing nodes work; here's <tt class="docutils literal">replace_node</tt>, which performs
+the same task as the similarly named method we've seen in the node handle
+approach:</p>
+<div class="highlight"><pre><span></span><span class="c1">// Replaces `node` with `r` in the tree, by setting `node`&#39;s parent&#39;s</span>
+<span class="c1">// left/right link to `node` with a link to `r`, and setting `r`&#39;s parent</span>
+<span class="c1">// link to the `node`&#39;s parent. `node` cannot be null.</span>
+<span class="k">fn</span> <span class="nf">replace_node</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">node</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">Node</span><span class="p">,</span><span class="w"> </span><span class="n">r</span>: <span class="o">*</span><span class="k">mut</span><span class="w"> </span><span class="n">Node</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">parent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">node</span><span class="p">).</span><span class="n">parent</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="n">parent</span><span class="p">.</span><span class="n">is_null</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="c1">// Removing the root node.</span>
+<span class="w">            </span><span class="bp">self</span><span class="p">.</span><span class="n">root</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">r</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="o">!</span><span class="n">r</span><span class="p">.</span><span class="n">is_null</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="p">(</span><span class="o">*</span><span class="n">r</span><span class="p">).</span><span class="n">parent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">std</span>::<span class="n">ptr</span>::<span class="n">null_mut</span><span class="p">();</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="o">!</span><span class="n">r</span><span class="p">.</span><span class="n">is_null</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="p">(</span><span class="o">*</span><span class="n">r</span><span class="p">).</span><span class="n">parent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">parent</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">parent</span><span class="p">).</span><span class="n">left</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">node</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="p">(</span><span class="o">*</span><span class="n">parent</span><span class="p">).</span><span class="n">left</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">r</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">parent</span><span class="p">).</span><span class="n">right</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">node</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="p">(</span><span class="o">*</span><span class="n">parent</span><span class="p">).</span><span class="n">right</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">r</span><span class="p">;</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// node is unused now, so we can deallocate it by assigning it to</span>
+<span class="w">        </span><span class="c1">// an owning Box that will be automatically dropped.</span>
+<span class="w">        </span><span class="nb">Box</span>::<span class="n">from_raw</span><span class="p">(</span><span class="n">node</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This demonstrates how we deallocate heap data through raw pointers: by using
+<tt class="docutils literal"><span class="pre">Box::from_raw</span></tt>. This makes a <tt class="docutils literal">Box</tt> that takes ownership of the data; a
+<tt class="docutils literal">Box</tt> has a destructor, so it will actually deallocate it when it goes out
+of scope.</p>
+<p>This brings us to an important point: we have to take care of releasing the
+memory of the <tt class="docutils literal">Tree</tt> now. Unlike in the previous approaches, the default
+<tt class="docutils literal">Drop</tt> implementation won't do here, since the only thing contained in our
+<tt class="docutils literal">Tree</tt> is <tt class="docutils literal">root: *mut Node</tt> and Rust has no idea how to &quot;drop&quot; that. If
+we run our tests without implementing the <tt class="docutils literal">Drop</tt> trait explicitly, there will
+be memory leaks. Here's a simple implementation of <tt class="docutils literal">Drop</tt> to fix that:</p>
+<div class="highlight"><pre><span></span><span class="k">impl</span><span class="w"> </span><span class="nb">Drop</span><span class="w"> </span><span class="k">for</span><span class="w"> </span><span class="n">Tree</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">fn</span> <span class="nf">drop</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// Probably not the most efficient way to destroy the whole tree, but</span>
+<span class="w">        </span><span class="c1">// it&#39;s simple and it works :)</span>
+<span class="w">        </span><span class="k">while</span><span class="w"> </span><span class="o">!</span><span class="bp">self</span><span class="p">.</span><span class="n">root</span><span class="p">.</span><span class="n">is_null</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="bp">self</span><span class="p">.</span><span class="n">remove_node</span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="n">root</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>As an exercise, try to implement a more efficient <tt class="docutils literal">Drop</tt>!</p>
+<p>Writing the code with raw pointers felt fairly natural; while the final LOC
+count is similar, the raw pointers required significantly less mental burden
+than using <tt class="docutils literal"><span class="pre">Option&lt;Rc&lt;RefCell&lt;Node&gt;&gt;&gt;</span></tt> <a class="footnote-reference" href="rust-data-structures-with-circular-references.html#footnote-5" id="footnote-reference-5">[5]</a>. Though I didn't benchmark it,
+my hunch would be that the pointer version is more efficient as well; at the
+very least, it eschews the dynamic borrow checks that <tt class="docutils literal">RefCell</tt> does. The
+flip side is, of course, the loss of safety. With the <tt class="docutils literal">unsafe</tt> version we
+can run into all the good-old C memory bugs.</p>
+</div>
+<div class="section" id="conclusion">
+<h2>Conclusion</h2>
+<p>The goal of this post was to review the different approaches one could take to
+implement non-trivial linked data structures in Rust. It covers approaches with
+three levels of safety:</p>
+<ul class="simple">
+<li>Fully safe with <tt class="docutils literal">Rc</tt> and <tt class="docutils literal">RefCell</tt>.</li>
+<li>Memory safe but otherwise more prone to bugs (such as aliasing borrows)
+with integer handles into a <tt class="docutils literal">Vec</tt>.</li>
+<li>Fully unsafe with raw pointers.</li>
+</ul>
+<p>All three approaches have their merits and are useful to know, IMHO. Anecdotal
+evidence from Rust's own standard library and some popular crates suggests that
+the third approach - using raw pointers and <tt class="docutils literal">unsafe</tt> - is quite popular.</p>
+<p>Thanks for reading! Since this is my first non-trivial Rust post, I'm
+particularly interested in any comments, feedback or suggestions. Feel free to
+send me <a class="reference external" href="mailto:eliben&#64;gmail.com">an email</a> or leave a comment on whatever
+aggregation site this gets reposted to - I keep an eye on these from time to
+time.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="rust-data-structures-with-circular-references.html#footnote-reference-1">[1]</a></td><td><tt class="docutils literal">Rc</tt> also has a thread-safe variant
+called <tt class="docutils literal">Arc</tt>, which uses atomics and is therefore slightly slower for
+single-threaded applications. In this post I'll just use <tt class="docutils literal">Rc</tt>, but
+switching to <tt class="docutils literal">Arc</tt> would be easy.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="rust-data-structures-with-circular-references.html#footnote-reference-2">[2]</a></td><td>For simplicity, the data type throughout this post is going to be just
+an <tt class="docutils literal">i32</tt>. In a realistic program all <tt class="docutils literal">Node</tt> types would be generic.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="rust-data-structures-with-circular-references.html#footnote-reference-3">[3]</a></td><td>If you're wondering how <tt class="docutils literal">RefMut</tt> achieves this feat - it's by using
+<tt class="docutils literal">unsafe</tt>, of course.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="rust-data-structures-with-circular-references.html#footnote-reference-4">[4]</a></td><td>To be fair, Rust's support for <tt class="docutils literal">Option</tt> is really good and I missed
+it when coding the handle-based approach. Some code could certainly have
+been a bit shorter if I had access to the equivalent of
+<tt class="docutils literal">let Some(xx) = ...</tt>. A kind reader pointed out that Rust actually has
+the type <tt class="docutils literal"><span class="pre">std::num::NonZeroUsize</span></tt> for exactly this purpose.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="rust-data-structures-with-circular-references.html#footnote-reference-5">[5]</a></td><td>Though this can be attributed to my relative inexperience with
+Rust and a long history of writing C and C++.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="rust-data-structures-with-circular-references.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../theme/js/count.js"></script>
+</body>
+</html>

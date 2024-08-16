@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Compiling C DLLs and using them from Perl - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="compiling-c-dlls-and-using-them-from-perl.html"
+                       rel="bookmark"
+                       title="Permalink to Compiling C DLLs and using them from Perl">
+                        Compiling C DLLs and using them from Perl 
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> December 04, 2006 at 20:58</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../../tag/perl.html">Perl</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        A few months ago I managed to control a National Instruments Digital IO card (sitting in a PCI slot in my PC) from Perl. I accomplished this by installing the Win32::API module, and loading the card's .dll API. I had a few struggles with Win32::API as some things weren't obvious, but after some searching and good advice from Perlmonks, it worked.
+
+Today I had another encounter with Win32::API. I have some C code I want to access from Perl. So, I compiled it in Visual C++ into a DLL, but Win32::API kept segfaulting, although loading the same DLL from another C++ program worked fine. Another round of investigation began...
+
+To cut a long story short, here is the correct way to compile C code into a DLL and access it from Perl.
+
+<h4>The C code</h4>
+
+I'm going to write a simple C function that demonstrates some interesting concepts like passing data in and out with pointers. Here is the .h file:
+
+<pre><code>
+int __stdcall test1(char* buf, 
+                    int num, char* outbuf);
+</code></pre>
+
+This is a (almost) normal declaration of a function named <code>test1</code> that takes two pointers to a char and one integer as arguments, and returns an integer. 
+
+<code>__stdcall</code> is a Visual C++ compiler keyword that specifies the stdcall <a href="http://en.wikipedia.org/wiki/Stdcall">calling convention</a>. The stdcall convention is used by Windows API functions. 
+
+There's another common calling convention - <code>__cdecl</code> which is usually used for "normal" (not Windows API) code. The Win32::API Perl module <strong>supports only __stdcall</strong>, so while we could use __cdecl for binding this DLL to another piece of C / C++ code, it doesn't work with Win32::API.
+
+The .c file provides the implementation:
+
+<pre><code>
+#include "dll_test.h"
+
+int __stdcall test1(char* buf, 
+                    int num, char* outbuf)
+{
+    int i = 0;
+
+    for (i = 0; i < num; ++i)
+    {
+        outbuf[i] = buf[i] * 3;
+    }
+
+    return num;
+}
+</code></pre>
+
+<h4>DEF file</h4>
+
+A <i>module definition (.def)</i> file provides the linker with information about exported symbols, which is useful when writing DLLs. I create a new text file, name it dll_test.def and put it into the project directory:
+
+<pre><code>
+LIBRARY DLL_TEST.DLL
+
+EXPORTS
+    test1
+</code></pre>
+
+In this file I specify the library name, and the name of the exported function (several names appear on separate lines). Now this .def file should be given as an option to the linker. Add <code>/DEF dll_test.def</code> as a linker option, or provide "dll_test.def" in the "Module definition file" field (Input category) in the project properties (Linker options).
+
+After this, build the project and the DLL will be created.
+
+<h4>Without the DEF file ?</h4>
+
+It is possible to create the DLL without using the .def file. If you prepend <code>__declspec(dllexport)</code> to the function declaration, the linker will export it without consulting the .def file. While this works well in C++ code calling the functions from the DLL, this method isn't recommended when using Win32::API, because <code>__stdcall</code> <a href="http://en.wikipedia.org/wiki/Name_mangling">mangles</a> the names of functions and it may be difficult (though possible) to import them to Perl. The DEF file instructs the linker to create an unmangled name for the function, in spite of using <code>__stdcall</code>, so it is the preferred method.
+
+In any case, the <code>dumpbin</code> command line tool (built into Windows) allows to see the names of exported functions in a DLL by calling:
+<pre><code>
+dumpbin /exports <dll_name>
+</code></pre>
+
+<h4>The Perl code</h4>
+
+Finally, we can use Win32::API to import the C function we created from the DLL and use it:
+<pre><code>
+use warnings;
+use strict;
+$|++;
+use Win32::API;
+
+# Import the test1 function from the DLL
+#
+my $test1 = Win32::API->new('dll_test', 
+                            'test1', 
+                            'PNP', 
+                            'N');
+die unless defined $test1;
+
+# the input must be a buffer of bytes,
+# so we use pack
+#
+my $buf = pack('C*', (1, 2, 3, 4, 5));
+
+# allocate space for the output buffer
+#
+my $outbuf = ' ' x 5;
+
+# Call the imported function
+#
+my $ret = $test1->Call($buf, 5, $outbuf);
+
+# Results
+#
+print "Returned $ret\n";
+print join ' ', unpack('CCCCC', $outbuf), "\n";
+</code></pre>
+
+<h4>P.S.</h4>
+
+A good discussion of this topic is given in <a href="http://www.perlmonks.org/?node_id=548285">this Perlmonks thread</a>.
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="compiling-c-dlls-and-using-them-from-perl.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Optional JSON fields in Go - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Optional JSON fields in Go">
+                        Optional JSON fields in Go
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> May 23, 2020 at 06:28</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>One common kind of data stored in a configuration file is <em>options</em>. In this
+post, I'll talk about some nuances we have to be aware of when storing options
+in JSON and unmarshaling them to Go.</p>
+<p>Specifically, the most important difference between options and any other data
+is that options are often, well... <em>optional</em>. Our program can have a large
+number of possible configuration options, but we may want to configure any
+particular invocation with only a subset - leaving all the others at their
+default values.</p>
+<div class="section" id="basics-partial-unmarshaling-omitempty-and-unknown-fields">
+<h2>Basics - partial unmarshaling, omitempty, and unknown fields</h2>
+<p>Let's start with the basics. Consider the following struct that represents
+the options for an imaginary program:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">Options</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Id</span><span class="w">      </span><span class="kt">string</span><span class="w"> </span><span class="s">`json:&quot;id,omitempty&quot;`</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Verbose</span><span class="w"> </span><span class="kt">bool</span><span class="w">   </span><span class="s">`json:&quot;verbose,omitempty&quot;`</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Level</span><span class="w">   </span><span class="kt">int</span><span class="w">    </span><span class="s">`json:&quot;level,omitempty&quot;`</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Power</span><span class="w">   </span><span class="kt">int</span><span class="w">    </span><span class="s">`json:&quot;power,omitempty&quot;`</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This struct has 4 options, but in real programs there may be dozens.</p>
+<p>Suppose we want to specify these options in a JSON configuration file. A full
+listing of options may look something like:</p>
+<div class="highlight"><pre><span></span>{
+  &quot;id&quot;: &quot;foobar&quot;,
+  &quot;verbose&quot;: false,
+  &quot;level&quot;: 10,
+  &quot;power&quot;: 221
+}
+</pre></div>
+<p>If <em>all</em> options are always specified in our configuration files, there's not
+much to talk about. Just call <tt class="docutils literal">json.Unmarshal</tt> and all is well.</p>
+<p>In reality, things are rarely so simple. We may want to handle a number of
+special cases:</p>
+<ol class="arabic simple">
+<li>The JSON configuration can be missing some fields, and we'll want our Go
+struct to have default values for those.</li>
+<li>The JSON configuration can have extra fields which our struct doesn't have.
+Depending on the scenario, we may want to either ignore these or report an
+error.</li>
+</ol>
+<p>For (1), Go's <tt class="docutils literal">json</tt> package will assign values only to fields found in the
+JSON; other fields will just keep their <a class="reference external" href="https://golang.org/ref/spec#The_zero_value">Go zero values</a>. For example, if the JSON didn't
+have the <tt class="docutils literal">level</tt> field at all, the <tt class="docutils literal">Options</tt> struct unmarshaled from it
+would have 0 for <tt class="docutils literal">Level</tt>. If this behavior is undesirable, check out the next
+section.</p>
+<p>For (2), the <tt class="docutils literal">json</tt> package is very permissive by default and will ignore
+unknown fields. That is, suppose the input JSON is:</p>
+<div class="highlight"><pre><span></span>{
+  &quot;id&quot;: &quot;foobar&quot;,
+  &quot;bug&quot;: 42
+}
+</pre></div>
+<p><tt class="docutils literal">json.Unmarshal</tt> will happily parse this into <tt class="docutils literal">Options</tt>, setting <tt class="docutils literal">Id</tt> to
+<tt class="docutils literal">&quot;foobar&quot;</tt>, <tt class="docutils literal">Level</tt> and <tt class="docutils literal">Power</tt> to 0 and <tt class="docutils literal">Verbose</tt> to <tt class="docutils literal">false</tt>. It will
+ignore the <tt class="docutils literal">bug</tt> key.</p>
+<p>This behavior is what you want in some cases, but not in others. Luckily, the
+<tt class="docutils literal">json</tt> package makes it configurable by providing an explicit option to a
+JSON decoder with <tt class="docutils literal">DisallowUnknownFields</tt>:</p>
+<div class="highlight"><pre><span></span><span class="nx">dec</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">json</span><span class="p">.</span><span class="nx">NewDecoder</span><span class="p">(</span><span class="nx">bytes</span><span class="p">.</span><span class="nx">NewReader</span><span class="p">(</span><span class="nx">jsonText</span><span class="p">))</span><span class="w"></span>
+<span class="nx">dec</span><span class="p">.</span><span class="nx">DisallowUnknownFields</span><span class="p">()</span><span class="w"></span>
+
+<span class="kd">var</span><span class="w"> </span><span class="nx">opts</span><span class="w"> </span><span class="nx">Options</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">dec</span><span class="p">.</span><span class="nx">Decode</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">opts</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;Decode error:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Now parsing the aforementioned JSON snippet will result in an error.</p>
+<p>Finally, you may have noticed that our <tt class="docutils literal">Options</tt> struct has the <tt class="docutils literal">omitempty</tt>
+tag specified for all fields. This means that fields with zero values will not
+be emitted to JSON. For example:</p>
+<div class="highlight"><pre><span></span><span class="nx">opts</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">Options</span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Id</span><span class="p">:</span><span class="w">    </span><span class="s">&quot;baz&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Level</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="nx">out</span><span class="p">,</span><span class="w"> </span><span class="nx">_</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">json</span><span class="p">.</span><span class="nx">MarshalIndent</span><span class="p">(</span><span class="nx">opts</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;  &quot;</span><span class="p">)</span><span class="w"></span>
+<span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nb">string</span><span class="p">(</span><span class="nx">out</span><span class="p">))</span><span class="w"></span>
+</pre></div>
+<p>Will print out:</p>
+<div class="highlight"><pre><span></span>{
+  &quot;id&quot;: &quot;baz&quot;
+}
+</pre></div>
+<p>Because all the other fields have their zero values. If you want to always emit
+all the fields instead, don't specify <tt class="docutils literal">omitempty</tt>.</p>
+</div>
+<div class="section" id="setting-default-values">
+<h2>Setting default values</h2>
+<p>In the example above we've seen that missing fields in the JSON representation
+will be decoded to zero values in Go. This is fine if your options' default
+values are also their zero values, but this isn't always the case. What if the
+default value of <tt class="docutils literal">Power</tt> should be 10, not 0? That is, when the JSON
+doesn't have a &quot;power&quot; field, you want to set <tt class="docutils literal">Power</tt> to 10, but instead
+<tt class="docutils literal">Unmarshal</tt> sets it to zero.</p>
+<p>You may think - this is easy to solve! I'll just know to set <tt class="docutils literal">Power</tt> to its
+default 10 whenever it's unmarshaled as 0 from the JSON! Hold on, though. What
+happens if the JSON really had &quot;power&quot; specified as 0?</p>
+<p>The way to solve it is in reverse, actually. We'll set the default values
+<em>first</em>, and then let <tt class="docutils literal">json.Unmarshal</tt> override fields as needed:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">parseOptions</span><span class="p">(</span><span class="nx">jsn</span><span class="w"> </span><span class="p">[]</span><span class="kt">byte</span><span class="p">)</span><span class="w"> </span><span class="nx">Options</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">opts</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">Options</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Verbose</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Level</span><span class="p">:</span><span class="w">   </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Power</span><span class="p">:</span><span class="w">   </span><span class="mi">10</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">json</span><span class="p">.</span><span class="nx">Unmarshal</span><span class="p">(</span><span class="nx">jsn</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">opts</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">opts</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Now instead of calling <tt class="docutils literal">json.Unmarshal</tt> directly for <tt class="docutils literal">Options</tt>, we'll have
+to call <tt class="docutils literal">parseOptions</tt>.</p>
+<p>Alternatively, we can cleverly hide this logic in a custom <tt class="docutils literal">UnmarshalJSON</tt>
+method for <tt class="docutils literal">Options</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">o</span><span class="w"> </span><span class="o">*</span><span class="nx">Options</span><span class="p">)</span><span class="w"> </span><span class="nx">UnmarshalJSON</span><span class="p">(</span><span class="nx">text</span><span class="w"> </span><span class="p">[]</span><span class="kt">byte</span><span class="p">)</span><span class="w"> </span><span class="kt">error</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">type</span><span class="w"> </span><span class="nx">options</span><span class="w"> </span><span class="nx">Options</span><span class="w"></span>
+<span class="w">  </span><span class="nx">opts</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">options</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Power</span><span class="p">:</span><span class="w"> </span><span class="mi">10</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">json</span><span class="p">.</span><span class="nx">Unmarshal</span><span class="p">(</span><span class="nx">text</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">opts</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="o">*</span><span class="nx">o</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">Options</span><span class="p">(</span><span class="nx">opts</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>With this method, any call to <tt class="docutils literal">json.Unmarshal</tt> for the <tt class="docutils literal">Options</tt> type will
+populate the default of <tt class="docutils literal">Power</tt> correctly. Note the usage of the <tt class="docutils literal">options</tt>
+type alias - this is to prevent infinite recursion in <tt class="docutils literal">UnmarshalJSON</tt>.</p>
+<p>This approach is simple and clean, but it has some downsides. First, it strongly
+ties the default values of fields with the parsing logic. It's conceivable that
+we want to let user code down the line set its defaults; right now, the defaults
+have to be set <em>before</em> unmarshaling.</p>
+<p>The second downside is that it only works in simple cases. If our <tt class="docutils literal">Options</tt>
+struct has a slice or map of other structs, we can't populate defaults this way.
+Consider:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">Region</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Name</span><span class="w">  </span><span class="kt">string</span><span class="w"> </span><span class="s">`json:&quot;name,omitempty&quot;`</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Power</span><span class="w"> </span><span class="kt">int</span><span class="w">    </span><span class="s">`json:&quot;power,omitempty&quot;`</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">type</span><span class="w"> </span><span class="nx">Options</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Id</span><span class="w">      </span><span class="kt">string</span><span class="w"> </span><span class="s">`json:&quot;id,omitempty&quot;`</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Verbose</span><span class="w"> </span><span class="kt">bool</span><span class="w">   </span><span class="s">`json:&quot;verbose,omitempty&quot;`</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Level</span><span class="w">   </span><span class="kt">int</span><span class="w">    </span><span class="s">`json:&quot;level,omitempty&quot;`</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Power</span><span class="w">   </span><span class="kt">int</span><span class="w">    </span><span class="s">`json:&quot;power,omitempty&quot;`</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">Regions</span><span class="w"> </span><span class="p">[]</span><span class="nx">Region</span><span class="w"> </span><span class="s">`json:&quot;regions,omitempty&quot;`</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>If we want to populate defaults for the <tt class="docutils literal">Power</tt> of each <tt class="docutils literal">Region</tt>, we can't
+just do it on the level of <tt class="docutils literal">Options</tt>. We have to write a custom unmarshal
+method for <tt class="docutils literal">Region</tt>. This is difficult to scale for arbitrarily nested structs
+- spreading our default logic across multiple <tt class="docutils literal">UnmarshalJSON</tt> methods is
+sub-optimal.</p>
+<p>An alternative is to use a completely different approach, by pushing default
+logic to the users. We can accomplish this with pointer fields.</p>
+</div>
+<div class="section" id="default-values-with-pointer-fields">
+<h2>Default values with pointer fields</h2>
+<p>We can define our <tt class="docutils literal">Options</tt> as:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">Options</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Id</span><span class="w">      </span><span class="o">*</span><span class="kt">string</span><span class="w"> </span><span class="s">`json:&quot;id,omitempty&quot;`</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Verbose</span><span class="w"> </span><span class="o">*</span><span class="kt">bool</span><span class="w">   </span><span class="s">`json:&quot;verbose,omitempty&quot;`</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Level</span><span class="w">   </span><span class="o">*</span><span class="kt">int</span><span class="w">    </span><span class="s">`json:&quot;level,omitempty&quot;`</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Power</span><span class="w">   </span><span class="o">*</span><span class="kt">int</span><span class="w">    </span><span class="s">`json:&quot;power,omitempty&quot;`</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It's very similar to the original definition, except that all the fields are now
+pointers. Suppose we have the following JSON text:</p>
+<div class="highlight"><pre><span></span>{
+  &quot;id&quot;: &quot;foobar&quot;,
+  &quot;verbose&quot;: false,
+  &quot;level&quot;: 10
+}
+</pre></div>
+<p>Note that all fields except &quot;power&quot; are specified. We can <tt class="docutils literal">Unmarshal</tt> this
+as usual:</p>
+<div class="highlight"><pre><span></span><span class="kd">var</span><span class="w"> </span><span class="nx">opts</span><span class="w"> </span><span class="nx">Options</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">json</span><span class="p">.</span><span class="nx">Unmarshal</span><span class="p">(</span><span class="nx">jsonText</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">opts</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>But now we can actually distinguish between fields that were not specified at
+all (these will get unmarshaled to a <tt class="docutils literal">nil</tt> pointer) and fields that were
+specified with zero values (these will get unmarshaled to valid pointers to
+values with zero values). For example, we can write the following parsing
+wrapper to unmarshal <tt class="docutils literal">Options</tt> and set default values as needed:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">parseOptions</span><span class="p">(</span><span class="nx">jsn</span><span class="w"> </span><span class="p">[]</span><span class="kt">byte</span><span class="p">)</span><span class="w"> </span><span class="nx">Options</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">opts</span><span class="w"> </span><span class="nx">Options</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">json</span><span class="p">.</span><span class="nx">Unmarshal</span><span class="p">(</span><span class="nx">jsonText</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">opts</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">opts</span><span class="p">.</span><span class="nx">Power</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">v</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">10</span><span class="w"></span>
+<span class="w">    </span><span class="nx">opts</span><span class="p">.</span><span class="nx">Power</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">v</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">opts</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Note how we set <tt class="docutils literal">opts.Power</tt>; this is one of the inconveniences of working
+with pointers, because there is no syntax in Go to take the address of literals
+of built-in types like <tt class="docutils literal">int</tt>. This isn't too much trouble, though, as some
+simple helper functions can make our life more pleasant:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">Bool</span><span class="p">(</span><span class="nx">v</span><span class="w"> </span><span class="kt">bool</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="kt">bool</span><span class="w">       </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">v</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="kd">func</span><span class="w"> </span><span class="nx">Int</span><span class="p">(</span><span class="nx">v</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="kt">int</span><span class="w">          </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">v</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="kd">func</span><span class="w"> </span><span class="nx">String</span><span class="p">(</span><span class="nx">v</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="kt">string</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">v</span><span class="w"> </span><span class="p">}</span><span class="w"></span>
+<span class="c1">// etc...</span><span class="w"></span>
+</pre></div>
+<p>With these in hand, we could have simply written <tt class="docutils literal">opts.Power = Int(10)</tt>.</p>
+<p>The most useful trait of this approach is that it doesn't force us to assign
+default values at the point where the JSON is parsed. We can pass <tt class="docutils literal">Options</tt>
+into user code and let <em>that</em> deal with defaults when <tt class="docutils literal">nil</tt> fields are
+encountered.</p>
+<p>So are pointers the magic solution to our &quot;distinguish unspecified values from
+zero values&quot; problem? Sort of. Pointers are certainly a viable solution that
+should work well. The <a class="reference external" href="https://github.com/golang/protobuf">official protobuf package</a> uses the same approach for <tt class="docutils literal">proto2</tt>
+Protocol Buffers that distinguish between required and optional fields. So this
+method has absolutely been battle tested!</p>
+<p>That said, it's not perfect. First of all, even though Go is really good at
+hiding the extra syntactic burden of dealing with pointers most of the time,
+in some cases a bit still leaks through (like taking the address of a built-in
+literal, as shown above). Another potential issue is performance. Pointers often
+mean heap allocation and may cause performance issues in some scenarios, though
+when talking about option structs this is unlikely to be a problem.</p>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

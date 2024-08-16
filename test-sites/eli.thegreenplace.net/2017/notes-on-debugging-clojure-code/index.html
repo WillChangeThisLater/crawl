@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Notes on debugging Clojure code - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Notes on debugging Clojure code">
+                        Notes on debugging Clojure code
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> May 23, 2017 at 20:02</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/clojure.html">Clojure</a>
+        ,
+    <a href="../../tag/lisp.html">Lisp</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>Clojure is a great programming language, but a recurring complaint one keeps
+hearing from developers hacking on Clojure code is that debugging can be
+unpleasant. First of all, I agree! Debugging Clojure code <em>can</em> be more daunting
+on average than, say, debugging Python code. This is mainly due to two reasons:</p>
+<ol class="arabic simple">
+<li>Clojure's Java legacy. Clojure is compiled to Java bytecode, which has some
+terminology and idiosyncracies Clojure programmers aren't always familiar
+with. These terms tend to pop up in stack traces and cause confusion (e.g.
+<tt class="docutils literal">IFN</tt>).</li>
+<li>Clojure - being a Lisp - has a certain code structure which is different
+from, say, a more common imperative coding style. Rather than being a
+sequence of statements, Clojure programs tend to involve long call chains of
+nested expressions. Where only part of an expression fails, it's often
+non-trivial to figure out why.</li>
+</ol>
+<p>In this post I want to share some notes from my own experience debugging Clojure
+programs.</p>
+<div class="section" id="dealing-with-clojure-s-cryptic-exceptions">
+<h2>Dealing with Clojure's cryptic exceptions</h2>
+<p>The first problem with Clojure's runtime exceptions is that we usually don't get
+to see the full stack trace <em>by default</em>. Let's say we have this silly,
+nonsensical, function in a file called <tt class="docutils literal">sample.clj</tt>:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">foo</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="nb">cond </span><span class="p">(</span><span class="nb">&gt; </span><span class="nv">n</span><span class="w"> </span><span class="mi">40</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nb">+ </span><span class="nv">n</span><span class="w"> </span><span class="mi">20</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="nb">&gt; </span><span class="nv">n</span><span class="w"> </span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nb">- </span><span class="p">(</span><span class="nb">first </span><span class="nv">n</span><span class="p">)</span><span class="w"> </span><span class="mi">20</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="ss">:else</span><span class="w"> </span><span class="mi">0</span><span class="p">))</span><span class="w"></span>
+</pre></div>
+<p>Then to try how it works, we load the file into the REPL and type the following
+<a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>:</p>
+<div class="highlight"><pre><span></span>debugging.core=&gt; (foo 24)
+IllegalArgumentException Don&#39;t know how to create ISeq from: java.lang.Long
+  clojure.lang.RT.seqFrom (RT.java:542)
+</pre></div>
+<p>Uh oh. There are two problems here. First, what does this error message mean?
+What's <tt class="docutils literal">ISeq</tt> and what's <tt class="docutils literal">java.lang.Long</tt>? Second, it's not clear where it
+is actually failing (thanks for that pointer to <tt class="docutils literal">RT.java</tt> though, Clojure!)
+Let's address the second problem first. The magic incantation to show the stack
+trace of the last exception is calling the <tt class="docutils literal">pst</tt> function:</p>
+<div class="highlight"><pre><span></span>debugging.core=&gt; (pst)
+IllegalArgumentException Don&#39;t know how to create ISeq from: java.lang.Long
+  clojure.lang.RT.seqFrom (RT.java:542)
+  clojure.lang.RT.seq (RT.java:523)
+  clojure.lang.RT.first (RT.java:668)
+  clojure.core/first--4339 (core.clj:55)
+  clojure.core/first--4339 (core.clj:55)
+  debugging.sample/foo (sample.clj:10)
+  debugging.sample/foo (sample.clj:7)
+  debugging.core/eval13715 (form-init6539101589609174055.clj:1)
+  debugging.core/eval13715 (form-init6539101589609174055.clj:1)
+  clojure.lang.Compiler.eval (Compiler.java:6927)
+  clojure.lang.Compiler.eval (Compiler.java:6890)
+  clojure.core/eval (core.clj:3105)
+</pre></div>
+<p>This is much better because at least <em>some</em> files in this trace are familiar.
+<tt class="docutils literal">core.clj</tt> is not <em>our</em> <tt class="docutils literal">core.clj</tt>, it's Clojure's core library. But
+<tt class="docutils literal">sample.clj</tt> <em>is</em> our file, and we can infer that on line 10 we call
+<tt class="docutils literal">clojure,core/first</tt> and something goes wrong. Line 10 happens to be:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="nb">&gt; </span><span class="nv">n</span><span class="w"> </span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nb">- </span><span class="p">(</span><span class="nb">first </span><span class="nv">n</span><span class="p">)</span><span class="w"> </span><span class="mi">20</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>So now things become more clear. The call <tt class="docutils literal">(first n)</tt> must be bad, and bad in
+a way that tries to coerce clojure into creating an <tt class="docutils literal">ISeq</tt> from a <tt class="docutils literal">Long</tt>.
+In other words, we're passing a number into a function that expects a sequence,
+and this is, indeed, bad. Learning to map from Clojure values and types to the
+JVM's expectations will take time and grit - especially if you (like me) don't
+have much Java experience. I suggest doing a bit of reading on Clojure/Java
+interoperability, and about other Java-isms Clojure inherits; it ain't pretty,
+and you may not always want to use it, but being familiar with the terms can go
+a long way in deciphering cryptic stack traces.</p>
+<p>For a more detailed treatment of this debugging issue I highly recommend
+<a class="reference external" href="https://aphyr.com/posts/319-clojure-from-the-ground-up-debugging">Aphyr's article on debugging Clojure</a>.</p>
+</div>
+<div class="section" id="finding-which-form-an-exception-comes-from">
+<h2>Finding which form an exception comes from</h2>
+<p>Let's invoke the <tt class="docutils literal">foo</tt> function in a different way that demonstrates another
+issue with debugging Clojure:</p>
+<div class="highlight"><pre><span></span>debugging.core=&gt; (foo nil)
+
+NullPointerException   clojure.lang.Numbers.ops (Numbers.java:1013)
+</pre></div>
+<p>OK, we know what to do next:</p>
+<div class="highlight"><pre><span></span>debugging.core=&gt; (pst)
+NullPointerException
+  clojure.lang.Numbers.ops (Numbers.java:1013)
+  clojure.lang.Numbers.gt (Numbers.java:229)
+  clojure.lang.Numbers.gt (Numbers.java:3864)
+  debugging.sample/foo (sample.clj:9)
+  debugging.sample/foo (sample.clj:7)
+  debugging.core/eval14693 (form-init6539101589609174055.clj:1)
+  debugging.core/eval14693 (form-init6539101589609174055.clj:1)
+  clojure.lang.Compiler.eval (Compiler.java:6927)
+  clojure.lang.Compiler.eval (Compiler.java:6890)
+  clojure.core/eval (core.clj:3105)
+  clojure.core/eval (core.clj:3101)
+  clojure.main/repl/read-eval-print--7408/fn--7411 (main.clj:240)
+</pre></div>
+<p>So the exception comes from line 9, which is:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="nb">cond </span><span class="p">(</span><span class="nb">&gt; </span><span class="nv">n</span><span class="w"> </span><span class="mi">40</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nb">+ </span><span class="nv">n</span><span class="w"> </span><span class="mi">20</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>This exception also tells us it comes from <tt class="docutils literal">clojure.lang.Numbers.gt</tt> from
+which we can infer it's the <tt class="docutils literal">&gt;</tt> operator that is complaining. But imagine for
+a second that we had two forms with the same operator on that line:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="nb">cond </span><span class="p">(</span><span class="nb">&gt; </span><span class="nv">c</span><span class="w"> </span><span class="mi">40</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nb">* </span><span class="p">(</span><span class="nb">+ </span><span class="nv">n</span><span class="w"> </span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nb">+ </span><span class="nv">m</span><span class="w"> </span><span class="mi">30</span><span class="p">)))</span><span class="w"></span>
+</pre></div>
+<p>If we got a <tt class="docutils literal">NullPointerException</tt> about an addition, we wouldn't know which
+one fails. Luckily, Clojure comes with a very useful module that helps
+debugging - <a class="reference external" href="https://github.com/clojure/tools.trace">tools.trace</a>. In this
+particular case, we'd use the <tt class="docutils literal"><span class="pre">trace-forms</span></tt> macro  which tells us which
+nested form (expression) is failing. We can modify our function to be:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">foo</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="nf">trace-forms</span><span class="w"> </span><span class="p">(</span><span class="nb">cond </span><span class="p">(</span><span class="nb">&gt; </span><span class="nv">n</span><span class="w"> </span><span class="mi">40</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nb">+ </span><span class="nv">n</span><span class="w"> </span><span class="mi">20</span><span class="p">)</span><span class="w"></span>
+<span class="w">                     </span><span class="p">(</span><span class="nb">&gt; </span><span class="nv">n</span><span class="w"> </span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nb">- </span><span class="p">(</span><span class="nb">first </span><span class="nv">n</span><span class="p">)</span><span class="w"> </span><span class="mi">20</span><span class="p">)</span><span class="w"></span>
+<span class="w">                     </span><span class="ss">:else</span><span class="w"> </span><span class="mi">0</span><span class="p">)))</span><span class="w"></span>
+</pre></div>
+<p>And now when called with <tt class="docutils literal">nil</tt>, we get:</p>
+<div class="highlight"><pre><span></span>debugging.core=&gt; (foo nil)
+NullPointerException : No message attached to throwable java.lang.NullPointerException
+  Form failed: (&gt; n 40)
+  Form failed: (if
+ (&gt; n 40)
+ (+ n 20)
+ (clojure.core/cond (&gt; n 20) (- (first n) 20) :else 0))
+  Form failed: (cond (&gt; n 40) (+ n 20) (&gt; n 20) (- (first n) 20) :else 0)
+  clojure.lang.Numbers.ops (Numbers.java:1013)
+</pre></div>
+<p>Neat, huh? <tt class="docutils literal"><span class="pre">trace-forms</span></tt> breaks the form it traces to all the nested forms
+and reports precisely which one failed - propagating this information upwards
+towards the top form <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>. <tt class="docutils literal"><span class="pre">trace-forms</span></tt> is <em>very</em> useful when errors manifest
+as exceptions.</p>
+<p>Unfortunately, this isn't sufficient for all cases. Our <tt class="docutils literal">foo</tt> wasn't designed
+to handle <tt class="docutils literal">nil</tt>s, and the bug here is in the place where the <tt class="docutils literal">nil</tt> came
+from. This may be quite a bit removed - and not on the same stack trace - from
+where <tt class="docutils literal">foo</tt> is invoked. We'll get an exception when <tt class="docutils literal">foo</tt> is called, but the
+<em>real</em> challenge is to find where the <tt class="docutils literal">nil</tt> came from. More generally, bugs
+that manifest as thrown exceptions are the easier kind of bugs. The more
+insidious bugs hide in programs that run just fine end-to-end but compute
+slightly incorrect results.</p>
+</div>
+<div class="section" id="tracing-and-logging">
+<h2>Tracing and logging</h2>
+<p>This gets us into the more general domain of debugging, where the tricks and
+tools programmers use are as varied as the bugs hiding in our programs. When it
+comes to debugging, I'm firmly in the <tt class="docutils literal">printf</tt> camp; I rarely prefer debuggers
+over <tt class="docutils literal">printf</tt>-based debugging <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>, and Clojure is no exception. In fact, due
+to the way Clojure programs look (nested forms), I find that debuggers are even
+less useful in Clojure than in other languages. On the other hand, Clojure's
+macros make it possible to trace / print stuff in a very nice way.</p>
+<p>For example, I find that it's useful to be able to turn debugging printouts on
+and off frequently. So I have this trusty code in my utilities:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="k">def </span><span class="o">^</span><span class="ss">:dynamic</span><span class="w"> </span><span class="nv">*verbose*</span><span class="w"> </span><span class="nv">false</span><span class="p">)</span><span class="w"></span>
+
+<span class="p">(</span><span class="kd">defmacro </span><span class="nv">printfv</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">fmt</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="nv">args</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="o">`</span><span class="p">(</span><span class="nb">when </span><span class="nv">*verbose*</span><span class="w"></span>
+<span class="w">     </span><span class="p">(</span><span class="nf">printf</span><span class="w"> </span><span class="o">~</span><span class="nv">fmt</span><span class="w"> </span><span class="o">~@</span><span class="nv">args</span><span class="p">)))</span><span class="w"></span>
+</pre></div>
+<p>Calls to <tt class="docutils literal">printfv</tt> can be freely scattered around the code; by default,
+they will not print anything. When I do want to see what these <tt class="docutils literal">printfv</tt>s
+have to say, another macro comes useful:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defmacro </span><span class="nv">with-verbose</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="o">&amp;</span><span class="w"> </span><span class="nv">body</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="o">`</span><span class="p">(</span><span class="nb">binding </span><span class="p">[</span><span class="nv">*verbose*</span><span class="w"> </span><span class="nv">true</span><span class="p">]</span><span class="w"> </span><span class="o">~@</span><span class="nv">body</span><span class="p">))</span><span class="w"></span>
+</pre></div>
+<p>Here's how it works; Suppose we've written this factorial function, with a
+debugging printout:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">factorial</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="nf">printfv</span><span class="w"> </span><span class="s">&quot;factorial: %d%n&quot;</span><span class="w"> </span><span class="nv">n</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">if </span><span class="p">(</span><span class="nb">&lt; </span><span class="nv">n</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="mi">1</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nb">* </span><span class="nv">n</span><span class="w"> </span><span class="p">(</span><span class="nf">factorial</span><span class="w"> </span><span class="p">(</span><span class="nb">- </span><span class="nv">n</span><span class="w"> </span><span class="mi">1</span><span class="p">)))))</span><span class="w"></span>
+</pre></div>
+<p>Now, if we just call it as usual from the REPL, we get:</p>
+<div class="highlight"><pre><span></span>debugging.core=&gt; (factorial 6)
+720
+</pre></div>
+<p>But if we want to actually see the debugging output, we call:</p>
+<div class="highlight"><pre><span></span>debugging.core=&gt; (with-verbose (factorial 6))
+factorial: 6
+factorial: 5
+factorial: 4
+factorial: 3
+factorial: 2
+factorial: 1
+factorial: 0
+720
+</pre></div>
+<p>This optional verbosity is perfect when you're in the middle of a furious bug
+hunt, adding <tt class="docutils literal">printfv</tt>s in many places in your code. <tt class="docutils literal"><span class="pre">with-verbose</span></tt> can
+turn verbose logging on selectively and control the amount of debugging spew
+<a class="footnote-reference" href="index.html#footnote-4" id="footnote-reference-4">[4]</a>.</p>
+<p>This example brings us back to the <tt class="docutils literal">tools.trace</tt> library, which provides
+another awesome tool that helps trace function calls (the bread and butter of
+Clojure programs). Enter <tt class="docutils literal"><span class="pre">trace-vars</span></tt>. After importing it, all we need to do
+is invoke it on any functions we want traced; for example:</p>
+<div class="highlight"><pre><span></span>debugging.core=&gt; (trace-vars factorial)
+#&#39;debugging.core/factorial
+</pre></div>
+<p>And now invoking our <tt class="docutils literal">factorial</tt> produces:</p>
+<div class="highlight"><pre><span></span>debugging.core=&gt; (factorial 6)
+TRACE t16315: (debugging.core/factorial 6)
+TRACE t16316: | (debugging.core/factorial 5)
+TRACE t16317: | | (debugging.core/factorial 4)
+TRACE t16318: | | | (debugging.core/factorial 3)
+TRACE t16319: | | | | (debugging.core/factorial 2)
+TRACE t16320: | | | | | (debugging.core/factorial 1)
+TRACE t16321: | | | | | | (debugging.core/factorial 0)
+TRACE t16321: | | | | | | =&gt; 1
+TRACE t16320: | | | | | =&gt; 1
+TRACE t16319: | | | | =&gt; 2
+TRACE t16318: | | | =&gt; 6
+TRACE t16317: | | =&gt; 24
+TRACE t16316: | =&gt; 120
+TRACE t16315: =&gt; 720
+720
+</pre></div>
+<p>We get to see the full call tree, including values of parameters and what each
+call returns. It even works for mutually-recursive functions:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">iseven?</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">if </span><span class="p">(</span><span class="nb">= </span><span class="nv">n</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nv">true</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">isodd?</span><span class="w"> </span><span class="p">(</span><span class="nb">- </span><span class="nv">n</span><span class="w"> </span><span class="mi">1</span><span class="p">))))</span><span class="w"></span>
+
+<span class="p">(</span><span class="kd">defn </span><span class="nv">isodd?</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">if </span><span class="p">(</span><span class="nb">= </span><span class="nv">n</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nv">false</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">iseven?</span><span class="w"> </span><span class="p">(</span><span class="nb">- </span><span class="nv">n</span><span class="w"> </span><span class="mi">1</span><span class="p">))))</span><span class="w"></span>
+</pre></div>
+<p>Let's try it:</p>
+<div class="highlight"><pre><span></span>debugging.core=&gt; (trace-vars iseven? isodd?)
+#&#39;debugging.core/isodd?
+debugging.core=&gt; (iseven? 7)
+TRACE t16332: (debugging.core/iseven? 7)
+TRACE t16333: | (debugging.core/isodd? 6)
+TRACE t16334: | | (debugging.core/iseven? 5)
+TRACE t16335: | | | (debugging.core/isodd? 4)
+TRACE t16336: | | | | (debugging.core/iseven? 3)
+TRACE t16337: | | | | | (debugging.core/isodd? 2)
+TRACE t16338: | | | | | | (debugging.core/iseven? 1)
+TRACE t16339: | | | | | | | (debugging.core/isodd? 0)
+TRACE t16339: | | | | | | | =&gt; false
+TRACE t16338: | | | | | | =&gt; false
+TRACE t16337: | | | | | =&gt; false
+TRACE t16336: | | | | =&gt; false
+TRACE t16335: | | | =&gt; false
+TRACE t16334: | | =&gt; false
+TRACE t16333: | =&gt; false
+TRACE t16332: =&gt; false
+false
+</pre></div>
+<p>Note how easy it to see what calls what. Quite often, bugs are uncovered simply
+by carefully studying the chain of function calls some input tickles in our
+code, and <tt class="docutils literal"><span class="pre">trace-vars</span></tt> is a very low-effort method to enable this kind of
+debugging.</p>
+</div>
+<div class="section" id="deeper-tracing-inside-cond-forms">
+<h2>Deeper tracing inside <tt class="docutils literal">cond</tt> forms</h2>
+<p>Tracing function calls is great, but sometimes insufficient. It's not uncommon
+to have <tt class="docutils literal">cond</tt> forms in functions, and sometimes it's pretty hard to know
+which condition was actually &quot;taken&quot; (this isn't always easy to infer from the
+return value of the function). We've seen how to explore where exceptions come
+from with <tt class="docutils literal"><span class="pre">trace-forms</span></tt>, but exceptions are just one kind of problem. The more
+difficul problem arises when the code throws no exceptions but still produces a
+wrong value.</p>
+<p>I've mentioned how Clojure's macro superpowers let us write very powerful
+debugging tools. What follows is another example.</p>
+<p>Consider this toy code:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="nb">cond </span><span class="p">(</span><span class="nb">&gt; </span><span class="mi">10</span><span class="w"> </span><span class="mi">20</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nb">+ </span><span class="mi">10</span><span class="w"> </span><span class="mi">20</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="nb">&gt; </span><span class="mi">20</span><span class="w"> </span><span class="mi">10</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nb">- </span><span class="mi">20</span><span class="w"> </span><span class="mi">10</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="ss">:else</span><span class="w"> </span><span class="mi">200</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>It happens to return 10 since the second condition fires. But suppose it stands
+for a much more complicated <tt class="docutils literal">cond</tt> where it's not obvious which condition was
+taken and where the return value came from. How do we go about debugging this?</p>
+<p>Well, we can always add a <tt class="docutils literal">printfv</tt> into every result expression (possibly
+wrapping in a <tt class="docutils literal">do</tt> form) and see what fires. This would work, but it's quite
+tiresome, especially for large <tt class="docutils literal">cond</tt>s. To do this automatically, we can
+write the following macro:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defmacro </span><span class="nv">condv</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="o">&amp;</span><span class="w"> </span><span class="nv">clauses</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="nb">when </span><span class="nv">clauses</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">list</span><span class="w"></span>
+<span class="w">     </span><span class="ss">&#39;if</span><span class="w"></span>
+<span class="w">     </span><span class="p">(</span><span class="nb">first </span><span class="nv">clauses</span><span class="p">)</span><span class="w"></span>
+<span class="w">     </span><span class="p">(</span><span class="k">if </span><span class="p">(</span><span class="nb">next </span><span class="nv">clauses</span><span class="p">)</span><span class="w"></span>
+<span class="w">       </span><span class="o">`</span><span class="p">(</span><span class="k">do </span><span class="p">(</span><span class="nb">println </span><span class="p">(</span><span class="nb">str </span><span class="s">&quot;condv &quot;</span><span class="w"> </span><span class="o">&#39;~</span><span class="p">(</span><span class="nb">first </span><span class="nv">clauses</span><span class="p">)))</span><span class="w"></span>
+<span class="w">            </span><span class="o">~</span><span class="p">(</span><span class="nb">second </span><span class="nv">clauses</span><span class="p">))</span><span class="w"></span>
+<span class="w">       </span><span class="p">(</span><span class="nf">throw</span><span class="w"> </span><span class="p">(</span><span class="nf">IllegalArgumentException.</span><span class="w"></span>
+<span class="w">               </span><span class="s">&quot;cond requires an even number of forms&quot;</span><span class="p">)))</span><span class="w"></span>
+<span class="w">     </span><span class="p">(</span><span class="nb">cons </span><span class="ss">&#39;condv</span><span class="w"> </span><span class="p">(</span><span class="nb">next </span><span class="p">(</span><span class="nb">next </span><span class="nv">clauses</span><span class="p">))))))</span><span class="w"></span>
+</pre></div>
+<p>It behaves just like <tt class="docutils literal">cond</tt>, while also printing out the condition that fired.
+If we replace the <tt class="docutils literal">cond</tt> in the original example with <tt class="docutils literal">condv</tt> and evaluate
+it, we'll get:</p>
+<div class="highlight"><pre><span></span>debugging.core=&gt; (condv (&gt; 10 20) (+ 10 20)
+            #_=&gt;        (&gt; 20 10) (- 20 10)
+            #_=&gt;        :else 200)
+condv (&gt; 20 10)
+10
+</pre></div>
+<p>Note the printout before the return value of 10: <tt class="docutils literal">condv (&gt; 20 10)</tt> - it shows
+us exactly which condition was taken.</p>
+</div>
+<div class="section" id="conclusion">
+<h2>Conclusion</h2>
+<p>While beginning Clojure programmers may find the debugging experience
+challenging, I believe that with some effort and perseverance it's possible to
+get used to the unusual environment and even reach new levels of productivity
+by developing a set of debugging tools and techniques.</p>
+<p>In this endeavor, Clojure's macro capabilities are an extremely powerful ally.
+Coupled with a fast edit-rerun cycle in the REPL, such tools can turn Clojure
+debugging into a much less painful activity.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>Alternatively, we can evaluate the same expression somewhere in our
+editor using a Clojure plugin (such as <tt class="docutils literal"><span class="pre">vim-fireplace</span></tt> for Vim).</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>The astute reader will notice a slight discrepancy between our code and
+the output of <tt class="docutils literal"><span class="pre">trace-form</span></tt>. We don't have an <tt class="docutils literal">if</tt> form, or do we?
+Quiz: what does <tt class="docutils literal">cond</tt> expand to? Complex interactions between macros
+and functions is yet another reason debugging Clojure code is sometimes
+hard...</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>In my professional life I spent far more time writing debuggers than
+actually using them.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-4">[4]</a></td><td>This method is only recommended when the debugging prinouts are destined
+to be eventually eliminated from the code. For more permanent logging
+with more verbosity controls, consider using a proper logging library
+like <a class="reference external" href="https://github.com/clojure/tools.logging">tools.logging</a>.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

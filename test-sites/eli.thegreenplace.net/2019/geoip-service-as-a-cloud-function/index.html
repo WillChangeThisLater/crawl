@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>GeoIP service as a cloud function - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to GeoIP service as a cloud function">
+                        GeoIP service as a cloud function
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> May 31, 2019 at 05:31</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/network-programming.html">Network Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p><strong>Updated (2023-08-26)</strong>: tested with newest Go version, added sample using
+<tt class="docutils literal">fetch()</tt> to the code repository.</p>
+<p>In this post I'll go through a complete code sample that deploys a simple
+service as a Google Cloud Function (GCF). The service uses built-in capabilities
+of the GCF runtime to serve GeoIP (a.k.a. GeoLocation) information about its
+clients, letting dynamic web pages know where their visitors are coming from.
+The complete code sample is <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2019/geoip-cloud-function">available here</a>.</p>
+<div class="section" id="free-geoip-information-from-gcp">
+<h2>Free GeoIP information from GCP</h2>
+<p>Since client-side JS doesn't have easy access to the visitor's IP address, the
+traditional approach to find GeoIP information is to invoke a server endpoint;
+done properly, this HTTP request inherits the client's IP address and the server
+can then use an IP-&gt;location database to determine which location the client is
+calling from.</p>
+<p>Multiple paid services exist that do this; for example <a class="reference external" href="https://ipstack.com">https://ipstack.com</a> -
+they provide a URL your JS can access and the result is detailed location
+information in JSON. These services tend to be paid for obvious reasons - usage
+can get heavy and servers cost money to run and maintain.</p>
+<p>If you need a GeoIP service for your website, you can either use such a service
+or roll your own. This post is not an endorsement of any specific service - it's
+just a technical explanation of <em>how</em> to roll your own very easily (and
+cheaply). The decision of <em>whether</em> you want to do this is entirely up to you.</p>
+<p>To roll our own we'd have to get a DB mapping IP-&gt;location somewhere and keep it
+up-to-date. This isn't hard, but there's an easier way. Google AppEngine
+services have long had free access to this information via special
+<a class="reference external" href="https://cloud.google.com/appengine/docs/standard/go/reference/request-response-headers">X-AppEngine headers</a>
+the AppEngine runtime injects into requests. For example,
+<tt class="docutils literal"><span class="pre">X-AppEngine-Country</span></tt> contains the 2-letter country code, etc.</p>
+<p>An AppEngine service is not hard to put together, but a Google Cloud Function
+is even easier. Luckily, these special headers also work for functions!</p>
+</div>
+<div class="section" id="a-cloud-function-that-returns-geoip-information">
+<h2>A cloud function that returns GeoIP information</h2>
+<p>With this information it's pretty easy to construct a cloud function that
+returns the data we're interested in:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">geoIPData</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Country</span><span class="w"> </span><span class="kt">string</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Region</span><span class="w">  </span><span class="kt">string</span><span class="w"></span>
+<span class="w">    </span><span class="nx">City</span><span class="w">    </span><span class="kt">string</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">GeoIP</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">gd</span><span class="w"> </span><span class="nx">geoIPData</span><span class="w"></span>
+<span class="w">    </span><span class="nx">gd</span><span class="p">.</span><span class="nx">Country</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">Header</span><span class="p">.</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;X-AppEngine-Country&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">gd</span><span class="p">.</span><span class="nx">Region</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">Header</span><span class="p">.</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;X-AppEngine-Region&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">gd</span><span class="p">.</span><span class="nx">City</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">Header</span><span class="p">.</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;X-AppEngine-City&quot;</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">    </span><span class="nx">j</span><span class="p">,</span><span class="w"> </span><span class="nx">_</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">json</span><span class="p">.</span><span class="nx">Marshal</span><span class="p">(</span><span class="nx">gd</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">w</span><span class="p">.</span><span class="nx">Header</span><span class="p">().</span><span class="nx">Set</span><span class="p">(</span><span class="s">&quot;Content-Type&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;application/json&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">w</span><span class="p">.</span><span class="nx">Write</span><span class="p">(</span><span class="nx">j</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p><tt class="docutils literal">GeoIP</tt> is the handler we're going to expose through an HTTP trigger. If you
+have gcloud all set up, deployment is a one-liner:</p>
+<div class="highlight"><pre><span></span>$ gcloud functions deploy geoip --entry-point GeoIP --runtime go121 --trigger-http
+</pre></div>
+<p>It should be successful and print out a URL for your function, something like:</p>
+<div class="highlight"><pre><span></span>httpsTrigger:
+  url: https://&lt;region&gt;-&lt;project-name&gt;.cloudfunctions.net/geoip
+</pre></div>
+<p>If you now <tt class="docutils literal">curl</tt> to that URL, it should return your location as JSON.
+Alternatively, visiting the page with a browser I get:</p>
+<img alt="Screen capture from browser showing JSON data" class="align-center" src="../../images/2019/jsoncapture.png" />
+<p>You should see your own location there, of course, unless you're using a proxy.
+It's a good idea to test the service with an IP-modifying proxy. I'm using the
+Hoxx Firefox extension for this, but a site like <a class="reference external" href="https://geopeeker.com">https://geopeeker.com</a> would
+do as well.</p>
+</div>
+<div class="section" id="using-geoip-from-a-web-app-through-an-ajax-request">
+<h2>Using GeoIP from a web app through an AJAX request</h2>
+<p>While it's nice to have a server that returns Geo IP data, it's not very useful
+on its own. You'll probably want to use it from JS, which is why we rolled this
+service in the first place.</p>
+<p>Let's now create a web page that sends a <tt class="docutils literal">XMLHttpRequest</tt> to our
+function and obtains location data. Here's a simple HTML file that embeds JS
+code to do this:</p>
+<div class="highlight"><pre><span></span><span class="p">&lt;</span><span class="nt">html</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">head</span><span class="p">&gt;</span>
+    <span class="p">&lt;</span><span class="nt">title</span><span class="p">&gt;</span>Access GeoIP from JS<span class="p">&lt;/</span><span class="nt">title</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">head</span><span class="p">&gt;</span>
+<span class="p">&lt;</span><span class="nt">body</span><span class="p">&gt;</span>
+  <span class="p">&lt;</span><span class="nt">script</span><span class="p">&gt;</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Note: put your region/project name here</span><span class="w"></span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">url</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;https://&lt;region&gt;-&lt;project-name&gt;.cloudfunctions.net/geoip&#39;</span><span class="w"></span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">request</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="ow">new</span><span class="w"> </span><span class="nx">XMLHttpRequest</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="nx">request</span><span class="p">.</span><span class="nx">open</span><span class="p">(</span><span class="s1">&#39;GET&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">url</span><span class="p">,</span><span class="w"> </span><span class="kc">true</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="nx">request</span><span class="p">.</span><span class="nx">onload</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kd">function</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="nx">request</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mf">200</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">request</span><span class="p">.</span><span class="nx">status</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mf">400</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// Success!</span><span class="w"></span>
+<span class="w">        </span><span class="kd">var</span><span class="w"> </span><span class="nx">data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">JSON</span><span class="p">.</span><span class="nx">parse</span><span class="p">(</span><span class="nx">request</span><span class="p">.</span><span class="nx">responseText</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="nb">document</span><span class="p">.</span><span class="nx">writeln</span><span class="p">(</span><span class="nx">data</span><span class="p">.</span><span class="nx">Country</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot; &quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">Region</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot; &quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">data</span><span class="p">.</span><span class="nx">City</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nb">document</span><span class="p">.</span><span class="nx">writeln</span><span class="p">(</span><span class="s2">&quot;ERROR&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">};</span><span class="w"></span>
+
+<span class="w">    </span><span class="nx">request</span><span class="p">.</span><span class="nx">onerror</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kd">function</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nb">document</span><span class="p">.</span><span class="nx">writeln</span><span class="p">(</span><span class="s2">&quot;ERROR&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">};</span><span class="w"></span>
+
+<span class="w">    </span><span class="nx">request</span><span class="p">.</span><span class="nx">send</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="p">&lt;/</span><span class="nt">script</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">body</span><span class="p">&gt;</span>
+<span class="p">&lt;/</span><span class="nt">html</span><span class="p">&gt;</span>
+</pre></div>
+<p>(An alternative sample using <tt class="docutils literal">fetch()</tt> is available in the
+<a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2019/geoip-cloud-function">code repository</a>)</p>
+<p>You can either open this page locally or place it on a server somewhere and
+access it there. It's very likely that you'll get an error though, with
+something like the following reported to the browser console:</p>
+<div class="highlight"><pre><span></span>Access to XMLHttpRequest at
+&#39;https://&lt;region&gt;-&lt;project-name&gt;.cloudfunctions.net/geoip&#39;
+from origin &#39;null&#39; has been blocked by CORS policy:
+No &#39;Access-Control-Allow-Origin&#39; header is present on the requested resource.
+</pre></div>
+<p>This error is good - it tells us the browser and server conspired to protect us
+from a serious security vulnerability, wherein a malicious website could use
+our credentials to access some other, much more important, website for which
+we have login information saved.</p>
+</div>
+<div class="section" id="enabling-cors-in-our-cloud-function">
+<h2>Enabling CORS in our cloud function</h2>
+<p>Since we plan to serve this Geo IP data from one domain (our Google Cloud
+Function URL) and consume it from another domain, we'll need to enable <a class="reference external" href="https://en.wikipedia.org/wiki/Cross-origin_resource_sharing">CORS</a> server-side.</p>
+<p>For simple, single-use backends this is very easy to do. We can either allow
+public access to the server, or restrict it to a specific domain (or domains).
+For the former, we'll add this at the very top of the <tt class="docutils literal">GeoIP</tt> handler
+function:</p>
+<div class="highlight"><pre><span></span><span class="c1">// Enable simple public access through CORS</span><span class="w"></span>
+<span class="nx">w</span><span class="p">.</span><span class="nx">Header</span><span class="p">().</span><span class="nx">Set</span><span class="p">(</span><span class="s">&quot;Access-Control-Allow-Origin&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;*&quot;</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>To restrict access to specific domains, we'll need to check whether the
+<tt class="docutils literal">Origin</tt> header sent by the client is in the list of allowed domains and echo
+it if it is. If it isn't, we can serve an error or not send any
+<tt class="docutils literal"><span class="pre">Access-Control-</span></tt> headers, which will fail the request.</p>
+<p>Since our server is accessible through GET requests, we don't need to handle
+any CORS preflight logic.</p>
+</div>
+<div class="section" id="conclusion-and-additional-resources">
+<h2>Conclusion and additional resources</h2>
+<p>This was a simple and fun exercise, and you can find the <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2019/geoip-cloud-function">full code sample here</a>.
+It was inspired by <a class="reference external" href="https://medium.com/mop-developers/free-ip-based-geolocation-with-google-cloud-functions-f92e20d47651">this post from Ministry of Programming</a>,
+which implements a similar service in Node.js</p>
+<p>Here are some additional resources that you may find useful:</p>
+<ul class="simple">
+<li>The <a class="reference external" href="https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS">CORS page on MDN</a>
+is great</li>
+<li>The <a class="reference external" href="https://fetch.spec.whatwg.org/">fetch standard</a> formally defines the
+semantics of CORS</li>
+<li><a class="reference external" href="https://cloud.google.com/appengine/docs/standard/go/reference/request-response-headers">Request Headers and Responses</a>
+for the AppEngine/GCF runtime environment on GCP</li>
+<li><a class="reference external" href="http://nginx.org/en/docs/http/ngx_http_geoip_module.html">NGINX GeoIP module</a></li>
+<li><a class="reference external" href="https://flaviocopes.com/cors/">Basics of CORS</a> from Flavio Copes</li>
+<li><a class="reference external" href="https://web.dev/cross-origin-resource-sharing/">CORS from web.dev</a></li>
+<li><a class="reference external" href="https://github.com/rs/cors">github.com/rs/cors</a> - a feature-ful package for CORS in Go</li>
+</ul>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

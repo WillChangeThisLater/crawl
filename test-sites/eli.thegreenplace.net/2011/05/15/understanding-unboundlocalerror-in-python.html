@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Understanding UnboundLocalError in Python - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="understanding-unboundlocalerror-in-python.html"
+                       rel="bookmark"
+                       title="Permalink to Understanding UnboundLocalError in Python">
+                        Understanding UnboundLocalError in Python
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> May 15, 2011 at 05:43</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/python-internals.html">Python internals</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>If you're closely following the <a class="reference external" href="http://stackoverflow.com/questions/tagged/python">Python tag on StackOverflow</a>, you'll notice that the same question comes up at least once a week. The question goes on like this:</p>
+<div class="highlight"><pre>x = <span style="color: #007f7f">10</span>
+<span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">foo</span>():
+    x += <span style="color: #007f7f">1</span>
+    <span style="color: #00007f; font-weight: bold">print</span> x
+foo()
+</pre></div>
+<p>Why, when run, this results in the following error:</p>
+<div class="highlight"><pre>Traceback (most recent call last):
+  File &quot;unboundlocalerror.py&quot;, line 8, in &lt;module&gt;
+    foo()
+  File &quot;unboundlocalerror.py&quot;, line 4, in foo
+    x += 1
+UnboundLocalError: local variable &#39;x&#39; referenced before assignment
+</pre></div>
+<p>There are a few variations on this question, with the same core hiding underneath. Here's one:</p>
+<div class="highlight"><pre>lst = [<span style="color: #007f7f">1</span>, <span style="color: #007f7f">2</span>, <span style="color: #007f7f">3</span>]
+
+<span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">foo</span>():
+    lst.append(<span style="color: #007f7f">5</span>)   <span style="color: #007f00"># OK</span>
+    <span style="color: #007f00">#lst += [5]     # ERROR here</span>
+
+foo()
+<span style="color: #00007f; font-weight: bold">print</span> lst
+</pre></div>
+<p>Running the <tt class="docutils literal"><span class="pre">lst.append(5)</span></tt> statement successfully appends 5 to the list. However, substitute it for <tt class="docutils literal"><span class="pre">lst</span> <span class="pre">+=</span> <span class="pre">[5]</span></tt>, and it raises <tt class="docutils literal"><span class="pre">UnboundLocalError</span></tt>, although at first sight it should accomplish the same.</p>
+<p>Although this exact question is answered in Python's official FAQ (<a class="reference external" href="http://docs.python.org/faq/programming.html#why-am-i-getting-an-unboundlocalerror-when-the-variable-has-a-value">right here</a>), I decided to write this article with the intent of giving a deeper explanation. It will start with a basic FAQ-level answer, which should satisfy one only wanting to know how to &quot;solve the damn problem and move on&quot;. Then, I will dive deeper, looking at the formal definition of Python to understand what's going on. Finally, I'll take a look what happens behind the scenes in the implementation of CPython to cause this behavior.</p>
+<div class="section" id="the-simple-answer">
+<h3>The simple answer</h3>
+<p>As mentioned above, this problem is covered in the Python FAQ. For completeness, I want to explain it here as well, quoting the FAQ when necessary.</p>
+<p>Let's take the first code snippet again:</p>
+<div class="highlight"><pre>x = <span style="color: #007f7f">10</span>
+<span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">foo</span>():
+    x += <span style="color: #007f7f">1</span>
+    <span style="color: #00007f; font-weight: bold">print</span> x
+foo()
+</pre></div>
+<p>So where does the exception come from? Quoting the FAQ:</p>
+<blockquote>
+This is because when you make an assignment to a variable in a scope, that variable becomes local to that scope and shadows any similarly named variable in the outer scope.</blockquote>
+<p>But <tt class="docutils literal"><span class="pre">x</span> <span class="pre">+=</span> <span class="pre">1</span></tt> is similar to <tt class="docutils literal"><span class="pre">x</span> <span class="pre">=</span> <span class="pre">x</span> <span class="pre">+</span> <span class="pre">1</span></tt>, so it should first read <tt class="docutils literal"><span class="pre">x</span></tt>, perform the addition and then assign back to <tt class="docutils literal"><span class="pre">x</span></tt>. As mentioned in the quote above, Python considers <tt class="docutils literal"><span class="pre">x</span></tt> a variable local to <tt class="docutils literal"><span class="pre">foo</span></tt>, so we have a problem - a variable is read (referenced) before it's been assigned. Python raises the <tt class="docutils literal"><span class="pre">UnboundLocalError</span></tt> exception in this case <a class="footnote-reference" href="understanding-unboundlocalerror-in-python.html#id7" id="id1">[1]</a>.</p>
+<p>So what do we do about this? The solution is very simple - Python has the <a class="reference external" href="http://docs.python.org/reference/simple_stmts.html#the-global-statement">global  statement</a> just for this purpose:</p>
+<div class="highlight"><pre>x = <span style="color: #007f7f">10</span>
+<span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">foo</span>():
+    <span style="color: #00007f; font-weight: bold">global</span> x
+    x += <span style="color: #007f7f">1</span>
+    <span style="color: #00007f; font-weight: bold">print</span> x
+foo()
+</pre></div>
+<p>This prints <tt class="docutils literal"><span class="pre">11</span></tt>, without any errors. The <tt class="docutils literal"><span class="pre">global</span></tt> statement tells Python that inside <tt class="docutils literal"><span class="pre">foo</span></tt>, <tt class="docutils literal"><span class="pre">x</span></tt> refers to the global variable <tt class="docutils literal"><span class="pre">x</span></tt>, even if it's assigned in <tt class="docutils literal"><span class="pre">foo</span></tt>.</p>
+<p>Actually, there is another variation on the question, for which the answer is a bit different. Consider this code:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">external</span>():
+    x = <span style="color: #007f7f">10</span>
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">internal</span>():
+        x += <span style="color: #007f7f">1</span>
+        <span style="color: #00007f; font-weight: bold">print</span>(x)
+    internal()
+
+external()
+</pre></div>
+<p>This kind of code may come up if you're into closures and other techniques that use Python's lexical scoping rules. The error this generates is the familiar <tt class="docutils literal"><span class="pre">UnboundLocalError</span></tt>. However, applying the &quot;global fix&quot;:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">external</span>():
+    x = <span style="color: #007f7f">10</span>
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">internal</span>():
+        <span style="color: #00007f; font-weight: bold">global</span> x
+        x += <span style="color: #007f7f">1</span>
+        <span style="color: #00007f; font-weight: bold">print</span>(x)
+    internal()
+
+external()
+</pre></div>
+<p>Doesn't help - another error is generated: <tt class="docutils literal"><span class="pre">NameError:</span> <span class="pre">global</span> <span class="pre">name</span> <span class="pre">'x'</span> <span class="pre">is</span> <span class="pre">not</span> <span class="pre">defined</span></tt>. Python is right here - after all, there's no <em>global</em> variable named <tt class="docutils literal"><span class="pre">x</span></tt>, there's only an <tt class="docutils literal"><span class="pre">x</span></tt> in <tt class="docutils literal"><span class="pre">external</span></tt>. It may be not local to <tt class="docutils literal"><span class="pre">internal</span></tt>, but it's not global. So what can you do in this situation? If you're using Python 3, you have the <tt class="docutils literal"><span class="pre">nonlocal</span></tt> keyword. Replacing <tt class="docutils literal"><span class="pre">global</span></tt> by <tt class="docutils literal"><span class="pre">nonlocal</span></tt> in the last snippet makes everything work as expected. <tt class="docutils literal"><span class="pre">nonlocal</span></tt> is a new statement in Python 3, and there is no equivalent in Python 2 <a class="footnote-reference" href="understanding-unboundlocalerror-in-python.html#id8" id="id2">[2]</a>.</p>
+</div>
+<div class="section" id="the-formal-answer">
+<h3>The formal answer</h3>
+<p>Assignments in Python are used to bind names to values and to modify attributes or items of mutable objects. I could find two places in the Python (2.x) documentation where it's defined how an assignment to a local variable works.</p>
+<p>One is section 6.2 &quot;Assignment statements&quot; in the <a class="reference external" href="http://docs.python.org/reference/simple_stmts.html">Simple Statements</a> chapter of the language reference:</p>
+<blockquote>
+<p>Assignment of an object to a single target is recursively defined as follows. If the target is an identifier (name):</p>
+<ul class="simple">
+<li>If the name does not occur in a global statement in the current code block: the name is bound to the object in the current local namespace.</li>
+<li>Otherwise: the name is bound to the object in the current global namespace.</li>
+</ul>
+</blockquote>
+<p>Another is section 4.1 &quot;Naming and binding&quot; of the <a class="reference external" href="http://docs.python.org/reference/executionmodel.html">Execution model</a> chapter:</p>
+<blockquote>
+<p>If a name is bound in a block, it is a local variable of that block.</p>
+<p>[...]</p>
+<p>When a name is used in a code block, it is resolved using the nearest enclosing scope. [...] If the name refers to a local variable that has not been bound, a UnboundLocalError exception is raised.</p>
+</blockquote>
+<p>This is all clear, but still, another small doubt remains. All these rules apply to assignments of the form <tt class="docutils literal"><span class="pre">var</span> <span class="pre">=</span> <span class="pre">value</span></tt> which clearly bind <tt class="docutils literal"><span class="pre">var</span></tt> to <tt class="docutils literal"><span class="pre">value</span></tt>. But the code snippets we're having a problem with here have the <tt class="docutils literal"><span class="pre">+=</span></tt> assignment. Shouldn't that just modify the bound value, without re-binding it?</p>
+<p>Well, no. <tt class="docutils literal"><span class="pre">+=</span></tt> and its cousins (<tt class="docutils literal"><span class="pre">-=</span></tt>, <tt class="docutils literal"><span class="pre">*=</span></tt>, etc.) are what Python calls &quot;<a class="reference external" href="http://docs.python.org/reference/simple_stmts.html#augmented-assignment-statements">augmented assignment statements</a>&quot; [<em>emphasis mine</em>]:</p>
+<blockquote>
+<p>An augmented assignment evaluates the target (which, unlike normal assignment statements, cannot be an unpacking) and the expression list, performs the binary operation specific to the type of assignment on the two operands, <strong>and assigns the result to the original target</strong>. The target is only evaluated once.</p>
+<p>An augmented assignment expression like <tt class="docutils literal"><span class="pre">x</span> <span class="pre">+=</span> <span class="pre">1</span></tt> <strong>can be rewritten as</strong> <tt class="docutils literal"><span class="pre">x</span> <span class="pre">=</span> <span class="pre">x</span> <span class="pre">+</span> <span class="pre">1</span></tt> to achieve a similar, but not exactly equal effect. In the augmented version, <tt class="docutils literal"><span class="pre">x</span></tt> is only evaluated once. Also, when possible, the actual operation is performed in-place, meaning that rather than creating a new object and assigning that to the target, the old object is modified instead.</p>
+<p>With the exception of assigning to tuples and multiple targets in a single statement, <strong>the assignment done by augmented assignment statements is handled the same way as normal assignments</strong>. Similarly, with the exception of the possible in-place behavior, the binary operation performed by augmented assignment is the same as the normal binary operations.</p>
+</blockquote>
+<p>So when earlier I said that <tt class="docutils literal"><span class="pre">x</span> <span class="pre">+=</span> <span class="pre">1</span></tt> is <em>similar to</em> <tt class="docutils literal"><span class="pre">x</span> <span class="pre">=</span> <span class="pre">x</span> <span class="pre">+</span> <span class="pre">1</span></tt>, I wasn't telling all the truth, but it was accurate with respect to binding. Apart for possible optimization, <tt class="docutils literal"><span class="pre">+=</span></tt> counts exactly as <tt class="docutils literal"><span class="pre">=</span></tt> when binding is considered. If you think carefully about it, it's unavoidable, because some types Python works with are immutable. Consider strings, for example:</p>
+<div class="highlight"><pre>x = <span style="color: #7f007f">&quot;abc&quot;</span>
+x += <span style="color: #7f007f">&quot;def&quot;</span>
+</pre></div>
+<p>The first line binds <tt class="docutils literal"><span class="pre">x</span></tt> to the value &quot;abc&quot;. The second line doesn't modify the value &quot;abc&quot; to be &quot;abcdef&quot;. <em>Strings are immutable in Python</em>. Rather, it creates the new value &quot;abcdef&quot; somewhere in memory, and re-binds <tt class="docutils literal"><span class="pre">x</span></tt> to it. This can be seen clearly when examining the object ID for <tt class="docutils literal"><span class="pre">x</span></tt> before and after the <tt class="docutils literal"><span class="pre">+=</span></tt>:</p>
+<div class="highlight"><pre>&gt;&gt;&gt; x = <span style="color: #7f007f">&quot;abc&quot;</span>
+&gt;&gt;&gt; <span style="color: #00007f">id</span>(x)
+<span style="color: #007f7f">11173824</span>
+&gt;&gt;&gt; x += <span style="color: #7f007f">&quot;def&quot;</span>
+&gt;&gt;&gt; <span style="color: #00007f">id</span>(x)
+<span style="color: #007f7f">32831648</span>
+&gt;&gt;&gt; x
+<span style="color: #7f007f">&#39;abcdef&#39;</span>
+</pre></div>
+<p>Note that some types in Python <em>are</em> mutable. For example, lists can actually be modified in-place:</p>
+<div class="highlight"><pre>&gt;&gt;&gt; y = [<span style="color: #007f7f">1</span>, <span style="color: #007f7f">2</span>]
+&gt;&gt;&gt; <span style="color: #00007f">id</span>(y)
+<span style="color: #007f7f">32413376</span>
+&gt;&gt;&gt; y += [<span style="color: #007f7f">2</span>, <span style="color: #007f7f">3</span>]
+&gt;&gt;&gt; <span style="color: #00007f">id</span>(y)
+<span style="color: #007f7f">32413376</span>
+&gt;&gt;&gt; y
+[<span style="color: #007f7f">1</span>, <span style="color: #007f7f">2</span>, <span style="color: #007f7f">2</span>, <span style="color: #007f7f">3</span>]
+</pre></div>
+<p><tt class="docutils literal"><span class="pre">id(y)</span></tt> didn't change after <tt class="docutils literal"><span class="pre">+=</span></tt>, because the object <tt class="docutils literal"><span class="pre">y</span></tt> referenced was just modified. Still, Python re-bound <tt class="docutils literal"><span class="pre">y</span></tt> to the same object <a class="footnote-reference" href="understanding-unboundlocalerror-in-python.html#id9" id="id3">[3]</a>.</p>
+</div>
+<div class="section" id="the-too-much-information-answer">
+<h3>The &quot;too much information&quot; answer</h3>
+<p><em>This section is of interest only to those curious about the implementation internals of Python itself.</em></p>
+<p>One of the stages in the compilation of Python into bytecode is building the symbol table <a class="footnote-reference" href="understanding-unboundlocalerror-in-python.html#id10" id="id4">[4]</a>. An important goal of building the symbol table is for Python to be able to mark the scope of variables it encounters - which variables are local to functions, which are global, which are free (lexically bound) and so on.</p>
+<p>When the symbol table code sees a variable is assigned in a function, it marks it as local. Note that it doesn't matter if the assignment was done before usage, after usage, or maybe not actually executed due to a condition in code like this:</p>
+<div class="highlight"><pre>x = <span style="color: #007f7f">10</span>
+<span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">foo</span>():
+    <span style="color: #00007f; font-weight: bold">if</span> something_false_at_runtime:
+        x = <span style="color: #007f7f">20</span>
+    <span style="color: #00007f; font-weight: bold">print</span>(x)
+</pre></div>
+<p>We can use the <tt class="docutils literal"><span class="pre">symtable</span></tt> module to examine the symbol table information gathered on some Python code during compilation:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">import</span> <span style="color: #00007f">symtable</span>
+
+code = <span style="color: #7f007f">&#39;&#39;&#39;</span>
+<span style="color: #7f007f">x = 10</span>
+<span style="color: #7f007f">def foo():</span>
+<span style="color: #7f007f">    x += 1</span>
+<span style="color: #7f007f">    print(x)</span>
+<span style="color: #7f007f">&#39;&#39;&#39;</span>
+
+table = symtable.symtable(code, <span style="color: #7f007f">&#39;&lt;string&gt;&#39;</span>, <span style="color: #7f007f">&#39;exec&#39;</span>)
+
+foo_namespace = table.lookup(<span style="color: #7f007f">&#39;foo&#39;</span>).get_namespace()
+sym_x = foo_namespace.lookup(<span style="color: #7f007f">&#39;x&#39;</span>)
+
+<span style="color: #00007f; font-weight: bold">print</span>(sym_x.get_name())
+<span style="color: #00007f; font-weight: bold">print</span>(sym_x.is_local())
+</pre></div>
+<p>This prints:</p>
+<div class="highlight"><pre>x
+True
+</pre></div>
+<p>So we see that <tt class="docutils literal"><span class="pre">x</span></tt> was marked as local in <tt class="docutils literal"><span class="pre">foo</span></tt>. Marking variables as local turns out to be important for optimization in the bytecode, since the compiler can generate a special instruction for it that's very fast to execute. There's an excellent <a class="reference external" href="http://tech.blog.aknin.name/2010/06/05/pythons-innards-naming/">article here</a> explaining this topic in depth; I'll just focus on the outcome.</p>
+<p>The <tt class="docutils literal"><span class="pre">compiler_nameop</span></tt> function in <tt class="docutils literal"><span class="pre">Python/compile.c</span></tt> handles variable name references. To generate the correct opcode, it queries the symbol table function <tt class="docutils literal"><span class="pre">PyST_GetScope</span></tt>. For our <tt class="docutils literal"><span class="pre">x</span></tt>, this returns a bitfield with <tt class="docutils literal"><span class="pre">LOCAL</span></tt> in it. Having seen <tt class="docutils literal"><span class="pre">LOCAL</span></tt>, <tt class="docutils literal"><span class="pre">compiler_nameop</span></tt> generates a <tt class="docutils literal"><span class="pre">LOAD_FAST</span></tt>. We can see this in the disassembly of <tt class="docutils literal"><span class="pre">foo</span></tt>:</p>
+<div class="highlight"><pre>35           0 LOAD_FAST                0 (x)
+             3 LOAD_CONST               1 (1)
+             6 INPLACE_ADD
+             7 STORE_FAST               0 (x)
+
+36          10 LOAD_GLOBAL              0 (print)
+            13 LOAD_FAST                0 (x)
+            16 CALL_FUNCTION            1
+            19 POP_TOP
+            20 LOAD_CONST               0 (None)
+            23 RETURN_VALUE
+</pre></div>
+<p>The first block of instructions shows what <tt class="docutils literal"><span class="pre">x</span> <span class="pre">+=</span> <span class="pre">1</span></tt> was compiled to. You will note that already here (before it's actually assigned), <tt class="docutils literal"><span class="pre">LOAD_FAST</span></tt> is used to retrieve the value of <tt class="docutils literal"><span class="pre">x</span></tt>.</p>
+<p>This <tt class="docutils literal"><span class="pre">LOAD_FAST</span></tt> is the instruction that will cause the <tt class="docutils literal"><span class="pre">UnboundLocalError</span></tt> exception to be raised at runtime, because it is actually executed before any <tt class="docutils literal"><span class="pre">STORE_FAST</span></tt> is done for <tt class="docutils literal"><span class="pre">x</span></tt>. The gory details are in the bytecode interpreter code in <tt class="docutils literal"><span class="pre">Python/ceval.c</span></tt>:</p>
+<div class="highlight"><pre>TARGET(LOAD_FAST)
+    x = GETLOCAL(oparg);
+    <span style="color: #00007f; font-weight: bold">if</span> (x != <span style="color: #00007f">NULL</span>) {
+        Py_INCREF(x);
+        PUSH(x);
+        FAST_DISPATCH();
+    }
+    format_exc_check_arg(PyExc_UnboundLocalError,
+        UNBOUNDLOCAL_ERROR_MSG,
+        PyTuple_GetItem(co-&gt;co_varnames, oparg));
+    <span style="color: #00007f; font-weight: bold">break</span>;
+</pre></div>
+<p>Ignoring the macro-fu for the moment, what this basically says is that once <tt class="docutils literal"><span class="pre">LOAD_FAST</span></tt> is seen, the value of <tt class="docutils literal"><span class="pre">x</span></tt> is obtained from an indexed array of objects <a class="footnote-reference" href="understanding-unboundlocalerror-in-python.html#id11" id="id5">[5]</a>. If no <tt class="docutils literal"><span class="pre">STORE_FAST</span></tt> was done before, this value is still <tt class="docutils literal"><span class="pre">NULL</span></tt>, the <tt class="docutils literal"><span class="pre">if</span></tt> branch is not taken <a class="footnote-reference" href="understanding-unboundlocalerror-in-python.html#id12" id="id6">[6]</a> and the exception is raised.</p>
+<p>You may wonder why Python waits until runtime to raise this exception, instead of detecting it in the compiler. The reason is this code:</p>
+<div class="highlight"><pre>x = <span style="color: #007f7f">10</span>
+<span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">foo</span>():
+    <span style="color: #00007f; font-weight: bold">if</span> something_true():
+        x = <span style="color: #007f7f">1</span>
+    x += <span style="color: #007f7f">1</span>
+    <span style="color: #00007f; font-weight: bold">print</span>(x)
+</pre></div>
+<p>Suppose <tt class="docutils literal"><span class="pre">something_true</span></tt> is a function that returns <tt class="docutils literal"><span class="pre">True</span></tt>, possibly due to some user input. In this case, <tt class="docutils literal"><span class="pre">x</span> <span class="pre">=</span> <span class="pre">1</span></tt> binds <tt class="docutils literal"><span class="pre">x</span></tt> locally, so the reference to it in <tt class="docutils literal"><span class="pre">x</span> <span class="pre">+=</span> <span class="pre">1</span></tt> is no longer unbound. This code will then run without exceptions. Of course if <tt class="docutils literal"><span class="pre">something_true</span></tt> actually turns out to return <tt class="docutils literal"><span class="pre">False</span></tt>, the exception will be raised. Python has no way to resolve this at compile time, so the error detection is postponed to runtime.</p>
+<div align="center" class="align-center"><img class="align-center" src="../../../images/hline.jpg" style="width: 320px; height: 5px;" /></div>
+<table class="docutils footnote" frame="void" id="id7" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="understanding-unboundlocalerror-in-python.html#id1">[1]</a></td><td>This is quite useful, if you think about it. In C &amp; C++ you can use the value of an un-initialized variable, which is almost always a bug. Some compilers (with some settings) warn you about this, but in Python it's just a plain error.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id8" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="understanding-unboundlocalerror-in-python.html#id2">[2]</a></td><td>If you're using Python 2 and still need such code to work, the common workaround is the following: if you have data in <tt class="docutils literal"><span class="pre">external</span></tt> which you want to modify in <tt class="docutils literal"><span class="pre">internal</span></tt>, store it inside a <tt class="docutils literal"><span class="pre">dict</span></tt> instead of a stand-alone variable.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id9" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="understanding-unboundlocalerror-in-python.html#id3">[3]</a></td><td>Could this be spared? Due to the dynamic nature of Python, that would be hard to do. At compilation time, when Python is compiled to bytecode, there's no way to know what the real type of the objects is. <tt class="docutils literal"><span class="pre">y</span></tt> in the example above could be some user-defined type with an overloaded <tt class="docutils literal"><span class="pre">+=</span></tt> operator which returns a new object, so Python compiler has to create generic code that re-binds the variable.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id10" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="understanding-unboundlocalerror-in-python.html#id4">[4]</a></td><td>I've written comprehensively on the internals of symbol table construction in Python's compiler (<a class="reference external" href="../../../2010/09/18/python-internals-symbol-tables-part-1/index.html">part 1</a> and <a class="reference external" href="../../../2010/09/20/python-internals-symbol-tables-part-2/index.html">part 2</a>).</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id11" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="understanding-unboundlocalerror-in-python.html#id5">[5]</a></td><td><tt class="docutils literal"><span class="pre">GETLOCAL(i)</span></tt> is a macro for <tt class="docutils literal"><span class="pre">(fastlocals[i])</span></tt>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id12" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="understanding-unboundlocalerror-in-python.html#id6">[6]</a></td><td>Had the <tt class="docutils literal"><span class="pre">if</span></tt> been entered, the exception raising code would not have been reached, since <tt class="docutils literal"><span class="pre">FAST_DISPATCH</span></tt> expands to a <tt class="docutils literal"><span class="pre">goto</span></tt> that takes control elsewhere.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="understanding-unboundlocalerror-in-python.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

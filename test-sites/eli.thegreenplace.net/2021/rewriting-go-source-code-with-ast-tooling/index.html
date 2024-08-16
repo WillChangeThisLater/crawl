@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Rewriting Go source code with AST tooling - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Rewriting Go source code with AST tooling">
+                        Rewriting Go source code with AST tooling
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> October 02, 2021 at 05:48</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/go-tooling.html">Go tooling</a>
+        ,
+    <a href="../../tag/compilation.html">Compilation</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>Go is well-known for having great tooling for analyzing code written in the
+language, right in the standard library with the <tt class="docutils literal">go/*</tt> packages
+(<tt class="docutils literal">go/parser</tt>, <tt class="docutils literal">go/ast</tt>, <tt class="docutils literal">go/types</tt> etc.); in addition, the
+<a class="reference external" href="https://pkg.go.dev/golang.org/x/tools">golang.org/x/tools</a> module contains
+several supplemental packages that are even more powerful. I've used one of
+these packages to describe how to write multi-package analysis tools in a <a class="reference external" href="../../2020/writing-multi-package-analysis-tools-for-go/index.html">post
+from last year</a>.</p>
+<p>Here I want to write about a slightly different task: <em>rewriting</em> Go source code
+using AST-based tooling. I will begin by providing a quick introduction to
+how existing capabilities of the stdlib <tt class="docutils literal">go/ast</tt> package can be used to find
+points of interest in an AST. Then, I'll show how some simple rewrites can be
+done with the <tt class="docutils literal">go/ast</tt> package without requiring additional tooling. Finally,
+I'll discuss the limitations of this approach and the
+<tt class="docutils literal">golang.org/x/tools/astutil</tt> package which provides much more powerful AST
+editing capabilities.</p>
+<p>This post assumes some basic level of familiarity with ASTs (Abstract Syntax
+Trees) in general, and ASTs for Go in particular.</p>
+<div class="section" id="finding-points-of-interest-in-a-go-ast">
+<h2>Finding points of interest in a Go AST</h2>
+<p>Throughout this post, we're going to be using the following simple Go snippet
+as our lab rat:</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span><span class="w"> </span><span class="nx">p</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">pred</span><span class="p">()</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">pp</span><span class="p">(</span><span class="nx">x</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">x</span><span class="w"> </span><span class="p">&gt;</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">pred</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">5</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">b</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">pred</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">b</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="mi">6</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Let's start by finding all calls to the <tt class="docutils literal">pred</tt> function in this code. The
+<tt class="docutils literal">go/ast</tt> package provides two approaches for finding points of interest in
+the code. First, we'll discuss <tt class="docutils literal">ast.Walk</tt>. The full code sample for this part
+is <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2021/go-ast-rewrite/ast-find-call-visit.go">on GitHub</a>.
+We begin by parsing the source code (which we'll be piping into standard input):</p>
+<div class="highlight"><pre><span></span><span class="nx">fset</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">token</span><span class="p">.</span><span class="nx">NewFileSet</span><span class="p">()</span><span class="w"></span>
+<span class="nx">file</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">parser</span><span class="p">.</span><span class="nx">ParseFile</span><span class="p">(</span><span class="nx">fset</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;src.go&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Stdin</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Now we create a new value implementing the <tt class="docutils literal">ast.Visitor</tt> interface and call
+<tt class="docutils literal">ast.Walk</tt>:</p>
+<div class="highlight"><pre><span></span><span class="nx">visitor</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">Visitor</span><span class="p">{</span><span class="nx">fset</span><span class="p">:</span><span class="w"> </span><span class="nx">fset</span><span class="p">}</span><span class="w"></span>
+<span class="nx">ast</span><span class="p">.</span><span class="nx">Walk</span><span class="p">(</span><span class="nx">visitor</span><span class="p">,</span><span class="w"> </span><span class="nx">file</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>Finally, the interesting part of the code is the <tt class="docutils literal">Visitor</tt> type:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">Visitor</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fset</span><span class="w"> </span><span class="o">*</span><span class="nx">token</span><span class="p">.</span><span class="nx">FileSet</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">v</span><span class="w"> </span><span class="o">*</span><span class="nx">Visitor</span><span class="p">)</span><span class="w"> </span><span class="nx">Visit</span><span class="p">(</span><span class="nx">n</span><span class="w"> </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Node</span><span class="p">)</span><span class="w"> </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Visitor</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">n</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">switch</span><span class="w"> </span><span class="nx">x</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">n</span><span class="p">.(</span><span class="kd">type</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">case</span><span class="w"> </span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">CallExpr</span><span class="p">:</span><span class="w"></span>
+<span class="w">    </span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">x</span><span class="p">.</span><span class="nx">Fun</span><span class="p">.(</span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">Ident</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">id</span><span class="p">.</span><span class="nx">Name</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s">&quot;pred&quot;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;Visit found call to pred() at %s\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">v</span><span class="p">.</span><span class="nx">fset</span><span class="p">.</span><span class="nx">Position</span><span class="p">(</span><span class="nx">n</span><span class="p">.</span><span class="nx">Pos</span><span class="p">()))</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">v</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Our visitor is only interested in AST nodes of type <tt class="docutils literal">CallExpr</tt>. Once it sees
+such a node, it checks the name of the called function, and reports matches.
+Note the type assertion on <tt class="docutils literal">x.Fun</tt>; we only want to report calls when the
+function is referred to by an <tt class="docutils literal">ast.Ident</tt>. In Go, we could call functions in
+other ways, like invoking anonymous functions directly - e.g. <tt class="docutils literal"><span class="pre">func(){}()</span></tt>.</p>
+<p>We have a <tt class="docutils literal">FileSet</tt> stored in the visitor; this is only used here
+to report positions in the parsed code properly. To save space, the AST stores
+all position information in a single <tt class="docutils literal">int</tt> (aliased as the <tt class="docutils literal">token.Pos</tt>
+type), and the <tt class="docutils literal">FileSet</tt> is required to translate these numbers into actual
+positions of the expected <tt class="docutils literal"><span class="pre">&lt;filename&gt;:line:column</span></tt> form.</p>
+</div>
+<div class="section" id="visualizing-the-go-ast">
+<h2>Visualizing the Go AST</h2>
+<p>At this point it's worth mentioning some useful tools that help writing
+analyzers for Go ASTs. First and foremost, the <tt class="docutils literal">go/ast</tt> package has a
+<tt class="docutils literal">Print</tt> function that will emit an AST in a textual format. Here's how the
+full <tt class="docutils literal">if</tt> statement in our code snippet would look if printed this way:</p>
+<div class="highlight"><pre><span></span>.  .  1: *ast.IfStmt {
+.  .  .  If: 9:2
+.  .  .  Cond: *ast.BinaryExpr {
+.  .  .  .  X: *ast.BinaryExpr {
+.  .  .  .  .  X: *ast.Ident {
+.  .  .  .  .  .  NamePos: 9:5
+.  .  .  .  .  .  Name: &quot;x&quot;
+.  .  .  .  .  .  Obj: *(obj @ 72)
+.  .  .  .  .  }
+.  .  .  .  .  OpPos: 9:7
+.  .  .  .  .  Op: &gt;
+.  .  .  .  .  Y: *ast.BasicLit {
+.  .  .  .  .  .  ValuePos: 9:9
+.  .  .  .  .  .  Kind: INT
+.  .  .  .  .  .  Value: &quot;2&quot;
+.  .  .  .  .  }
+.  .  .  .  }
+.  .  .  .  OpPos: 9:11
+.  .  .  .  Op: &amp;&amp;
+.  .  .  .  Y: *ast.CallExpr {
+.  .  .  .  .  Fun: *ast.Ident {
+.  .  .  .  .  .  NamePos: 9:14
+.  .  .  .  .  .  Name: &quot;pred&quot;
+.  .  .  .  .  .  Obj: *(obj @ 11)
+.  .  .  .  .  }
+.  .  .  .  .  Lparen: 9:18
+.  .  .  .  .  Ellipsis: -
+.  .  .  .  .  Rparen: 9:19
+.  .  .  .  }
+.  .  .  }
+.  .  .  Body: *ast.BlockStmt {
+.  .  .  .  Lbrace: 9:21
+.  .  .  .  List: []ast.Stmt (len = 1) {
+.  .  .  .  .  0: *ast.ReturnStmt {
+.  .  .  .  .  .  Return: 10:3
+.  .  .  .  .  .  Results: []ast.Expr (len = 1) {
+.  .  .  .  .  .  .  0: *ast.BasicLit {
+.  .  .  .  .  .  .  .  ValuePos: 10:10
+.  .  .  .  .  .  .  .  Kind: INT
+.  .  .  .  .  .  .  .  Value: &quot;5&quot;
+.  .  .  .  .  .  .  }
+.  .  .  .  .  .  }
+.  .  .  .  .  }
+.  .  .  .  }
+.  .  .  .  Rbrace: 11:2
+.  .  .  }
+</pre></div>
+<p>A somewhat more interactive way to explore this AST dump is using the web page
+at <a class="reference external" href="http://goast.yuroyoro.net/">http://goast.yuroyoro.net/</a>, where you can paste your source and get an AST
+dump with expandable and collapsible sections. This helps focus only
+on parts we're interested in; here's an extract from our AST:</p>
+<img alt="Screenshot of graphical AST dump tool" class="align-center" src="../../images/2021/goast-dump-expand.png" />
+<p>(Update: <a class="reference external" href="https://astexplorer.net/">https://astexplorer.net/</a> is an even nicer AST explorer)</p>
+</div>
+<div class="section" id="using-the-ast-inspect-api">
+<h2>Using the ast.Inspect API</h2>
+<p>Using <tt class="docutils literal">ast.Walk</tt> for finding interesting nodes is pretty straightforward, but
+it requires scaffolding that feels a bit heavy for simple needs - defining a
+custom type that implements the <tt class="docutils literal">ast.Visitor</tt> interface, and so on. Luckily,
+the <tt class="docutils literal">go/ast</tt> package provides a lighter-weight API - <tt class="docutils literal">Inspect</tt>; it only
+needs to be provided a closure. Here's our program to find calls to <tt class="docutils literal">pred()</tt>
+rewritten with <tt class="docutils literal">ast.Inspect</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fset</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">token</span><span class="p">.</span><span class="nx">NewFileSet</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">file</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">parser</span><span class="p">.</span><span class="nx">ParseFile</span><span class="p">(</span><span class="nx">fset</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;src.go&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Stdin</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Inspect</span><span class="p">(</span><span class="nx">file</span><span class="p">,</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">n</span><span class="w"> </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Node</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">switch</span><span class="w"> </span><span class="nx">x</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">n</span><span class="p">.(</span><span class="kd">type</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">CallExpr</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">x</span><span class="p">.</span><span class="nx">Fun</span><span class="p">.(</span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">Ident</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="nx">id</span><span class="p">.</span><span class="nx">Name</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s">&quot;pred&quot;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;Inspect found call to pred() at %s\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">fset</span><span class="p">.</span><span class="nx">Position</span><span class="p">(</span><span class="nx">n</span><span class="p">.</span><span class="nx">Pos</span><span class="p">()))</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+<span class="w">  </span><span class="p">})</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The actual AST node matching logic is the same, but the surrounding code is
+somewhat simpler. Unless there's a strong need to use <tt class="docutils literal">ast.Walk</tt> specifically,
+<tt class="docutils literal">ast.Inspect</tt> is the approach I recommend, and it's the one we'll be using in
+the next section to actually rewrite the AST.</p>
+</div>
+<div class="section" id="simple-ast-rewrites">
+<h2>Simple AST rewrites</h2>
+<p>To begin, it's important to highlight that the AST returned by the parser is a
+mutable object. It's a collection of node values interconnected via pointers to
+each other. We can change this set of nodes in any way we wish - or even create
+a wholly new set of nodes - and then use the <tt class="docutils literal">go/format</tt> package to emit Go
+formatted source code back from the AST. The following program will simply emit
+back the Go program it's provided (though it will drop the comments with the
+default configuration):</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fset</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">token</span><span class="p">.</span><span class="nx">NewFileSet</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">file</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">parser</span><span class="p">.</span><span class="nx">ParseFile</span><span class="p">(</span><span class="nx">fset</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;src.go&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Stdin</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">format</span><span class="p">.</span><span class="nx">Node</span><span class="p">(</span><span class="nx">os</span><span class="p">.</span><span class="nx">Stdout</span><span class="p">,</span><span class="w"> </span><span class="nx">fset</span><span class="p">,</span><span class="w"> </span><span class="nx">file</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Now, back to rewriting that AST. Let's make a couple of changes:</p>
+<ol class="arabic simple">
+<li>We'll rename the function <tt class="docutils literal">pred</tt> to <tt class="docutils literal">pred2</tt>, and rename all the call
+sites to call the new function name.</li>
+<li>We'll inject a printout into the beginning of each function body - emulating
+some sort of instrumentation we could add this way.</li>
+</ol>
+<p>Given the original code snippet, the output will look like this (with the
+changed/new lines highlighted):</p>
+<div class="highlight"><pre><span></span>package p
+
+<span class="hll">func pred2() bool {
+</span><span class="hll">  fmt.Println(&quot;instrumentation&quot;)
+</span>  return true
+}
+
+func pp(x int) int {
+<span class="hll">  fmt.Println(&quot;instrumentation&quot;)
+</span><span class="hll">  if x &gt; 2 &amp;&amp; pred2() {
+</span>    return 5
+  }
+
+<span class="hll">  var b = pred2()
+</span>  if b {
+    return 6
+  }
+  return 0
+}
+</pre></div>
+<p><em>[Note: we're not adding an import of fmt here - this is left as an exercise
+for the reader]</em></p>
+<p>The full code of our rewriting program is available <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2021/go-ast-rewrite/ast-inspect-rewrite.go">here</a>.
+It's using <tt class="docutils literal">ast.Inspect</tt> to find the nodes it wants to operate on. Here's the
+renaming of the call sites:</p>
+<div class="highlight"><pre><span></span><span class="nx">ast</span><span class="p">.</span><span class="nx">Inspect</span><span class="p">(</span><span class="nx">file</span><span class="p">,</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">n</span><span class="w"> </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Node</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">switch</span><span class="w"> </span><span class="nx">x</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">n</span><span class="p">.(</span><span class="kd">type</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">case</span><span class="w"> </span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">CallExpr</span><span class="p">:</span><span class="w"></span>
+<span class="w">    </span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">x</span><span class="p">.</span><span class="nx">Fun</span><span class="p">.(</span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">Ident</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">id</span><span class="p">.</span><span class="nx">Name</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s">&quot;pred&quot;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">id</span><span class="p">.</span><span class="nx">Name</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="s">&quot;2&quot;</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// ...</span><span class="w"></span>
+</pre></div>
+<p>If the function is called by an identifier, the code just appends <tt class="docutils literal">&quot;2&quot;</tt> to the
+name. Again, we're not operating on some copy of the AST - this is the
+<em>real, living</em> AST we're editing here.</p>
+<p>Now let's move on to the next <tt class="docutils literal">case</tt>, where we're handing function
+declarations:</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">FuncDecl</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">x</span><span class="p">.</span><span class="nx">Name</span><span class="p">.</span><span class="nx">Name</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s">&quot;pred&quot;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">x</span><span class="p">.</span><span class="nx">Name</span><span class="p">.</span><span class="nx">Name</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="s">&quot;2&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">newCallStmt</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">ast</span><span class="p">.</span><span class="nx">ExprStmt</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">X</span><span class="p">:</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">ast</span><span class="p">.</span><span class="nx">CallExpr</span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">Fun</span><span class="p">:</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">ast</span><span class="p">.</span><span class="nx">SelectorExpr</span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">X</span><span class="p">:</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">ast</span><span class="p">.</span><span class="nx">Ident</span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="nx">Name</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;fmt&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="p">},</span><span class="w"></span>
+<span class="w">        </span><span class="nx">Sel</span><span class="p">:</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">ast</span><span class="p">.</span><span class="nx">Ident</span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="nx">Name</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Println&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="p">},</span><span class="w"></span>
+<span class="w">      </span><span class="p">},</span><span class="w"></span>
+<span class="w">      </span><span class="nx">Args</span><span class="p">:</span><span class="w"> </span><span class="p">[]</span><span class="nx">ast</span><span class="p">.</span><span class="nx">Expr</span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="o">&amp;</span><span class="nx">ast</span><span class="p">.</span><span class="nx">BasicLit</span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="nx">Kind</span><span class="p">:</span><span class="w">  </span><span class="nx">token</span><span class="p">.</span><span class="nx">STRING</span><span class="p">,</span><span class="w"></span>
+<span class="w">          </span><span class="nx">Value</span><span class="p">:</span><span class="w"> </span><span class="s">`&quot;instrumentation&quot;`</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="p">},</span><span class="w"></span>
+<span class="w">      </span><span class="p">},</span><span class="w"></span>
+<span class="w">    </span><span class="p">},</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">x</span><span class="p">.</span><span class="nx">Body</span><span class="p">.</span><span class="nx">List</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nb">append</span><span class="p">([]</span><span class="nx">ast</span><span class="p">.</span><span class="nx">Stmt</span><span class="p">{</span><span class="nx">newCallStmt</span><span class="p">},</span><span class="w"> </span><span class="nx">x</span><span class="p">.</span><span class="nx">Body</span><span class="p">.</span><span class="nx">List</span><span class="o">...</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>The first three lines in this <tt class="docutils literal">case</tt> do the same as we did for the call sites
+- just rename the <tt class="docutils literal">pred</tt> function to <tt class="docutils literal">pred2</tt>. The rest of the code is
+adding the printout to the start of a function body.</p>
+<p>That task is fairly easy to accomplish since each <tt class="docutils literal">FuncDecl</tt> has a <tt class="docutils literal">Body</tt>
+which is an <tt class="docutils literal">ast.StmtList</tt>, which itself holds a slice of <tt class="docutils literal">ast.Stmt</tt> in its
+<tt class="docutils literal">List</tt> attribute. Out program prepends a new expression to this slice, in
+effect adding a new statement to the very beginning of the function body. The
+statement is a hand-crafted AST node. You must be thinking - how did I know
+how to build this node?</p>
+<p>It's really not a big deal once you get the hang of it. Parsing small snippets
+of code and dumping their ASTs helps, as well as the detailed documentation of
+the <tt class="docutils literal">go/ast</tt> package. I also found the <a class="reference external" href="https://github.com/reflog/go2ast">go2ast</a> tool very useful; it takes a piece of
+code and emits exactly the Go code needed to build its AST.</p>
+<p>Finally, at the end of the program we emit back the modified AST:</p>
+<div class="highlight"><pre><span></span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;Modified AST:&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="nx">format</span><span class="p">.</span><span class="nx">Node</span><span class="p">(</span><span class="nx">os</span><span class="p">.</span><span class="nx">Stdout</span><span class="p">,</span><span class="w"> </span><span class="nx">fset</span><span class="p">,</span><span class="w"> </span><span class="nx">file</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>And this gets us the modified snippet shown at the beginning of this section.</p>
+</div>
+<div class="section" id="limitations-of-ast-editing-with-walk-and-inspect">
+<h2>Limitations of AST editing with Walk and Inspect</h2>
+<p>So far we've managed to rewrite the AST in a couple of interesting ways using
+<tt class="docutils literal">ast.Inspect</tt> for finding the nodes. Can we do <em>any</em> kind of rewrite this way?</p>
+<p>It turns out the answer to this question is <strong>no</strong>, or at least not easily. As a
+motivating example, consider the following task: we'd like to rewrite each call
+to <tt class="docutils literal">pred()</tt> so that it's logically negated, or turns into <tt class="docutils literal">!pred()</tt>. How do
+we do that?</p>
+<p>It's worth spending a few minutes thinking about this question before reading
+on.</p>
+<p>The issue is that when <tt class="docutils literal">ast.Inspect</tt> (or <tt class="docutils literal">ast.Walk</tt>) hands us an
+<tt class="docutils literal">ast.Node</tt>, we can change the node's contents and its children, but we cannot
+replace the node itself. To replace the node itself, we'd need access to its
+parent, but <tt class="docutils literal">ast.Inspect</tt> does not give us any way to access its parent.
+A different, slightly more technical way to think about it is: we get handed
+a node pointer <em>by value</em>, meaning that we can tweak the node it points to,
+but can't set the pointer to point to a different node. To achieve the latter,
+<tt class="docutils literal">ast.Inspect</tt> would have to hand us a pointer to a pointer to the node.</p>
+<p>This limitation was discussed <a class="reference external" href="https://github.com/golang/go/issues/17108">several years ago</a>, and finally in 2017 a new
+package appeared in the &quot;extended stdlib&quot; <tt class="docutils literal">golang.org/x/tools</tt> module -
+<a class="reference external" href="https://pkg.go.dev/golang.org/x/tools/go/ast/astutil">astutil</a>.</p>
+</div>
+<div class="section" id="more-powerful-rewriting-with-astutil">
+<h2>More powerful rewriting with <tt class="docutils literal">astutil</tt></h2>
+<p>The APIs <tt class="docutils literal">astutil</tt> provides let us not only find nodes of interest in the AST,
+but also a way to replace the node itself, not just its contents. In fact, the
+package provides several useful helpers to delete, replace and insert new nodes
+through the <tt class="docutils literal">Cursor</tt> type. A full walkthrough of the capabilities of
+<tt class="docutils literal">astutil</tt> is outside the scope of this post, but I will show how to use it in
+order to implement our task of turning each <tt class="docutils literal">pred()</tt> into <tt class="docutils literal">!pred()</tt>. Here we
+go:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fset</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">token</span><span class="p">.</span><span class="nx">NewFileSet</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">file</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">parser</span><span class="p">.</span><span class="nx">ParseFile</span><span class="p">(</span><span class="nx">fset</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;src.go&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Stdin</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">astutil</span><span class="p">.</span><span class="nx">Apply</span><span class="p">(</span><span class="nx">file</span><span class="p">,</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">c</span><span class="w"> </span><span class="o">*</span><span class="nx">astutil</span><span class="p">.</span><span class="nx">Cursor</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">n</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">c</span><span class="p">.</span><span class="nx">Node</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="k">switch</span><span class="w"> </span><span class="nx">x</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">n</span><span class="p">.(</span><span class="kd">type</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">CallExpr</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="nx">id</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">x</span><span class="p">.</span><span class="nx">Fun</span><span class="p">.(</span><span class="o">*</span><span class="nx">ast</span><span class="p">.</span><span class="nx">Ident</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="nx">id</span><span class="p">.</span><span class="nx">Name</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s">&quot;pred&quot;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="nx">c</span><span class="p">.</span><span class="nx">Replace</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">ast</span><span class="p">.</span><span class="nx">UnaryExpr</span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="nx">Op</span><span class="p">:</span><span class="w"> </span><span class="nx">token</span><span class="p">.</span><span class="nx">NOT</span><span class="p">,</span><span class="w"></span>
+<span class="w">            </span><span class="nx">X</span><span class="p">:</span><span class="w">  </span><span class="nx">x</span><span class="p">,</span><span class="w"></span>
+<span class="w">          </span><span class="p">})</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+<span class="w">  </span><span class="p">})</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;Modified AST:&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">format</span><span class="p">.</span><span class="nx">Node</span><span class="p">(</span><span class="nx">os</span><span class="p">.</span><span class="nx">Stdout</span><span class="p">,</span><span class="w"> </span><span class="nx">fset</span><span class="p">,</span><span class="w"> </span><span class="nx">file</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Instead of calling <tt class="docutils literal">ast.Inspect</tt>, we call <tt class="docutils literal">astutil.Apply</tt>, which also walks
+the AST recursively and gives our closure access to the node. <tt class="docutils literal">Apply</tt> lets us
+register a callback for the node both <em>before</em> and <em>after</em> it was visited; in
+this case we only provide the <em>after</em> case.</p>
+<p>Our closure identifies the call to <tt class="docutils literal">pred</tt> in a way that should be similar by
+now. It then uses the <tt class="docutils literal">Cursor</tt> type to replace this node by a new one which
+is just the same node wrapped in a unary <tt class="docutils literal">NOT</tt> expression. Hidden in its
+implementation, the <tt class="docutils literal">Cursor</tt> type does have access to the parent of each node,
+making it possible to replace the actual node with something else.</p>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

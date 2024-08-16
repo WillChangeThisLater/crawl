@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>On concurrency in Go HTTP servers - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../theme/css/style.css" type="text/css"/>
+
+        <link href="../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../index.html" class="navbar-brand">
+                <img src="../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="on-concurrency-in-go-http-servers/index.html"
+                       rel="bookmark"
+                       title="Permalink to On concurrency in Go HTTP servers">
+                        On concurrency in Go HTTP servers
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> January 17, 2019 at 06:10</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../tag/go.html">Go</a>
+        ,
+    <a href="../tag/concurrency.html">Concurrency</a>
+        ,
+    <a href="../tag/network-programming.html">Network Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>Go's built-in <tt class="docutils literal">net/http</tt> package is convenient, solid and performant, making
+it easy to write production-grade web servers. To be performant, <tt class="docutils literal">net/http</tt>
+automatically employs concurrency; while this is great for high loads, it can
+also lead to some gotchas. In this post I want to explore this topic a bit.</p>
+<div class="section" id="ensuring-safe-concurrent-access-from-handlers-to-data">
+<h2>Ensuring safe concurrent access from handlers to data</h2>
+<p>Let's start with a very simple example of a HTTP server that implements a table
+of counters accessible to the user. We can create counters (or set values of
+existing counters) with the <tt class="docutils literal"><span class="pre">set?name=N&amp;val=V</span></tt> query, get their values with
+the <tt class="docutils literal"><span class="pre">get?name=N</span></tt> query and increment them with the <tt class="docutils literal"><span class="pre">inc?name=N</span></tt> query.
+Here's a simple interaction recorded with a server running in the background
+on port 8000:</p>
+<div class="highlight"><pre><span></span>$ curl &quot;localhost:8000/set?name=x&amp;val=0&quot;
+ok
+$ curl &quot;localhost:8000/get?name=x&quot;
+x: 0
+$ curl &quot;localhost:8000/inc?name=x&quot;
+ok
+$ curl &quot;localhost:8000/get?name=x&quot;
+x: 1
+</pre></div>
+<p>And a basic server implementing this functionality:</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span><span class="w"> </span><span class="nx">main</span><span class="w"></span>
+
+<span class="kn">import</span><span class="w"> </span><span class="p">(</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;fmt&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;log&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;net/http&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;os&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;strconv&quot;</span><span class="w"></span>
+<span class="p">)</span><span class="w"></span>
+
+<span class="kd">type</span><span class="w"> </span><span class="nx">CounterStore</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">counters</span><span class="w"> </span><span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">]</span><span class="kt">int</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">cs</span><span class="w"> </span><span class="nx">CounterStore</span><span class="p">)</span><span class="w"> </span><span class="nx">get</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;get %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">name</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Query</span><span class="p">().</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;name&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">val</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">cs</span><span class="p">.</span><span class="nx">counters</span><span class="p">[</span><span class="nx">name</span><span class="p">];</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;%s: %d\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">val</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;%s not found\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">name</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">cs</span><span class="w"> </span><span class="nx">CounterStore</span><span class="p">)</span><span class="w"> </span><span class="nx">set</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;set %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">name</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Query</span><span class="p">().</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;name&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">val</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Query</span><span class="p">().</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;val&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">intval</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">strconv</span><span class="p">.</span><span class="nx">Atoi</span><span class="p">(</span><span class="nx">val</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;%s\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">cs</span><span class="p">.</span><span class="nx">counters</span><span class="p">[</span><span class="nx">name</span><span class="p">]</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">intval</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;ok\n&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">cs</span><span class="w"> </span><span class="nx">CounterStore</span><span class="p">)</span><span class="w"> </span><span class="nx">inc</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;inc %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">name</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Query</span><span class="p">().</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;name&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">cs</span><span class="p">.</span><span class="nx">counters</span><span class="p">[</span><span class="nx">name</span><span class="p">];</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">cs</span><span class="p">.</span><span class="nx">counters</span><span class="p">[</span><span class="nx">name</span><span class="p">]</span><span class="o">++</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;ok\n&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;%s not found\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">name</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">store</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">CounterStore</span><span class="p">{</span><span class="nx">counters</span><span class="p">:</span><span class="w"> </span><span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">]</span><span class="kt">int</span><span class="p">{</span><span class="s">&quot;i&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;j&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">}}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">http</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/get&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">store</span><span class="p">.</span><span class="nx">get</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">http</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/set&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">store</span><span class="p">.</span><span class="nx">set</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">http</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/inc&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">store</span><span class="p">.</span><span class="nx">inc</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">portnum</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">8000</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">os</span><span class="p">.</span><span class="nx">Args</span><span class="p">)</span><span class="w"> </span><span class="p">&gt;</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">portnum</span><span class="p">,</span><span class="w"> </span><span class="nx">_</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">strconv</span><span class="p">.</span><span class="nx">Atoi</span><span class="p">(</span><span class="nx">os</span><span class="p">.</span><span class="nx">Args</span><span class="p">[</span><span class="mi">1</span><span class="p">])</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;Going to listen on port %d\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">portnum</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">http</span><span class="p">.</span><span class="nx">ListenAndServe</span><span class="p">(</span><span class="s">&quot;localhost:&quot;</span><span class="o">+</span><span class="nx">strconv</span><span class="p">.</span><span class="nx">Itoa</span><span class="p">(</span><span class="nx">portnum</span><span class="p">),</span><span class="w"> </span><span class="kc">nil</span><span class="p">))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This code is simple; <em>too simple</em>, in fact, to the degree that it's wrong. Our
+sample <tt class="docutils literal">curl</tt> session sends all its requests in a serial manner. The problems
+appear when concurrent connections are present, however. A good way to
+simulate many concurrent connections is with <a class="reference external" href="https://en.wikipedia.org/wiki/ApacheBench">ApacheBench</a>:</p>
+<div class="highlight"><pre><span></span>$ ab -n 20000 -c 200 &quot;127.0.0.1:8000/inc?name=i&quot;
+
+Benchmarking 127.0.0.1 (be patient)
+Completed 2000 requests
+Completed 4000 requests
+
+Test aborted after 10 failures
+
+apr_socket_connect(): Connection reset by peer (104)
+Total of 4622 requests completed
+</pre></div>
+<p>Oops... what happened? Checking the logs of the Go server, we'll see something
+like:</p>
+<div class="highlight"><pre><span></span>&lt;normal server logs&gt;
+fatal error: concurrent map writes
+
+goroutine 6118 [running]:
+runtime.throw(0x6b0a5c, 0x15)
+  /usr/local/go/src/runtime/panic.go:608 +0x72 fp=0xc00060dba8 sp=0xc00060db78 pc=0x42ba12
+</pre></div>
+<p>Reviewing our code, the problem is apparent. The request handlers can run
+concurrently but they all manipulate a shared <tt class="docutils literal">CounterStore</tt>. For example, the
+<tt class="docutils literal">inc</tt> handler is being called concurrently for multiple requests and attempts
+to mutate the map. This leads to a race condition since <a class="reference external" href="https://golang.org/doc/faq#atomic_maps">in Go, map operations
+are not atomic</a>. Luckily, the Go
+runtime detects this and dies with a helpful message; it would be worse if data
+were silently corrupted.</p>
+<p>The simplest solution is to serialize all map accesses using a mutex. Here's an
+excerpt from a <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2019/gohttpconcurrency/mutex-server.go">complete code sample</a>
+that implements this:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">CounterStore</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">sync</span><span class="p">.</span><span class="nx">Mutex</span><span class="w"></span>
+<span class="w">  </span><span class="nx">counters</span><span class="w"> </span><span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">]</span><span class="kt">int</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">cs</span><span class="w"> </span><span class="o">*</span><span class="nx">CounterStore</span><span class="p">)</span><span class="w"> </span><span class="nx">inc</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;inc %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cs</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">cs</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">name</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Query</span><span class="p">().</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;name&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">cs</span><span class="p">.</span><span class="nx">counters</span><span class="p">[</span><span class="nx">name</span><span class="p">];</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">cs</span><span class="p">.</span><span class="nx">counters</span><span class="p">[</span><span class="nx">name</span><span class="p">]</span><span class="o">++</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;ok\n&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;%s not found\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">name</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Note two changes:</p>
+<ol class="arabic simple">
+<li>We embed a <tt class="docutils literal">sync.Mutex</tt> in <tt class="docutils literal">CounterStore</tt>, and each handler starts by
+locking the mutex (and deferring an unlock).</li>
+<li>We change the receiver <tt class="docutils literal">inc</tt> is defined on to a pointer <tt class="docutils literal">*CounterStore</tt>.
+In fact, the previous version of the code was wrong in this respect - methods
+that modify data should always be defined with pointer receivers. We got
+lucky that the data was shared at all with value receivers because maps are
+reference types. Pointer receivers are <a class="reference external" href="../2018/beware-of-copying-mutexes-in-go/index.html">particularly critical when mutexes
+are involved</a>.</li>
+</ol>
+<p>If we rerun the <tt class="docutils literal">ab</tt> benchmark with this fixed server, it passes; the race
+condition is gone.</p>
+</div>
+<div class="section" id="synchronizing-with-channels-vs-mutexes">
+<h2>Synchronizing with channels vs. mutexes</h2>
+<p>To programmers experienced in most other languages, adding a mutex to
+synchronize accesses to a <tt class="docutils literal">CounterStore</tt> is a natural solution. One of the
+mottos of Go is, however, <em>&quot;Share memory by communicating, don't communicate by
+sharing memory&quot;</em>. Does this apply here?</p>
+<p>Instead of mutexes, we could use channels to synchronize access to shared data.
+<a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2019/gohttpconcurrency/channel-manager-server.go">This code sample</a>
+reimplements the mutex-using server to use channels instead. We start by
+defining a &quot;counter manager&quot; which is a background goroutine with access to a
+closure that stores the actual data:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">CommandType</span><span class="w"> </span><span class="kt">int</span><span class="w"></span>
+
+<span class="kd">const</span><span class="w"> </span><span class="p">(</span><span class="w"></span>
+<span class="w">  </span><span class="nx">GetCommand</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kc">iota</span><span class="w"></span>
+<span class="w">  </span><span class="nx">SetCommand</span><span class="w"></span>
+<span class="w">  </span><span class="nx">IncCommand</span><span class="w"></span>
+<span class="p">)</span><span class="w"></span>
+
+<span class="kd">type</span><span class="w"> </span><span class="nx">Command</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ty</span><span class="w">        </span><span class="nx">CommandType</span><span class="w"></span>
+<span class="w">  </span><span class="nx">name</span><span class="w">      </span><span class="kt">string</span><span class="w"></span>
+<span class="w">  </span><span class="nx">val</span><span class="w">       </span><span class="kt">int</span><span class="w"></span>
+<span class="w">  </span><span class="nx">replyChan</span><span class="w"> </span><span class="kd">chan</span><span class="w"> </span><span class="kt">int</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">startCounterManager</span><span class="p">(</span><span class="nx">initvals</span><span class="w"> </span><span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">]</span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="kd">chan</span><span class="o">&lt;-</span><span class="w"> </span><span class="nx">Command</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">counters</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">make</span><span class="p">(</span><span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">]</span><span class="kt">int</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">k</span><span class="p">,</span><span class="w"> </span><span class="nx">v</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">initvals</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">counters</span><span class="p">[</span><span class="nx">k</span><span class="p">]</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">v</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">cmds</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">make</span><span class="p">(</span><span class="kd">chan</span><span class="w"> </span><span class="nx">Command</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">go</span><span class="w"> </span><span class="kd">func</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="nx">cmd</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">cmds</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">switch</span><span class="w"> </span><span class="nx">cmd</span><span class="p">.</span><span class="nx">ty</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="nx">GetCommand</span><span class="p">:</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="nx">val</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">counters</span><span class="p">[</span><span class="nx">cmd</span><span class="p">.</span><span class="nx">name</span><span class="p">];</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="nx">cmd</span><span class="p">.</span><span class="nx">replyChan</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="nx">val</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="nx">cmd</span><span class="p">.</span><span class="nx">replyChan</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="o">-</span><span class="mi">1</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="nx">SetCommand</span><span class="p">:</span><span class="w"></span>
+<span class="w">        </span><span class="nx">counters</span><span class="p">[</span><span class="nx">cmd</span><span class="p">.</span><span class="nx">name</span><span class="p">]</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">cmd</span><span class="p">.</span><span class="nx">val</span><span class="w"></span>
+<span class="w">        </span><span class="nx">cmd</span><span class="p">.</span><span class="nx">replyChan</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="nx">cmd</span><span class="p">.</span><span class="nx">val</span><span class="w"></span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="nx">IncCommand</span><span class="p">:</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">counters</span><span class="p">[</span><span class="nx">cmd</span><span class="p">.</span><span class="nx">name</span><span class="p">];</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="nx">counters</span><span class="p">[</span><span class="nx">cmd</span><span class="p">.</span><span class="nx">name</span><span class="p">]</span><span class="o">++</span><span class="w"></span>
+<span class="w">          </span><span class="nx">cmd</span><span class="p">.</span><span class="nx">replyChan</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="nx">counters</span><span class="p">[</span><span class="nx">cmd</span><span class="p">.</span><span class="nx">name</span><span class="p">]</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="nx">cmd</span><span class="p">.</span><span class="nx">replyChan</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="o">-</span><span class="mi">1</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="k">default</span><span class="p">:</span><span class="w"></span>
+<span class="w">        </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;unknown command type&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">cmd</span><span class="p">.</span><span class="nx">ty</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}()</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">cmds</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Instead of accessing the map of counters directly, handlers will send <tt class="docutils literal">Command</tt>s
+on a channel and will receive replies on a reply channel they provide.</p>
+<p>The shared object for the handlers will now be a <tt class="docutils literal">Server</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">Server</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cmds</span><span class="w"> </span><span class="kd">chan</span><span class="o">&lt;-</span><span class="w"> </span><span class="nx">Command</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>And here's the <tt class="docutils literal">inc</tt> handler:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">s</span><span class="w"> </span><span class="o">*</span><span class="nx">Server</span><span class="p">)</span><span class="w"> </span><span class="nx">inc</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;inc %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">name</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Query</span><span class="p">().</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;name&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">replyChan</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">make</span><span class="p">(</span><span class="kd">chan</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">s</span><span class="p">.</span><span class="nx">cmds</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="nx">Command</span><span class="p">{</span><span class="nx">ty</span><span class="p">:</span><span class="w"> </span><span class="nx">IncCommand</span><span class="p">,</span><span class="w"> </span><span class="nx">name</span><span class="p">:</span><span class="w"> </span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">replyChan</span><span class="p">:</span><span class="w"> </span><span class="nx">replyChan</span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">reply</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&lt;-</span><span class="nx">replyChan</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">reply</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;ok\n&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;%s not found\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">name</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Each handler deals with the manager synchronously; the <tt class="docutils literal">Command</tt> send is
+blocking, and so is the read from the reply channel. But note - not a mutex in
+sight! Mutual exclusion is accomplished by a single goroutine having access to
+the actual data.</p>
+<p>While it certainly looks like an interesting technique, for our particular use
+case this approach seems like an overkill. In fact, overuse of channels is one
+of the common gotchas for Go beginners. Quoting from the <a class="reference external" href="https://github.com/golang/go/wiki/MutexOrChannel">Go Wiki entry</a>:</p>
+<blockquote>
+<p>Most locking issues can be solved using either channels or traditional locks.</p>
+<p>So which should you use?</p>
+<p>Use whichever is most expressive and/or most simple.</p>
+</blockquote>
+<p>It then goes on to suggest that mutexes are preferable for protecting shared
+state. I tend to agree, since a mutex feels more natural here.</p>
+</div>
+<div class="section" id="limiting-the-degree-of-concurrency-for-our-server">
+<h2>Limiting the degree of concurrency for our server</h2>
+<p>In addition to synchronization, another aspect of concurrency we have to worry
+about is overloading of the server. Imagine exposing a server to the internet -
+without any safeguards it would be fairly easy to bring it down with a denial of
+service (DoS) attack. That could happend even unintentionally, if we didn't
+provision the proper computing power behind the service. In these cases failure
+is unavoidable but should be graceful.</p>
+<p>It's very easy to do these things in Go, and there are many strategies. One of
+the simplest is <em>rate limiting</em>, which can mean either restricting the number
+of simultaneous connections, or restricting the number of connections per unit
+of time. For the former, we can add some middleware
+(<a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2019/gohttpconcurrency/mutex-server-rate-limited.go">full code here</a>):</p>
+<div class="highlight"><pre><span></span><span class="c1">// limitNumClients is HTTP handling middleware that ensures no more than</span><span class="w"></span>
+<span class="c1">// maxClients requests are passed concurrently to the given handler f.</span><span class="w"></span>
+<span class="kd">func</span><span class="w"> </span><span class="nx">limitNumClients</span><span class="p">(</span><span class="nx">f</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">HandlerFunc</span><span class="p">,</span><span class="w"> </span><span class="nx">maxClients</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">HandlerFunc</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Counting semaphore using a buffered channel</span><span class="w"></span>
+<span class="w">  </span><span class="nx">sema</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">make</span><span class="p">(</span><span class="kd">chan</span><span class="w"> </span><span class="kd">struct</span><span class="p">{},</span><span class="w"> </span><span class="nx">maxClients</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">sema</span><span class="w"> </span><span class="o">&lt;-</span><span class="w"> </span><span class="kd">struct</span><span class="p">{}{}</span><span class="w"></span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="kd">func</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">&lt;-</span><span class="nx">sema</span><span class="w"> </span><span class="p">}()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">f</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>And wrap a handler using it:</p>
+<div class="highlight"><pre><span></span><span class="c1">// Limit to max 10 connections for this handler.</span><span class="w"></span>
+<span class="nx">http</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/inc&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">limitNumClients</span><span class="p">(</span><span class="nx">store</span><span class="p">.</span><span class="nx">inc</span><span class="p">,</span><span class="w"> </span><span class="mi">10</span><span class="p">))</span><span class="w"></span>
+</pre></div>
+<p>This ensures that no more than 10 simultaneous clients will be allowed to invoke
+the <tt class="docutils literal">inc</tt> handler <a class="footnote-reference" href="on-concurrency-in-go-http-servers.html#footnote-1" id="footnote-reference-1">[1]</a>. It should be simple to extend this approach to share a
+single limiting channel between multiple handlers. Or we could use a more
+heavy-handed solution and limit the number of simulatenous connections at the
+listener level, using something like <a class="reference external" href="https://godoc.org/golang.org/x/net/netutil#LimitListener">netutil.LimitListener</a>.</p>
+<p>An alternative approach to rate limiting is time-based. Instead of saying &quot;no
+more than 10 requests at a time&quot;, we can say &quot;no more than one request in a 50
+millisecond period&quot;. Go provides the convenient <tt class="docutils literal">time.Tick</tt> channel that makes
+it easy to implement, as <a class="reference external" href="https://gobyexample.com/rate-limiting">this Go example</a> demonstrates. Adjusting this approach
+to our sample server is left as an exercise to the reader.</p>
+</div>
+<div class="section" id="appendix-where-net-http-goes-concurrent">
+<h2>Appendix: where net.http goes concurrent</h2>
+<p>This is a brief technical appendix, for folks interested following through the
+code of Go's <tt class="docutils literal">net/http</tt> package to see where the concurrency is actually
+implemented.</p>
+<p>The relevant source code for the serving part of <tt class="docutils literal">net/http</tt> is in
+<a class="reference external" href="https://golang.org/src/net/http/server.go">https://golang.org/src/net/http/server.go</a></p>
+<p><tt class="docutils literal">ListenAndServe</tt> invokes <tt class="docutils literal">Serve</tt>, which calls <tt class="docutils literal">Accept</tt> in a loop.
+<tt class="docutils literal">Accept</tt> is similar to the socket <tt class="docutils literal">accept</tt> syscall, creating a new
+connection whenever a new client is accepted; the connection is then used for
+interacting with the client. This connection is <tt class="docutils literal">type conn</tt> in the
+<tt class="docutils literal">server.go</tt> file, a private type with server state for each client connection.
+Its <tt class="docutils literal">serve</tt> method actually serves a connection, pretty much as you would
+expect; it reads some data from the client and invokes the user-supplied handler
+depending on the path.</p>
+<p><tt class="docutils literal">http.Server.Serve</tt> calls <tt class="docutils literal">conn.serve</tt> as:</p>
+<div class="highlight"><pre><span></span><span class="k">go</span><span class="w"> </span><span class="nx">c</span><span class="p">.</span><span class="nx">serve</span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>Wherein lies the concurrency. From this point on, a separate goroutine handles
+this connection. This is why multiple goroutines could be executing
+user-specified handlers (including a single handler) at any given time.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="on-concurrency-in-go-http-servers.html#footnote-reference-1">[1]</a></td><td>For a somewhat more robust approach, we could <tt class="docutils literal">select</tt> between
+grabbing the semaphore and request's <tt class="docutils literal">Context.Done()</tt> channel, to
+ensure that cancelled requests don't take place in line for the
+semaphore. A full treatment of robust context handling it outside the
+scope of this post, however.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="on-concurrency-in-go-http-servers.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../theme/js/count.js"></script>
+</body>
+</html>

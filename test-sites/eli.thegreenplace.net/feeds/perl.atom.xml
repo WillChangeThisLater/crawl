@@ -1,0 +1,635 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"><title>Eli Bendersky's website - Perl</title><link href="https://eli.thegreenplace.net/" rel="alternate"></link><link href="https://eli.thegreenplace.net/feeds/perl.atom.xml" rel="self"></link><id>https://eli.thegreenplace.net/</id><updated>2024-05-04T19:46:23-07:00</updated><entry><title>Perl's "guess if file is text or binary" implemented in Python</title><link href="https://eli.thegreenplace.net/2011/10/19/perls-guess-if-file-is-text-or-binary-implemented-in-python" rel="alternate"></link><published>2011-10-19T08:06:09-07:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2011-10-19:/2011/10/19/perls-guess-if-file-is-text-or-binary-implemented-in-python</id><summary type="html">
+        &lt;p&gt;Perl is a favorite language of system administrators for many reasons; for example, it has some built-in features very well suited for sysadmin scripts. One such feature is the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;-T&lt;/span&gt;&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;-B&lt;/span&gt;&lt;/tt&gt; file test operators &lt;a class="footnote-reference" href="#id4" id="id1"&gt;[1]&lt;/a&gt;. Recently I needed a similar feature in a Python script I was writing. Since …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;Perl is a favorite language of system administrators for many reasons; for example, it has some built-in features very well suited for sysadmin scripts. One such feature is the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;-T&lt;/span&gt;&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;-B&lt;/span&gt;&lt;/tt&gt; file test operators &lt;a class="footnote-reference" href="#id4" id="id1"&gt;[1]&lt;/a&gt;. Recently I needed a similar feature in a Python script I was writing. Since Python doesn't have it built-in, I became curious about how it works in Perl. Hence this post.&lt;/p&gt;
+&lt;p&gt;Here's the relevant bit from the output of &lt;tt class="docutils literal"&gt;perldoc &lt;span class="pre"&gt;-f&lt;/span&gt; &lt;span class="pre"&gt;-B&lt;/span&gt;&lt;/tt&gt;:&lt;/p&gt;
+&lt;blockquote&gt;
+The &amp;quot;-T&amp;quot; and &amp;quot;-B&amp;quot; switches work as follows. The first block or
+so of the file is examined for odd characters such as strange
+control codes or characters with the high bit set. If too many
+strange characters (&amp;gt;30%) are found, it's a &amp;quot;-B&amp;quot; file; otherwise
+it's a &amp;quot;-T&amp;quot; file. Also, any file containing null in the first
+block is considered a binary file. [...]&lt;/blockquote&gt;
+&lt;p&gt;OK, that appears to be a reasonable heuristic. But &amp;quot;odd characters&amp;quot; and &amp;quot;strange control codes or characters&amp;quot; sounds too vague, so I decided to take a peek at the source code of Perl 5.10 &lt;a class="footnote-reference" href="#id5" id="id2"&gt;[2]&lt;/a&gt; to see what it &lt;em&gt;actually&lt;/em&gt; does. This functionality is implemented in function &lt;tt class="docutils literal"&gt;pp_fttext&lt;/tt&gt;, which resides in &lt;tt class="docutils literal"&gt;pp_sys.c&lt;/tt&gt; in the root directory of the source distribution. The &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;-T&lt;/span&gt;&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;-B&lt;/span&gt;&lt;/tt&gt; operators work on both file names and file handles, but for the sake of simplicity I will ignore this distinction, as well as some minor corner cases. Here's what the code does:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;If the file is empty, it's considered text.&lt;/li&gt;
+&lt;li&gt;Otherwise, a buffer of up to 512 bytes is read from the file - this buffer will be examined for the heuristic.&lt;/li&gt;
+&lt;li&gt;The variable &lt;tt class="docutils literal"&gt;odd&lt;/tt&gt; is initialized to 0. It will count the chars that don't appear to be text.&lt;/li&gt;
+&lt;li&gt;Main loop - each byte of the buffer is examined in order:&lt;ul&gt;
+&lt;li&gt;If the byte is &lt;tt class="docutils literal"&gt;\x00&lt;/tt&gt;, the heuristic immediately declares the file is binary and the function is finished.&lt;/li&gt;
+&lt;li&gt;The high bit of the byte is examined.&lt;/li&gt;
+&lt;li&gt;If the high bit is 0: &lt;tt class="docutils literal"&gt;odd&lt;/tt&gt; is incremented if the byte is below ASCII code 32 (space) and not one of the known special values, such as newline or tab. In other words, if the byte isn't an ASCII textual character.&lt;/li&gt;
+&lt;li&gt;If the high bit is 1: if this byte appears to be the first byte in UTF-8 encoding of code-points above &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;U-007F&lt;/span&gt;&lt;/tt&gt;, attempt to decode the next bytes and see if they form a valid UTF-8 sequence. If they do, skip the loop pointer to after this sequence. Otherwise, increment &lt;tt class="docutils literal"&gt;odd&lt;/tt&gt; and proceed with the next character.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;li&gt;The main loop has ended, and now &lt;tt class="docutils literal"&gt;odd&lt;/tt&gt; contains the amount of chars that don't appear to be textual in the buffer.&lt;/li&gt;
+&lt;li&gt;If &lt;tt class="docutils literal"&gt;odd&lt;/tt&gt; is higher than 30% of the length of the buffer, the file is considered binary. Otherwise, it's considered text.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;Here's an implementation in Python of this heuristic &lt;a class="footnote-reference" href="#id6" id="id3"&gt;[3]&lt;/a&gt;, ignoring the UTF-8 case (meaning that if this implementation encounters true UTF-8 chars, it will count them as &amp;quot;odd&amp;quot;):&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;import&lt;/span&gt; &lt;span style="color: #00007f"&gt;sys&lt;/span&gt;
+PY3 = sys.version_info[&lt;span style="color: #007f7f"&gt;0&lt;/span&gt;] == &lt;span style="color: #007f7f"&gt;3&lt;/span&gt;
+
+&lt;span style="color: #007f00"&gt;# A function that takes an integer in the 8-bit range and returns&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;# a single-character byte object in py3 / a single-character string&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;# in py2.&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;#&lt;/span&gt;
+int2byte = (&lt;span style="color: #00007f; font-weight: bold"&gt;lambda&lt;/span&gt; x: &lt;span style="color: #00007f"&gt;bytes&lt;/span&gt;((x,))) &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; PY3 &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt; &lt;span style="color: #00007f"&gt;chr&lt;/span&gt;
+
+_text_characters = (
+        b&lt;span style="color: #7f007f"&gt;&amp;#39;&amp;#39;&lt;/span&gt;.join(int2byte(i) &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; i &lt;span style="color: #0000aa"&gt;in&lt;/span&gt; &lt;span style="color: #00007f"&gt;range&lt;/span&gt;(&lt;span style="color: #007f7f"&gt;32&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;127&lt;/span&gt;)) +
+        b&lt;span style="color: #7f007f"&gt;&amp;#39;\n\r\t\f\b&amp;#39;&lt;/span&gt;)
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;istextfile&lt;/span&gt;(fileobj, blocksize=&lt;span style="color: #007f7f"&gt;512&lt;/span&gt;):
+    &lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot; Uses heuristics to guess whether the given file is text or binary,&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        by reading a single block of bytes from the file.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        If more than 30% of the chars in the block are non-text, or there&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        are NUL (&amp;#39;\x00&amp;#39;) bytes in the block, assume this is a binary file.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;    &amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+    block = fileobj.read(blocksize)
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; b&lt;span style="color: #7f007f"&gt;&amp;#39;\x00&amp;#39;&lt;/span&gt; &lt;span style="color: #0000aa"&gt;in&lt;/span&gt; block:
+        &lt;span style="color: #007f00"&gt;# Files with null bytes are binary&lt;/span&gt;
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f"&gt;False&lt;/span&gt;
+    &lt;span style="color: #00007f; font-weight: bold"&gt;elif&lt;/span&gt; &lt;span style="color: #0000aa"&gt;not&lt;/span&gt; block:
+        &lt;span style="color: #007f00"&gt;# An empty file is considered a valid text file&lt;/span&gt;
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f"&gt;True&lt;/span&gt;
+
+    &lt;span style="color: #007f00"&gt;# Use translate&amp;#39;s &amp;#39;deletechars&amp;#39; argument to efficiently remove all&lt;/span&gt;
+    &lt;span style="color: #007f00"&gt;# occurrences of _text_characters from the block&lt;/span&gt;
+    nontext = block.translate(&lt;span style="color: #00007f"&gt;None&lt;/span&gt;, _text_characters)
+    &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #00007f"&gt;float&lt;/span&gt;(&lt;span style="color: #00007f"&gt;len&lt;/span&gt;(nontext)) / &lt;span style="color: #00007f"&gt;len&lt;/span&gt;(block) &amp;lt;= &lt;span style="color: #007f7f"&gt;0.30&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The main point of interest here is the usage of the &lt;tt class="docutils literal"&gt;translate&lt;/tt&gt; method, and particularly its second (optional) argument to delete a set of chars. Since &lt;tt class="docutils literal"&gt;translate&lt;/tt&gt; is implemented in C, this method should be quite fast. Naturally, adding UTF-8 detection here shouldn't be too hard, if required.&lt;/p&gt;
+&lt;p&gt;Note also that this code was written to run on both Python 2 and Python 3 without changes.&lt;/p&gt;
+&lt;img class="align-center" src="https://eli.thegreenplace.net/images/hline.jpg" style="width: 320px; height: 5px;" /&gt;
+&lt;table class="docutils footnote" frame="void" id="id4" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;And all file test operators in general, as they enable very succinct code for querying simple attributes of files.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id5" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id2"&gt;[2]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;&lt;tt class="docutils literal"&gt;ಠ_ಠ&lt;/tt&gt; and my eyes are still bleeding! Appreciate the LOTR quotes though.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id6" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id3"&gt;[3]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;Loosely based on &lt;a class="reference external" href="http://code.activestate.com/recipes/173220/"&gt;this recipe&lt;/a&gt;.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+
+    </content><category term="misc"></category><category term="Perl"></category><category term="Python"></category></entry><entry><title>A subjective comparison between Perl and Ruby</title><link href="https://eli.thegreenplace.net/2008/02/01/a-subjective-comparison-between-perl-and-ruby" rel="alternate"></link><published>2008-02-01T17:36:24-08:00</published><updated>2023-06-30T23:16:27-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2008-02-01:/2008/02/01/a-subjective-comparison-between-perl-and-ruby</id><summary type="html">
+        	&lt;p&gt;The goal of this article is to examine whether it's worth for me to switch to Ruby as my main programming language, a position currently taken by Perl. As the title states, it is &lt;em&gt;subjective&lt;/em&gt; &amp;#8211; in that it presents my personal opinions and targets my specific needs.&lt;/p&gt;
+
+
+	&lt;h4&gt;Introduction&lt;/h4&gt;
+
+
+	&lt;p&gt;First, some …&lt;/p&gt;</summary><content type="html">
+        	&lt;p&gt;The goal of this article is to examine whether it's worth for me to switch to Ruby as my main programming language, a position currently taken by Perl. As the title states, it is &lt;em&gt;subjective&lt;/em&gt; &amp;#8211; in that it presents my personal opinions and targets my specific needs.&lt;/p&gt;
+
+
+	&lt;h4&gt;Introduction&lt;/h4&gt;
+
+
+	&lt;p&gt;First, some background. For many years now, Perl is my main go-to guy for programming tasks. As a hardware engineer, my "programming tasks" are not enterprise-level apps distributed for the use of thousands of customers, but rather support programs and scripts whose main customers are myself and my colleagues. Sometimes these programs have GUIs, sometimes they're even web-based, a lot of times they interact with other (mainly C++ for performance) programs, but most of them are scripts. Whenever some script has to be written for text manipulation, or a simple program for controlling some piece of embedded hardware, I turn to Perl. In size, these programs range from one-liners to several thousand lines of code (KLOCs).&lt;/p&gt;
+
+
+	&lt;p&gt;Also, I must add that my platform at the time being is 100% MS Windows. In my previous job, I worked on UNIXes (Linux, &lt;span class="caps"&gt;AIX&lt;/span&gt;, Solaris), where Perl blends much better in the environment. But now I have to work with what I've got, and Windows is the platform. This means that I use ActiveState as the Perl distribution and have a keen interest in GUIs.&lt;/p&gt;
+
+
+	&lt;p&gt;I'm always on the lookout for new tools and technologies to learn. Around two years ago, I decided to give Ruby a try, since I began hearing more and more about how cool it is. As I'm constantly lurking in the Perl community, so what gave me the push was seeing how several Perl hackers whom I respect recommend Ruby as a good future direction.&lt;/p&gt;
+
+
+	&lt;p&gt;Anyway, in my last attempt, after a brief flirtation Ruby I decided to go back to Perl, as I found Ruby still not mature enough to be my go-to guy, mainly because of the lack of documentation, suitable libraries and the much smaller community.&lt;/p&gt;
+
+
+	&lt;p&gt;Today, I decided to examine Ruby again, by first publishing a thorough comparison between it and Perl, in order to help myself make a learned choice.&lt;/p&gt;
+
+
+	&lt;h4&gt;First things first &amp;#8211; the language core&lt;/h4&gt;
+
+
+	&lt;p&gt;In my opinion, Ruby's core is superior to Perl. Not much to think of here. And I'm definitely not one to be called a "Perl basher". I like Perl, I like its syntax, I like programming in Perl. But Ruby is better.&lt;/p&gt;
+
+
+	&lt;p&gt;Ruby is everything Perl is, and more. You can write any Perl code in Ruby, in a very similar way, but Ruby offers several definite improvements. Here are a few I deem most important:&lt;/p&gt;
+
+
+	&lt;ul&gt;
+	&lt;li&gt;Object-orientation from the ground-up. Personally, I feel that while &lt;span class="caps"&gt;OOP&lt;/span&gt; is not the silver bullet, it helps in keeping large bodies of code maintainable. Writing OO code in Perl is painful, in Ruby a pleasure.&lt;/li&gt;
+	&lt;/ul&gt;
+
+
+	&lt;ul&gt;
+	&lt;li&gt;Convenient, built-in exception handling.&lt;/li&gt;
+	&lt;/ul&gt;
+
+
+	&lt;ul&gt;
+	&lt;li&gt;The support for functional features is better than in Perl. Blocks, procs, lambdas, and all that. I feel very grateful to Ruby for providing convenient means of replacing several of the things I previously thought require the power of Lisp macros.&lt;/li&gt;
+	&lt;/ul&gt;
+
+
+	&lt;ul&gt;
+	&lt;li&gt;Metaprogramming, better support for code generation and embedded DSLs.&lt;/li&gt;
+	&lt;/ul&gt;
+
+
+	&lt;p&gt;So there's no question here, at least for me. Had everything else been equal, I would certainly pick Ruby. Alas, things are never so simple.&lt;/p&gt;
+
+
+	&lt;h4&gt;Performance&lt;/h4&gt;
+
+
+	&lt;p&gt;According to the &lt;a href="http://shootout.alioth.debian.org/gp4/ruby.php"&gt;shootout&lt;/a&gt;, Ruby is 4-5x slower than Perl on average. This is not a major difference &amp;#8211; I wouldn't use Perl for heavy number crunching anyway. Besides, Ruby has an alternative virtual machine named &lt;span class="caps"&gt;YARV&lt;/span&gt; that should enter service any time now&amp;#8482;, and is expected to &lt;a href="http://shootout.alioth.debian.org/gp4sandbox/benchmark.php?test=all&amp;amp;lang=yarv&amp;amp;lang2=perl"&gt;improve the performance&lt;/a&gt; by at least a few 10s of %s.&lt;/p&gt;
+
+
+	&lt;p&gt;When you need high performance, you'll have to resort to C/C++, and both Perl and Ruby have good bindings for these languages.&lt;/p&gt;
+
+
+	&lt;h4&gt;Documentation and libraries&lt;/h4&gt;
+
+
+	&lt;p&gt;I place these two together, because I think they're very much related. The sample people who spare the time to write useful modules, also write good documentation for their and others' modules.&lt;/p&gt;
+
+
+	&lt;p&gt;In this section, Perl wins big. Perl's library of code, the mighty &lt;span class="caps"&gt;CPAN&lt;/span&gt;, is incomparable.  Maybe Ruby is not far from Perl in popularity today, but this is a recent event. For many years, Perl was more popular by orders of magnitude, and accumulated a huge library of shared knowledge.&lt;/p&gt;
+
+
+	&lt;p&gt;Documentation in the Perl world is also better. Funny, because I find the RDoc to be much better than &lt;span class="caps"&gt;POD&lt;/span&gt;. Documenting Ruby code in a standard way is far simpler and more pleasant than with Perl &amp;#8211; where embedding &lt;span class="caps"&gt;POD&lt;/span&gt; feels like programming in the 80s. But yet again, Perl's huge lead over a long time ensured that most of the libraries are quite well documented and there are tons of examples and snippets to be found online. Ruby is catching up, but this will take time.&lt;/p&gt;
+
+
+	&lt;p&gt;Just one example: &lt;span class="caps"&gt;XML&lt;/span&gt; handling. Ruby's canonical solution is &lt;span class="caps"&gt;REXML&lt;/span&gt; &amp;#8211; a slow, unconvenient &lt;span class="caps"&gt;API&lt;/span&gt; with appalling error handling. I was so disgusted by &lt;span class="caps"&gt;REXML&lt;/span&gt; when writing a Ruby app a year ago that I switched my data format to &lt;span class="caps"&gt;YAML&lt;/span&gt;. Perl has numerous excellent solutions for &lt;span class="caps"&gt;XML&lt;/span&gt; parsing and generation, right in the standard distribution. Rubyists ported &lt;span class="caps"&gt;XML&lt;/span&gt;::Simple, but it's based on &lt;span class="caps"&gt;REXML&lt;/span&gt;, which leaves it with all the deficiencies.&lt;/p&gt;
+
+
+	&lt;p&gt;A disclaimer must be made here, which also applies to the "community" section. I'm concerned mainly with the English-speaking community. For Perl, there is no other. But for Ruby, there is. Ruby is an immigrant from Japan, and has a large and vibrant Japanese community behind it. It means that there are a lot of Ruby modules without any English documentation, which is a real pity. Even if these modules are terrific, there's no way for those of us who don't understand Japanese to enjoy them.&lt;/p&gt;
+
+
+	&lt;h4&gt;Community&lt;/h4&gt;
+
+
+	&lt;p&gt;A community is extremely important in our connected age. A large, smart community means quicker answers to questions, more libraries and documentation, and just a place to share wisdom and learn new tricks.&lt;/p&gt;
+
+
+	&lt;p&gt;The Perl community is just amazing. In football&lt;sup&gt;&lt;a href="#fn1"&gt;1&lt;/a&gt;&lt;/sup&gt;, it is often said that the home crowd is the team's 12th player. The Perl community is something like that. &lt;a href="http://perlmonks.org/"&gt;Perlmonks&lt;/a&gt; is the best programming language community on the Internet, period. Any question you have will be promptly answered by super-smart Perl hackers, some of whom seem to have little other interest in life than in providing detailed, well researched answers on Perlmonks. It's also one of the best places I know of to discuss general "meaning of life" questions in relation to programming, i.e. comparing paradigms, discussing future directions, and so on.&lt;/p&gt;
+
+
+	&lt;p&gt;Ruby doesn't have anything of the kind. What it does have is a mailing list / forum / Google group&lt;sup&gt;&lt;a href="#fn2"&gt;2&lt;/a&gt;&lt;/sup&gt;. When I tried Ruby the previous time, the situation was worse &amp;#8211; the group was less active and the connection between the various channels wasn't working well, creating fragmentation. Now, however, things seem to be better. The folks in the list are friendly and questions get answered quite quickly.&lt;/p&gt;
+
+
+	&lt;p&gt;And still, Perl wins here. Someone should really create a Rubymonks &amp;#8211; I think it would give a great boost to the community.&lt;/p&gt;
+
+
+	&lt;h4&gt;Momentum and future directions&lt;/h4&gt;
+
+
+	&lt;p&gt;This issue is difficult to define exactly, and hence I will digress to a little philosophizing. A metaphor might help. Consider two employees. One is 45, very smart, been-there done-that kind of guy. Everything he's ever done, he can do again easily, quickly and soundly. However, he's reluctant to learn new technologies, and sometime hints that he might retire early. Another is a whizzy 25 year-old. He doesn't have so much knowledge accumulated, but he's an excellent hacker and can learn very quickly. He's eager to enter any new area and signals that he'll stay in the company for a long time.&lt;/p&gt;
+
+
+	&lt;p&gt;Lately, I feel that Perl is the old guy and Ruby the young guy. I will try to defend my point:&lt;/p&gt;
+
+
+	&lt;p&gt;Ruby seems to be having much more momentum behind it now than Perl. New technologies are more likely to be implemented in Ruby than in Perl. New books on programming are more likely to be written with Ruby than with Perl, and most importantly, fresh hackers are much more likely to join the world of Ruby than the world of Perl.&lt;/p&gt;
+
+
+	&lt;p&gt;The last point is crucial. Perl has several excellent people working with it, who are well known throughout the community. The problem is, it's pretty much the same people of years ago. In Ruby, on the other hand, names of prolific and talented hackers constantly pop up &amp;#8211; they push the language, with its libraries and community fast forward.&lt;/p&gt;
+
+
+	&lt;p&gt;For example, take the Textile markup language&lt;sup&gt;&lt;a href="#fn3"&gt;3&lt;/a&gt;&lt;/sup&gt;. It's quite new, and it doesn't surprise me that Ruby has a better library for translating it than Perl. &lt;a href="http://whytheluckystiff.net/ruby/redcloth/"&gt;RedCloth&lt;/a&gt;, written by the amazingly prolific Ruby hacker &lt;a href="http://hackety.org/"&gt;_why&lt;/a&gt; supports Textile better than the best Perl library out there, and no one seems to be fixing the situation in the Perl world.&lt;/p&gt;
+
+
+	&lt;p&gt;The same can be said for &lt;span class="caps"&gt;YAML&lt;/span&gt; &amp;#8211; the parser for which was also written by _why, first for Ruby, and only later ported to Perl.&lt;/p&gt;
+
+
+	&lt;p&gt;Take the bindings to Wx and Qt &amp;#8211; the two most popular cross-platform native-looks &lt;span class="caps"&gt;GUI&lt;/span&gt; frameworks. Ruby has the better bindings for both. True, Perl's integration with Tk is unrivaled in the Ruby world, but this only proves my point &amp;#8211; Perl is excellent in everything &lt;em&gt;old&lt;/em&gt;, but Ruby is quickly gaining in the &lt;em&gt;newer&lt;/em&gt; technologies. While for a &lt;span class="caps"&gt;GUI I&lt;/span&gt;'d still use Perl/Tk, I'm watching wxRuby, drooling at its pretty native widgets and controls.&lt;/p&gt;
+
+
+	&lt;p&gt;I can only mention Ruby's strongest card &amp;#8211; the Rails framework, in passing, because I have never used it.&lt;/p&gt;
+
+
+	&lt;p&gt;Take alternative implementations as another example. Ruby has Rubinius, JRuby, IronRuby, Ruby.NET, what does Perl have ? JRuby and IronRuby are particularly interesting ventures, since they are backed by the enterprise. JRuby's developers were hired by Sun to create a natural binding to Java on the &lt;span class="caps"&gt;JVM&lt;/span&gt;, and IronRuby is being deveoped by, no less, Microsoft's Dynamic Language Runtime team, to bind it to the .NET framework. At last, the big two enterprise solutions &amp;#8211; Java and .NET realized the importance of dynamic scripting languages, and did they choose Perl ? No, they chose Ruby&lt;sup&gt;&lt;a href="#fn4"&gt;4&lt;/a&gt;&lt;/sup&gt;.&lt;/p&gt;
+
+
+	&lt;p&gt;So why does this happen ? Why is Perl stagnant while Ruby is stronly moving forward&lt;sup&gt;&lt;a href="#fn5"&gt;5&lt;/a&gt;&lt;/sup&gt;. Is it only because Ruby's core is better ? Is it because of Rails ? &lt;span class="caps"&gt;IMHO&lt;/span&gt; there's another reason, and that is Perl 6. With it hovering around, no one &lt;em&gt;really&lt;/em&gt; wants to improve Perl 5 any more. Perl 5.5 was released one year after 5.4, 5.6 was released 20 months after that, 5.8 took 28 months, 5.10 &amp;#8211; more than 5 years. Do you notice the tendency ?&lt;/p&gt;
+
+
+	&lt;p&gt;Recall the old vs. new employee metaphor. Is Perl 6 the reason for Perl 5's stagnation &amp;#8211; I doubt it is, but it is definitely a factor. Just how much motivation would you have working hard on somethinig you know will be thrown out &lt;em&gt;soon&lt;/em&gt;. And now imagine this &lt;em&gt;soon&lt;/em&gt; lasts for years and years&lt;sup&gt;&lt;a href="#fn6"&gt;6&lt;/a&gt;&lt;/sup&gt;.&lt;/p&gt;
+
+
+	&lt;h4&gt;Conclusion&lt;/h4&gt;
+
+
+	&lt;p&gt;It's about time to conclude this rant. Which should I choose ? Should I replace Perl as my go-to guy with Ruby ?&lt;/p&gt;
+
+
+	&lt;p&gt;The answer to this question is still no, but this time with a reservation. I enjoy writing Ruby code more than writing Perl code, at least until I ran into a piece of horrible documentation or a missing library which Perl has since 1995. But at the core, Ruby is better. And while the core is practically impossible to change (see how long Perl 6 is taking) all the peripherials are easier. In the past two years, Ruby has closed many gaps on Perl in terms of documentation, libraries and community. I think that with the current trends continuing for another two or three years, Ruby will overtake Perl in popularity and will become an all around better solution.&lt;/p&gt;
+
+
+&lt;img class="align-center" src="https://eli.thegreenplace.net/images/hline.jpg" style="width: 320px; height: 5px;" /&gt;
+
+	&lt;p id="fn1"&gt;&lt;sup&gt;1&lt;/sup&gt; Real football (i.e. soccer in the US).&lt;/p&gt;
+
+
+	&lt;p id="fn2"&gt;&lt;sup&gt;2&lt;/sup&gt; They're all linked. I use the Google Group interface because I find it the most convenient.&lt;/p&gt;
+
+
+	&lt;p id="fn3"&gt;&lt;sup&gt;3&lt;/sup&gt; The one I'm using for writing this article.&lt;/p&gt;
+
+
+	&lt;p id="fn4"&gt;&lt;sup&gt;4&lt;/sup&gt; Well, there's also Jython (not backed by Sun, &lt;span class="caps"&gt;AFAIK&lt;/span&gt;) and IronPython (backed by MS). But this article compares Perl and Ruby, which &lt;span class="caps"&gt;IMHO&lt;/span&gt; have a somewhat similar philosophy that is a bit different from Python.&lt;/p&gt;
+
+
+	&lt;p id="fn5"&gt;&lt;sup&gt;5&lt;/sup&gt; According to the &lt;a href="http://www.tiobe.com/tpci.htm"&gt;&lt;span class="caps"&gt;TIOBE&lt;/span&gt; index&lt;/a&gt;, Perl is currently at 5.4%, down from 8% 5 years ago, while Ruby is 2.3%, up from 0.25% 5 years ago.&lt;/p&gt;
+
+
+	&lt;p id="fn6"&gt;&lt;sup&gt;6&lt;/sup&gt; Perl 6 was announced on July 19th, 2000.&lt;/p&gt;
+
+    </content><category term="misc"></category><category term="Perl"></category><category term="Ruby"></category></entry><entry><title>How high on a google search does your website rank ?</title><link href="https://eli.thegreenplace.net/2007/08/31/how-high-on-a-google-search-does-your-website-rank" rel="alternate"></link><published>2007-08-31T12:14:10-07:00</published><updated>2023-02-04T13:41:52-08:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2007-08-31:/2007/08/31/how-high-on-a-google-search-does-your-website-rank</id><summary type="html">
+        &lt;strong&gt;Update 13.09.2008: The script described here no longer works. See: &lt;a href="https://eli.thegreenplace.net/2008/09/13/google-search-rank/"&gt;Google search rank&lt;/a&gt;.&lt;/strong&gt;
+
+&lt;p&gt;
+The question in the subject usually crosses my mind when I read the web stats for this website. Sometimes, many people arrive from some Google search query I wouldn't even imagine leads to me (say …&lt;/p&gt;</summary><content type="html">
+        &lt;strong&gt;Update 13.09.2008: The script described here no longer works. See: &lt;a href="https://eli.thegreenplace.net/2008/09/13/google-search-rank/"&gt;Google search rank&lt;/a&gt;.&lt;/strong&gt;
+
+&lt;p&gt;
+The question in the subject usually crosses my mind when I read the web stats for this website. Sometimes, many people arrive from some Google search query I wouldn't even imagine leads to me (say, in the first 5-6 pages of Google search results people actually bother to read).
+&lt;p&gt;&lt;/p&gt;
+
+So, to fulfill my narcissistic curiosity, I wrote a Perl script that answers the
+question by running an actual Google search and going over the result pages one
+by one until it finds a link to a specified website. 
+&lt;p&gt;&lt;/p&gt;
+
+As any self-respecting lazy programmer, I first tried to find ready-made solutions. They exist, but almost ubiquitously use the &lt;a href="http://code.google.com/apis/soapsearch/"&gt;Google SOAP API&lt;/a&gt;. Using a SOAP API is indeed a better idea than hand-parsing the HTML, but unfortunately Google no longer supports it. A notice on their website says:
+&lt;p&gt;&lt;/p&gt;
+
+&lt;blockquote&gt;As of December 5, 2006, we are no longer issuing new API keys for the SOAP Search API. Developers with existing SOAP Search API keys will not be affected.&lt;/blockquote&gt;
+&lt;p&gt;&lt;/p&gt;
+
+Instead of SOAP, Google now provides an &lt;a href="http://code.google.com/apis/ajaxsearch/"&gt;Ajax search API&lt;/a&gt; (which I actually use for this website). I think I understand why they do this. While the original intention of the SOAP API was for people to easily integrate Google search on their websites, it was used more to harvest results from Google searches by automatic scripts (like my own) for various purposes, including &lt;a href="http://en.wikipedia.org/wiki/Search_engine_optimization"&gt;SEO&lt;/a&gt;. So once the Javascript libraries became stable and supported enough, Google ditched SOAP and now provides the Ajax API that can't be really used for anything more than integrating a simple search box on a website.
+&lt;p&gt;&lt;/p&gt;
+
+So I decided to take the old and tested path -- executing HTTP queries, getting results back and parsing them. &lt;tt&gt;find_google_link&lt;/tt&gt; issues a Google search query using WWW:Mechanize, and gets the HTML of the results page back. This page is parsed to see how many results there are for the query. Then, in a loop, it issues queries for successive search results pages and stops once it find a page on which a link to the website appears. The parsing is done with &lt;code&gt;HTML::TreeBuilder&lt;/code&gt; (a very convenient interface to &lt;code&gt;HTML::Parser&lt;/code&gt;).
+&lt;p&gt;
+    </content><category term="misc"></category><category term="Internet"></category><category term="Perl"></category></entry><entry><title>Parsing of undecoded UTF-8 will give garbage when decoding entities</title><link href="https://eli.thegreenplace.net/2007/07/20/parsing-of-undecoded-utf-8-will-give-garbage-when-decoding-entities" rel="alternate"></link><published>2007-07-20T10:16:09-07:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2007-07-20:/2007/07/20/parsing-of-undecoded-utf-8-will-give-garbage-when-decoding-entities</id><summary type="html">
+        I'm using HTML::TreeBuilder to analyze HTML files. On some pages, although the analysis works fine, the following warning message is printed:
+
+&lt;blockquote&gt;
+Parsing of undecoded UTF-8 will give garbage when decoding entities at D:/Perl/site/lib/HTML/TreeBuilder.pm line 96.
+&lt;/blockquote&gt;
+
+Apparently, it comes from the HTML::Parser module …</summary><content type="html">
+        I'm using HTML::TreeBuilder to analyze HTML files. On some pages, although the analysis works fine, the following warning message is printed:
+
+&lt;blockquote&gt;
+Parsing of undecoded UTF-8 will give garbage when decoding entities at D:/Perl/site/lib/HTML/TreeBuilder.pm line 96.
+&lt;/blockquote&gt;
+
+Apparently, it comes from the HTML::Parser module that is used by TreeBuilder under the hood. I searched the web and the newsgroups, and found this solution: before passing the page contents to TreeBuilder, feed them through &lt;code&gt;decode_utf8&lt;/code&gt;:
+
+&lt;pre&gt;&lt;code&gt;
+use HTML::TreeBuilder;
+use Encode;
+
+my $contents = ...; # HTML webpage contents
+my $htree = HTML::TreeBuilder-&gt;new_from_content(decode_utf8 $contents);
+&lt;/code&gt;&lt;/pre&gt;
+
+
+
+    </content><category term="misc"></category><category term="Perl"></category></entry><entry><title>Logical operators in Perl and Ruby</title><link href="https://eli.thegreenplace.net/2007/06/02/logical-operators-in-perl-and-ruby" rel="alternate"></link><published>2007-06-02T20:06:28-07:00</published><updated>2023-06-30T23:16:27-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2007-06-02:/2007/06/02/logical-operators-in-perl-and-ruby</id><summary type="html">
+        &lt;p&gt;Both Perl and Ruby provide two sets of logical operators: &lt;/p&gt;
+	&lt;ul&gt;
+	&lt;li&gt;!, &amp;#38;&amp;#38; and || (inherited from C) &lt;/li&gt;
+		&lt;li&gt;&lt;strong&gt;not&lt;/strong&gt;, &lt;strong&gt;and&lt;/strong&gt; and &lt;strong&gt;or&lt;/strong&gt;&lt;/li&gt;
+	&lt;/ul&gt;
+
+
+	&lt;p&gt;Unfortunately, these two sets of operators are not isomorphic &amp;#8211; due to differences in precedence, their semantics are different in subtle ways which make the whole issue of using them error prone. In …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;Both Perl and Ruby provide two sets of logical operators: &lt;/p&gt;
+	&lt;ul&gt;
+	&lt;li&gt;!, &amp;#38;&amp;#38; and || (inherited from C) &lt;/li&gt;
+		&lt;li&gt;&lt;strong&gt;not&lt;/strong&gt;, &lt;strong&gt;and&lt;/strong&gt; and &lt;strong&gt;or&lt;/strong&gt;&lt;/li&gt;
+	&lt;/ul&gt;
+
+
+	&lt;p&gt;Unfortunately, these two sets of operators are not isomorphic &amp;#8211; due to differences in precedence, their semantics are different in subtle ways which make the whole issue of using them error prone. In this article I will try to elucidate this topic.&lt;/p&gt;
+
+&lt;h4&gt;So what&amp;#39;s the difference between them?&lt;/h4&gt;
+
+&lt;p&gt;In order to be able to disambiguate complex expressions, parsers of programming languages assign precedence for all operators. The best known example is probably the precedence of &lt;b&gt;*&lt;/b&gt; being higher than that of &lt;b&gt;+&lt;/b&gt; to allow commonly understood mathematical expressions without forcing to use lots of parentheses. Another good example is the precedence of assignment being lower than the precedence of all mathematical operators. This allows statements like &lt;code&gt;$a = $b + $c;&lt;/code&gt; to be parsed correctly without parentheses&lt;sup class="footnote"&gt;&lt;a href="#fn1"&gt;1&lt;/a&gt;&lt;/sup&gt;.&lt;/p&gt;
+
+&lt;p&gt;In Perl and in Ruby, the precedence of !, &amp;amp;&amp;amp; and || is higher than the precedence of assignment, while the precedence of &lt;strong&gt;not&lt;/strong&gt;, &lt;strong&gt;and&lt;/strong&gt; and &lt;strong&gt;or&lt;/strong&gt; is lower. &lt;/p&gt;
+
+&lt;p&gt;For example, the following code in Perl:&lt;/p&gt;
+
+
+&lt;pre&gt;
+$a = $b || 5;
+&lt;/pre&gt;
+
+
+
+&lt;p&gt;Will assign the value of &lt;code&gt;$b&lt;/code&gt; to &lt;code&gt;$a&lt;/code&gt; when &lt;code&gt;$b&lt;/code&gt; evaluates to true, and 5 when &lt;code&gt;$b&lt;/code&gt; evaluates to false (&lt;code&gt;undef&lt;/code&gt;, 0 or an empty string). In short, it works as expected. However, the following code:&lt;/p&gt;
+
+
+&lt;pre&gt;
+$a = $b or 5;
+&lt;/pre&gt;
+
+
+
+&lt;p&gt;Is completely broken and will just generate a warning, because it is parsed as &lt;code&gt;($a = $b) or 5;&lt;/code&gt;.&lt;/p&gt;
+
+&lt;h4&gt;Why the low precedence ?&lt;/h4&gt;
+
+&lt;p&gt;As the example above shows, the low precedence of &lt;strong&gt;or&lt;/strong&gt; is not such a good idea. So why was it made this way ? I think that Larry Wall wanted to make the following code legal Perl that behaves as expected:&lt;/p&gt;
+
+
+&lt;pre&gt;
+open my $fh, &amp;quot;&amp;lt;&amp;quot;, $filename or die $!;
+&lt;/pre&gt;
+
+
+
+&lt;p&gt;Perl allows to drop parentheses where the code is not ambiguous, and proponents of the language believe it makes some code more readable. The code section above will work correctly. With ||, on the other hand, it wouldn&amp;#39;t have worked since the precedence of || is higher than that of the comma, and the expression would be parsed as:&lt;/p&gt;
+
+
+&lt;pre&gt;
+open my $fh, &amp;quot;&amp;lt;&amp;quot;, ($filename || die $!);
+&lt;/pre&gt;
+
+
+
+&lt;p&gt;Which isn&amp;#39;t what we wanted. In Ruby, where code like the above is not written, this motivation plays no role. &lt;/p&gt;
+
+&lt;h4&gt;Dealing with the confusion&lt;/h4&gt;
+
+&lt;p&gt;So it appears Perl and Ruby have two sets of almost identical operators which behave differently sometimes. Isn&amp;#39;t this confusing ? &lt;/p&gt;
+
+&lt;p&gt;It definitely is. In fact, many "good programming style" guides deal with this confusion in a very strict manner. For instance, Damian Conway&amp;#39;s excellent "Perl Best Practices" book advises to avoid the low precedence operators at all, except for the single case of:&lt;/p&gt;
+
+
+&lt;pre&gt;
+open my $fh, &amp;quot;&amp;lt;&amp;quot;, $filename or die $!;
+&lt;/pre&gt;
+
+
+
+&lt;p&gt;In Ruby this is irrelevant, so to extend his advice, it probably isn&amp;#39;t recommended to use these operators at all in Ruby, is it ? I personally hold a different view.&lt;/p&gt;
+
+&lt;h4&gt;In defence of the low precedence operators&lt;/h4&gt;
+
+&lt;p&gt;In my opinion, the low precedence operators are better, because of two main reasons:&lt;/p&gt;
+
+&lt;ol&gt;
+&lt;li&gt;Not everyone came to Perl and Ruby from C and C++. On the contrary, as the time goes on, less and less people come with this background, and many start from other languages (in lots of cases, from Perl and Ruby themselves). But even for a seasoned C hacker, &lt;span class="caps"&gt;IMHO &lt;/span&gt;&lt;code&gt;if not client.done? or client.result &gt; 0&lt;/code&gt; is more intelligible than &lt;code&gt;if !client.done? || client.result &gt; 0&lt;/code&gt;, since it is more English-like.&lt;/li&gt;
+&lt;li&gt;An important factor, at least for me, is the speed and comfort of typing on the keyboard. Typing too many punctuation characters is both slower and more stressful on the wrists. Using &lt;strong&gt;not&lt;/strong&gt;, &lt;strong&gt;and&lt;/strong&gt; and &lt;strong&gt;or&lt;/strong&gt; wherever possible instead of !, &amp;amp;&amp;amp; and || definitely helps me put as little stress as possible on my tendons.&lt;/li&gt;
+&lt;/ol&gt;
+
+&lt;h4&gt;But...&lt;/h4&gt;
+
+However, as we have seen, some things just can&amp;#8217;t be done with the low precedence operators without resorting to parentheses. So for the singular case of the short-circuit assignment perhaps using || is better than &lt;strong&gt;or&lt;/strong&gt; (Ruby code in this case, although it of course applies to Perl as well):
+&lt;pre&gt;
+a = b || 5;
+&lt;/pre&gt;
+
+Implementing the same functionality with &lt;strong&gt;or&lt;/strong&gt; feels a little superfluous:
+&lt;pre&gt;
+a = (b or 5);
+&lt;/pre&gt;
+
+And || can also be used in the occasionally useful idiom&lt;sup&gt;&lt;a href="#fn2"&gt;2&lt;/a&gt;&lt;/sup&gt;:
+&lt;pre&gt;
+var ||= 5;
+&lt;/pre&gt;
+
+	&lt;p&gt;&lt;strong&gt;or&lt;/strong&gt; has no answer in this case.&lt;/p&gt;
+
+
+	&lt;p&gt;I&amp;#8217;m sure, however, that there is much more logical condition code that short-circuit assignment code, so the low precedence operators can be used most of the time.&lt;/p&gt;
+
+
+	&lt;h4&gt;Another little gotcha&lt;/h4&gt;
+
+
+There is another little gotcha about low precedence operators which is mostly relevant for people with C background. &lt;strong&gt;or&lt;/strong&gt; and &lt;strong&gt;and&lt;/strong&gt; have the same precedence (unlike ||, which has a lower precedence than &amp;#38;&amp;#38;), so writing code like:
+&lt;pre&gt;
+if cond1 and cond2 or cond3 and cond4
+&lt;/pre&gt;
+
+	&lt;p&gt;Won&amp;#8217;t do what you expected. However, it is a good practice to use parentheses in all complex conditions of this kind anyway, so I don&amp;#8217;t see it as a big problem.&lt;/p&gt;
+
+
+	&lt;h4&gt;Conclusion&lt;/h4&gt;
+
+
+	&lt;p&gt;Perl and Ruby have two sets of logical operators. These two sets have slightly different semantics, but the confusion can be avoided with a disciplined application of good programming practices. My advice is to use the low precedence operators (&lt;strong&gt;not&lt;/strong&gt;, &lt;strong&gt;and&lt;/strong&gt; and &lt;strong&gt;or&lt;/strong&gt;) all the time. The single exception can be made in the case of short-circuit assignment, where || can be used instead of &lt;strong&gt;or&lt;/strong&gt; (although &lt;strong&gt;or&lt;/strong&gt; can also be used, with help from a couple of parentheses).&lt;/p&gt;
+
+
+	&lt;h4&gt;Footnotes&lt;/h4&gt;
+
+
+	&lt;p id="fn1"&gt;&lt;sup&gt;1&lt;/sup&gt; Had the precedence of assignment been higher than the precedence of addition, this statement would be understood as &lt;code&gt;($a = $b) + $c;&lt;/code&gt;.&lt;/p&gt;
+
+
+	&lt;p id="fn2"&gt;&lt;sup&gt;2&lt;/sup&gt; This translates to &lt;code&gt;var = var || 5&lt;/code&gt;, or &amp;#8220;if &lt;code&gt;var&lt;/code&gt; is defined, let it keep its value, otherwise assign 5 to it&amp;#8221;.&lt;/p&gt;
+
+    </content><category term="misc"></category><category term="Perl"></category><category term="Ruby"></category></entry><entry><title>an original marriage proposal...</title><link href="https://eli.thegreenplace.net/2007/05/18/an-original-marriage-proposal" rel="alternate"></link><published>2007-05-18T17:39:58-07:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2007-05-18:/2007/05/18/an-original-marriage-proposal</id><summary type="html">
+        Some time ago I posted this in my old use.perl journal.
+
+Well, it seems that a couple of &lt;a href="http://www.perlmonks.org"&gt;Perl monks&lt;/a&gt; have taken this to a whole new level. This is a &lt;a href="http://www.perlmonks.org/?node_id=384100"&gt;marriage proposal&lt;/a&gt;, in obfuscated Perl. And she said yes ! (Frankly, how could she resist ;-)). Congratulations to the merry …</summary><content type="html">
+        Some time ago I posted this in my old use.perl journal.
+
+Well, it seems that a couple of &lt;a href="http://www.perlmonks.org"&gt;Perl monks&lt;/a&gt; have taken this to a whole new level. This is a &lt;a href="http://www.perlmonks.org/?node_id=384100"&gt;marriage proposal&lt;/a&gt;, in obfuscated Perl. And she said yes ! (Frankly, how could she resist ;-)). Congratulations to the merry couple.
+    </content><category term="misc"></category><category term="Perl"></category></entry><entry><title>Compiling C DLLs and using them from Perl</title><link href="https://eli.thegreenplace.net/2006/12/04/compiling-c-dlls-and-using-them-from-perl" rel="alternate"></link><published>2006-12-04T20:58:01-08:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2006-12-04:/2006/12/04/compiling-c-dlls-and-using-them-from-perl</id><summary type="html">
+        A few months ago I managed to control a National Instruments Digital IO card (sitting in a PCI slot in my PC) from Perl. I accomplished this by installing the Win32::API module, and loading the card's .dll API. I had a few struggles with Win32::API as some things …</summary><content type="html">
+        A few months ago I managed to control a National Instruments Digital IO card (sitting in a PCI slot in my PC) from Perl. I accomplished this by installing the Win32::API module, and loading the card's .dll API. I had a few struggles with Win32::API as some things weren't obvious, but after some searching and good advice from Perlmonks, it worked.
+
+Today I had another encounter with Win32::API. I have some C code I want to access from Perl. So, I compiled it in Visual C++ into a DLL, but Win32::API kept segfaulting, although loading the same DLL from another C++ program worked fine. Another round of investigation began...
+
+To cut a long story short, here is the correct way to compile C code into a DLL and access it from Perl.
+
+&lt;h4&gt;The C code&lt;/h4&gt;
+
+I'm going to write a simple C function that demonstrates some interesting concepts like passing data in and out with pointers. Here is the .h file:
+
+&lt;pre&gt;&lt;code&gt;
+int __stdcall test1(char* buf, 
+                    int num, char* outbuf);
+&lt;/code&gt;&lt;/pre&gt;
+
+This is a (almost) normal declaration of a function named &lt;code&gt;test1&lt;/code&gt; that takes two pointers to a char and one integer as arguments, and returns an integer. 
+
+&lt;code&gt;__stdcall&lt;/code&gt; is a Visual C++ compiler keyword that specifies the stdcall &lt;a href="http://en.wikipedia.org/wiki/Stdcall"&gt;calling convention&lt;/a&gt;. The stdcall convention is used by Windows API functions. 
+
+There's another common calling convention - &lt;code&gt;__cdecl&lt;/code&gt; which is usually used for "normal" (not Windows API) code. The Win32::API Perl module &lt;strong&gt;supports only __stdcall&lt;/strong&gt;, so while we could use __cdecl for binding this DLL to another piece of C / C++ code, it doesn't work with Win32::API.
+
+The .c file provides the implementation:
+
+&lt;pre&gt;&lt;code&gt;
+#include "dll_test.h"
+
+int __stdcall test1(char* buf, 
+                    int num, char* outbuf)
+{
+    int i = 0;
+
+    for (i = 0; i &lt; num; ++i)
+    {
+        outbuf[i] = buf[i] * 3;
+    }
+
+    return num;
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;h4&gt;DEF file&lt;/h4&gt;
+
+A &lt;i&gt;module definition (.def)&lt;/i&gt; file provides the linker with information about exported symbols, which is useful when writing DLLs. I create a new text file, name it dll_test.def and put it into the project directory:
+
+&lt;pre&gt;&lt;code&gt;
+LIBRARY DLL_TEST.DLL
+
+EXPORTS
+    test1
+&lt;/code&gt;&lt;/pre&gt;
+
+In this file I specify the library name, and the name of the exported function (several names appear on separate lines). Now this .def file should be given as an option to the linker. Add &lt;code&gt;/DEF dll_test.def&lt;/code&gt; as a linker option, or provide "dll_test.def" in the "Module definition file" field (Input category) in the project properties (Linker options).
+
+After this, build the project and the DLL will be created.
+
+&lt;h4&gt;Without the DEF file ?&lt;/h4&gt;
+
+It is possible to create the DLL without using the .def file. If you prepend &lt;code&gt;__declspec(dllexport)&lt;/code&gt; to the function declaration, the linker will export it without consulting the .def file. While this works well in C++ code calling the functions from the DLL, this method isn't recommended when using Win32::API, because &lt;code&gt;__stdcall&lt;/code&gt; &lt;a href="http://en.wikipedia.org/wiki/Name_mangling"&gt;mangles&lt;/a&gt; the names of functions and it may be difficult (though possible) to import them to Perl. The DEF file instructs the linker to create an unmangled name for the function, in spite of using &lt;code&gt;__stdcall&lt;/code&gt;, so it is the preferred method.
+
+In any case, the &lt;code&gt;dumpbin&lt;/code&gt; command line tool (built into Windows) allows to see the names of exported functions in a DLL by calling:
+&lt;pre&gt;&lt;code&gt;
+dumpbin /exports &lt;dll_name&gt;
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;h4&gt;The Perl code&lt;/h4&gt;
+
+Finally, we can use Win32::API to import the C function we created from the DLL and use it:
+&lt;pre&gt;&lt;code&gt;
+use warnings;
+use strict;
+$|++;
+use Win32::API;
+
+# Import the test1 function from the DLL
+#
+my $test1 = Win32::API-&gt;new('dll_test', 
+                            'test1', 
+                            'PNP', 
+                            'N');
+die unless defined $test1;
+
+# the input must be a buffer of bytes,
+# so we use pack
+#
+my $buf = pack('C*', (1, 2, 3, 4, 5));
+
+# allocate space for the output buffer
+#
+my $outbuf = ' ' x 5;
+
+# Call the imported function
+#
+my $ret = $test1-&gt;Call($buf, 5, $outbuf);
+
+# Results
+#
+print "Returned $ret\n";
+print join ' ', unpack('CCCCC', $outbuf), "\n";
+&lt;/code&gt;&lt;/pre&gt;
+
+&lt;h4&gt;P.S.&lt;/h4&gt;
+
+A good discussion of this topic is given in &lt;a href="http://www.perlmonks.org/?node_id=548285"&gt;this Perlmonks thread&lt;/a&gt;.
+
+    </content><category term="misc"></category><category term="C &amp; C++"></category><category term="Perl"></category></entry><entry><title>Book review: "Higher Order Perl" by Mark Jason Dominus</title><link href="https://eli.thegreenplace.net/2006/08/07/book-review-higher-order-perl-by-mark-jason-dominus" rel="alternate"></link><published>2006-08-07T08:21:26-07:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2006-08-07:/2006/08/07/book-review-higher-order-perl-by-mark-jason-dominus</id><summary type="html">
+&lt;p&gt;
+        In "Higher Order Perl" (or HOP as it's affectionately called in the Perl
+        community), the renown Perl wizard Mark Jason Dominus (MJD) shows how to
+        take Perl coding to the next level by applying advanced programming
+        techniques from the domain of functional programming.
+        &lt;/p&gt;&lt;p&gt;
+
+The book covers recursion (including methods to …&lt;/p&gt;</summary><content type="html">
+&lt;p&gt;
+        In "Higher Order Perl" (or HOP as it's affectionately called in the Perl
+        community), the renown Perl wizard Mark Jason Dominus (MJD) shows how to
+        take Perl coding to the next level by applying advanced programming
+        techniques from the domain of functional programming.
+        &lt;/p&gt;&lt;p&gt;
+
+The book covers recursion (including methods to convert recursive code to
+iterative code), iterators, streams, memoization, currying, parsing, constraint
+programming and higher order functions (functions that take functions as
+arguments and/or return other functions). It is packed with great, sophisticated
+code which is explained very well and is a model for correct programming. The
+author takes an approach similar to Peter Norvig's PAIP - advanced coding
+techniques are presented, and then non-trivial programs are written to
+demonstrate these concepts.
+        &lt;/p&gt;&lt;p&gt;
+
+The comparison with Lisp here is unavoidable, and MJD talks about Lisp in his
+preface. He claims that Perl shares 6 of the "7 features unique to Lisp" quoted
+from Norvig's PAIP, and that this basically means that most of what can be
+written in Lisp can be written in Perl in roughly the same manner. But as he
+himself admits in a later interview, the 7th "missing feature" of Lisp, namely
+its uniform syntax, is what *really* differentiates Lisp from the rest. Lisp's
+syntax allows a very clean handling of higher-order functions, list-processing,
+and most importantly macros. The contrast between MJD's own code in HOP and
+Norvig's PAIP code is the best example for this fundamental difference. Be MJD's
+code as clean and nice as it is (for Perl, anyway), it is nowhere near the sheer
+aesthetic appeal of Norvig's Lisp.
+        &lt;/p&gt;&lt;p&gt;
+
+Still, Lisp is Lisp and Perl is Perl, and each has its respectable place in the
+world of programming. HOP is a great book to read, and I warmly recommend it to
+any intermediate+ Perl programmer. For people who have never programmed in Lisp
+or have never learned functional programming techniques, this book is a must -
+it will literally take your code to a higher level. For diehard fans of Lisp,
+this book demonstrates how to employ most of your favorite techniques in the
+most practical language out there (though the Perlish syntactic sugar will at
+times make your teeth grind).
+        &lt;/p&gt;
+    </content><category term="misc"></category><category term="Book reviews"></category><category term="Perl"></category></entry><entry><title>Non-blocking socket access on Windows</title><link href="https://eli.thegreenplace.net/2006/04/07/non-blocking-socket-access-on-windows" rel="alternate"></link><published>2006-04-07T08:20:25-07:00</published><updated>2023-02-04T15:35:51-08:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2006-04-07:/2006/04/07/non-blocking-socket-access-on-windows</id><summary type="html">
+        &lt;p&gt;As I mentioned several times in this blog, one of my most interesting pet-projects at work (actually, a very much work-related pet project that continues to greatly boost my productivity) is a set of tools that communicate on the PCs serial port, thus allowing control of embedded applications and cards …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;As I mentioned several times in this blog, one of my most interesting pet-projects at work (actually, a very much work-related pet project that continues to greatly boost my productivity) is a set of tools that communicate on the PCs serial port, thus allowing control of embedded applications and cards with FPGAs or processors.&lt;/p&gt;
+&lt;p&gt;More details about this topic are &lt;a href="https://eli.thegreenplace.net/2006/02/13/once-again-perl-serial-ports-and-whats-between-them/"&gt;here&lt;/a&gt;, &lt;a href="https://eli.thegreenplace.net/2005/12/04/perl-master-c-slave-bound-for-serial-port-programming/"&gt;here&lt;/a&gt; and &lt;a href="https://eli.thegreenplace.net/2004/12/27/serial-port-saga-a-c-implementation/"&gt;here&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;To communicate on the 'reading' socket from Perl's side, I needed a non-blocking read ability because I didn't want to get into threads. This turned out more difficult than I thought and at one stage I almost gave up because some ActiveState 'issue reports' state that non-blocking reads on Windows are problematic. I posted a question on PerlMonks and it got into &lt;a href="http://perlmonks.org/?node_id=529812"&gt;this discussion&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Eventually, I got this to work. The solution is only two lines of (unintelligible) code:&lt;/p&gt;
+&lt;pre&gt;
+my $nonblocking = 1;
+ioctl($socket, 0x8004667e, \\$nonblocking);
+&lt;/pre&gt;
+&lt;p&gt;&lt;tt&gt;ioctl&lt;/tt&gt; is a Unix standard C function for controlling IO devices (hence its name - IO control: ioctl). Although it doesn't exist on Windows per se, it turns out that it was ported for sockets, as part of the Winsock library, which is a port of Unix sockets to Windows. Winsock has a function named &lt;tt&gt;ioctlsocket&lt;/tt&gt; which is a port of &lt;tt&gt;ioctl&lt;/tt&gt; for sockets.&lt;/p&gt;
+&lt;p&gt;&lt;tt&gt;ioctl&lt;/tt&gt; receives a socket handle, a 'command' and a pointer. Based on the command, it either reads what the pointer points to into the device, or writes into the pointer from the device. This is why a reference must be passed as the third argument in Perl. &lt;/p&gt;
+&lt;pre&gt;
+my $nonblocking = 1;
+ioctl($socket, 0x8004667e, $nonblocking); # doesn't work
+ioctl($socket, 0x8004667e, 1); # also doesn't work
+ioctl($socket, 0x8004667e, \\$nonblocking); # works !
+&lt;/pre&gt;
+&lt;p&gt;After calling this &lt;tt&gt;ioctl&lt;/tt&gt; on a newly created socket, one can then freely perform non-blocking reads with &lt;tt&gt;sysread&lt;/tt&gt;, which is very convenient if you are in an event loop of some kind (a Tk GUI, for instance) or just aren't sure how many characters you need to receive from the socket.&lt;/p&gt;
+
+    </content><category term="misc"></category><category term="Perl"></category><category term="Programming"></category></entry><entry><title>once again: perl, serial ports and what's between them</title><link href="https://eli.thegreenplace.net/2006/02/13/once-again-perl-serial-ports-and-whats-between-them" rel="alternate"></link><published>2006-02-13T22:06:00-08:00</published><updated>2024-05-04T19:46:23-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2006-02-13:/2006/02/13/once-again-perl-serial-ports-and-whats-between-them</id><summary type="html">
+        &lt;p&gt;As I wrote before, I managed to avoid using the Win32::SerialPort module for sending data to the serial port (COM) by employing a C++ slave program that listens to a socket and transmits whatever it gets to the serial port.&lt;/p&gt;
+&lt;p&gt;Today, I finally perfected this scheme. Now my C …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;As I wrote before, I managed to avoid using the Win32::SerialPort module for sending data to the serial port (COM) by employing a C++ slave program that listens to a socket and transmits whatever it gets to the serial port.&lt;/p&gt;
+&lt;p&gt;Today, I finally perfected this scheme. Now my C++ program (104 Kb !) is a full-duplex serial port &amp;lt;-&amp;gt; socket bridge. It is created by the Perl 'master' script and starts listening to the socket and to the serial port. When it gets something from the socket (sent by the Perl script) it transmits it to the serial port. When it gets something from the serial port, it sends it to the Perl script using the socket.&lt;/p&gt;
+&lt;p&gt;The Perl script can now either send serial data by shoving it into the socket or query it, in a convenient non-blocking way (thank you ioctl(), see &lt;a href="http://www.perlmonks.org/?node_id=529812" rel="nofollow"&gt;this&lt;/a&gt;), to see if anything new has arrived.&lt;/p&gt;
+&lt;p&gt;The C++ bridge works in two threads. One waits (using recv()) on the socket to get data from the master and transmit it to the serial port. The other waits on the serial port and transmits what it gets into the socket.&lt;/p&gt;
+&lt;p&gt;For now I'm actually doing this using two sockets, one for each way (master -&amp;gt; slave and slave -&amp;gt; master). In theory this is doable with a single bi-directional socket, though I may leave it as it is to allow future flexibility.
+&lt;/p&gt;
+
+Update (05.03.2008): I've released this publicly.
+Here's a &lt;a href="https://github.com/eliben/code-for-blog/tree/main/2005/perl_serial_comm"&gt;direct ink&lt;/a&gt;.
+ 
+    </content><category term="misc"></category><category term="EE &amp; Embedded"></category><category term="Perl"></category><category term="Serial port"></category></entry></feed>

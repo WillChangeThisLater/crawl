@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Locally patching dependencies in Go - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Locally patching dependencies in Go">
+                        Locally patching dependencies in Go
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> July 04, 2024 at 06:35</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>In a <a class="reference external" href="../../2020/you-dont-need-virtualenv-in-go/index.html">previous post</a> I talked
+about how each Go module is its own self-contained &quot;virtual environment&quot; during
+development. Among other benefits, this makes the dependencies of a module
+explicit and simple to tweak.</p>
+<div class="section" id="locally-patching-a-dependency">
+<h2>Locally patching a dependency</h2>
+<p>To use a concrete example, suppose our module depends on the popular package
+<a class="reference external" href="https://pkg.go.dev/github.com/google/go-cmp/cmp">go-cmp</a>,
+that lets us deep-compare arbitrary Go values. Say we're debugging
+an intricate scenario and want to either:</p>
+<ul class="simple">
+<li>Add a log statement inside the dependency to see what our code is passing
+to it (e.g. &quot;do I ever invoke <tt class="docutils literal">cmp.Equal</tt> with these specific options?&quot;)</li>
+<li>Test a suspicion of a bug in the dependency by temporarily modifying its
+code and seeing if this has an effect on our module.</li>
+</ul>
+<p>The Go module system makes this easy to accomplish; this post will demonstrate
+several way of doing this.</p>
+</div>
+<div class="section" id="setting-up">
+<h2>Setting up</h2>
+<p>Let's set up a test module to demonstrate this. The full code can be found
+<a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2024/gopatch-client-module">on GitHub</a>, or just follow along:</p>
+<p>In a directory, run <tt class="docutils literal">go mod init example.com</tt> (the module name is just
+a placeholder - it's a local experiment, we don't intend it to be imported
+or even published online). This creates a <tt class="docutils literal">go.mod</tt> file; now, let's write
+this code:</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span><span class="w"> </span><span class="nx">main</span><span class="w"></span>
+
+<span class="kn">import</span><span class="w"> </span><span class="p">(</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;fmt&quot;</span><span class="w"></span>
+
+<span class="w">  </span><span class="s">&quot;github.com/google/go-cmp/cmp&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;github.com/google/go-cmp/cmp/cmpopts&quot;</span><span class="w"></span>
+<span class="p">)</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">s1</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="p">[]</span><span class="kt">int</span><span class="p">{</span><span class="mi">42</span><span class="p">,</span><span class="w"> </span><span class="mi">12</span><span class="p">,</span><span class="w"> </span><span class="mi">23</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">s2</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="p">[]</span><span class="kt">int</span><span class="p">{</span><span class="mi">12</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">23</span><span class="p">,</span><span class="w"> </span><span class="mi">42</span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">cmp</span><span class="p">.</span><span class="nx">Equal</span><span class="p">(</span><span class="nx">s1</span><span class="p">,</span><span class="w"> </span><span class="nx">s2</span><span class="p">,</span><span class="w"> </span><span class="nx">cmpopts</span><span class="p">.</span><span class="nx">SortSlices</span><span class="p">(</span><span class="nx">intLess</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;slices are equal&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">intLess</span><span class="p">(</span><span class="nx">x</span><span class="p">,</span><span class="w"> </span><span class="nx">y</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">x</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="nx">y</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>And then run <tt class="docutils literal">go mod tidy</tt>; this should get the <tt class="docutils literal"><span class="pre">github.com/google/go-cmp</span></tt>
+dependency, and the <tt class="docutils literal">go.mod</tt> file will look something like:</p>
+<div class="highlight"><pre><span></span><span class="nx">module</span><span class="w"> </span><span class="nx">example</span><span class="p">.</span><span class="nx">com</span><span class="w"></span>
+
+<span class="k">go</span><span class="w"> </span><span class="mf">1.22.2</span><span class="w"></span>
+
+<span class="nx">require</span><span class="w"> </span><span class="nx">github</span><span class="p">.</span><span class="nx">com</span><span class="o">/</span><span class="nx">google</span><span class="o">/</span><span class="k">go</span><span class="o">-</span><span class="nx">cmp</span><span class="w"> </span><span class="nx">v0</span><span class="mf">.6.0</span><span class="w"></span>
+</pre></div>
+<p>(your Go version and the dependency version will likely be different, of course)</p>
+<p>Now, we'll download the dependency locally and patch it. Clone the
+<a class="reference external" href="https://github.com/google/go-cmp/">https://github.com/google/go-cmp/</a> repository into a local directory; we'll call
+it <tt class="docutils literal">$DEP</tt> (on my machine <tt class="docutils literal"><span class="pre">DEP=/home/eliben/test/go-cmp</span></tt>).
+Next, edit <tt class="docutils literal">$DEP/cmp/compare.go</tt> to add a log statement:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">Equal</span><span class="p">(</span><span class="nx">x</span><span class="p">,</span><span class="w"> </span><span class="nx">y</span><span class="w"> </span><span class="kd">interface</span><span class="p">{},</span><span class="w"> </span><span class="nx">opts</span><span class="w"> </span><span class="o">...</span><span class="nx">Option</span><span class="p">)</span><span class="w"> </span><span class="kt">bool</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="hll"><span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;options:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">opts</span><span class="p">)</span><span class="w"></span>
+</span><span class="w">  </span><span class="nx">s</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">newState</span><span class="p">(</span><span class="nx">opts</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">s</span><span class="p">.</span><span class="nx">compareAny</span><span class="p">(</span><span class="nx">rootStep</span><span class="p">(</span><span class="nx">x</span><span class="p">,</span><span class="w"> </span><span class="nx">y</span><span class="p">))</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">result</span><span class="p">.</span><span class="nx">Equal</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>If we run our test module now we don't see any effect yet:</p>
+<div class="highlight"><pre><span></span>$ go run .
+slices are equal
+</pre></div>
+<p>This is to be expected! Go has no idea we've cloned the dependency locally and
+want it to be used in the build process of our test module. This is the next
+step.</p>
+</div>
+<div class="section" id="using-a-module-replace-directive">
+<h2>Using a module <tt class="docutils literal">replace</tt> directive</h2>
+<p>The most basic way to accomplish what we need is using a <tt class="docutils literal">replace</tt> directive
+in the <tt class="docutils literal">go.mod</tt> file of our test module.</p>
+<p>In our module directory, run:</p>
+<div class="highlight"><pre><span></span>$ go mod edit -replace github.com/google/go-cmp=$DEP
+</pre></div>
+<p>If you look in your <tt class="docutils literal">go.mod</tt> file, you'll see a new <tt class="docutils literal">replace</tt> directive
+added there, redirecting uses of <tt class="docutils literal"><span class="pre">github.com/google/go-cmp</span></tt> to whatever
+directory <tt class="docutils literal">DEP</tt> stands for on your machine.</p>
+<p>If we now run the test module, it will pick up the patched dependency:</p>
+<div class="highlight"><pre><span></span>$ go run .
+2024/06/29 06:57:17 options: [FilterValues(cmpopts.sliceSorter.filter, Transformer(cmpopts.SortSlices, cmpopts.sliceSorter.sort))]
+slices are equal
+</pre></div>
+</div>
+<div class="section" id="using-go-workspaces">
+<h2>Using Go workspaces</h2>
+<p>Go workspaces (<tt class="docutils literal">go.work</tt> files) have been with us since version 1.18;
+a workspace makes it easier to work with multi-module repositories and large
+monorepos. It can also be leveraged to implement our use case very
+easily.</p>
+<p>Get back to a clean <tt class="docutils literal">go.mod</tt> file without a <tt class="docutils literal">replace</tt> directive (you can
+either undo the change using source control, run <tt class="docutils literal">go mod edit <span class="pre">-dropreplace</span> ...</tt>
+or just remove the <tt class="docutils literal">replace</tt> directive from the <tt class="docutils literal">go.mod</tt> file).</p>
+<p>Now, run these commands in the test module's directory:</p>
+<div class="highlight"><pre><span></span>$ go work init
+$ go work use . $DEP
+</pre></div>
+<p>This asks the Go tool to:</p>
+<ol class="arabic simple">
+<li>Initialize an empty workspace in the current directory; a <tt class="docutils literal">go.work</tt> file
+will be created.</li>
+<li>Add <tt class="docutils literal">use</tt> directives to <tt class="docutils literal">go.work</tt> for including the current directory
+<tt class="docutils literal">.</tt> and the place where we checked out a local version of the dependency
+(<tt class="docutils literal">$DEP</tt>).</li>
+</ol>
+<p>If you look around, a new file was created - <tt class="docutils literal">go.work</tt>; <tt class="docutils literal">go.mod</tt> itself was
+not modified. If we run the module with <tt class="docutils literal">go run .</tt>, we'll see that the
+local patch was picked up!</p>
+<p>I like this approach a bit more than planting <tt class="docutils literal">replace</tt> directives in the
+<tt class="docutils literal">go.mod</tt> file, since it provides a cleaner separation between temporary
+patching and the module's actual source code. While <tt class="docutils literal">go.mod</tt> files are checked
+into source control and provide a critical source of truth for building the
+module, <tt class="docutils literal">go.work</tt> files aren't typically checked in and are used to set up
+a convenient local development environment. Using <tt class="docutils literal">go.work</tt> for temporary
+patching is thus safer - it's more difficult to leave behind a <tt class="docutils literal">replace</tt>
+directive in the <tt class="docutils literal">go.mod</tt> file and commit it (this can cause all kinds of
+inconveniences when testing, for example).</p>
+</div>
+<div class="section" id="using-gohack">
+<h2>Using <tt class="docutils literal">gohack</tt></h2>
+<p><a class="reference external" href="https://github.com/rogpeppe/gohack">gohack</a> is a tool designed especially
+to address our use case; it predates Go workspaces. Start by installing it:</p>
+<div class="highlight"><pre><span></span>$ go install github.com/rogpeppe/gohack@latest
+</pre></div>
+<p>Now run:</p>
+<div class="highlight"><pre><span></span>$ gohack get github.com/google/go-cmp
+github.com/google/go-cmp =&gt; $HOME/gohack/github.com/google/go-cmp
+</pre></div>
+<p>This invocation does two things:</p>
+<ol class="arabic simple">
+<li>Fetch the dependency's code and store it somewhere locally. You can control
+where these are stored by setting the <tt class="docutils literal">$GOHACK</tt> env var; the default is
+<tt class="docutils literal">$HOME/gohack</tt>.</li>
+<li>Add a <tt class="docutils literal">replace</tt> line to our <tt class="docutils literal">go.mod</tt> file to point there.</li>
+</ol>
+<p>Since <tt class="docutils literal">gohack</tt> placed the dependency in a new location, we'll have to edit
+its <tt class="docutils literal">cmp/compare.go</tt> file again to add the log statement. If we
+<tt class="docutils literal">go run .</tt> in our test module, we'll see the change picked up.</p>
+<p>It's also fairly easy to undo changes with the <tt class="docutils literal">gohack undo</tt> command.</p>
+</div>
+<div class="section" id="which-approach-to-use">
+<h2>Which approach to use?</h2>
+<p><tt class="docutils literal">gohack</tt> can be useful in some cases where a quick check is all
+you need. Since <tt class="docutils literal">gohack</tt> obtains the dependency on its own, it makes it a
+bit faster to use than cloning manually. That said, I'd be concerned about
+committing the <tt class="docutils literal">replace</tt> line accidentally, which is why I think the workspace
+approach is safer (and also more explicit).</p>
+<p><strong>Update 2024-07-05:</strong> Sean Liao reminded me that <tt class="docutils literal">go mod vendor</tt> is yet
+another way to accomplish this. This approach comes with its own tradeoffs;
+read <a class="reference external" href="https://go.dev/ref/mod#go-mod-vendor">the documentation</a> to learn more.</p>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

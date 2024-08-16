@@ -2,8 +2,14 @@ package crawl
 
 import (
 	"bytes"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
 	"reflect"
+	"strconv"
 	"testing"
+	"time"
 )
 
 func TestGetLinksFromHTML(t *testing.T) {
@@ -52,5 +58,94 @@ func TestGetLinksFromHTML(t *testing.T) {
 				t.Errorf("getLinksFromHTML(%s) = %v, want %v", tc.html, links, tc.expected)
 			}
 		})
+	}
+}
+
+// https://stackoverflow.com/questions/56861677/synchronizing-a-test-server-during-tests
+func waitForServerToStart(port int) {
+	backoff := 50 * time.Millisecond
+
+	for i := 0; i < 10; i++ {
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf(":%d", port), 1*time.Second)
+		if err != nil {
+			time.Sleep(backoff)
+			continue
+		}
+		err = conn.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	log.Fatalf("Server on port %d not up after 10 attempts", port)
+}
+
+func setupServer(site string) *http.Server {
+	listener, err := net.Listen("tcp", ":0")
+	if err != nil {
+		panic(err)
+	}
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.FileServer(http.Dir(site)).ServeHTTP(w, r)
+		}),
+		Addr: listener.Addr().String(),
+	}
+	go srv.Serve(listener)
+	return srv
+}
+
+func TestCrawlLinksBigSite(t *testing.T) {
+	site := "./test-sites/eli.thegreenplace.net/"
+	srv := setupServer(site)
+	_, portStr, err := net.SplitHostPort(srv.Addr)
+	if err != nil {
+		log.Fatalf("Failed to parse server address: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		log.Fatalf("Failed to convert port string to int: %v", err)
+	}
+	defer srv.Close()
+
+	fmt.Printf("test site running on port %d\n", port)
+	waitForServerToStart(port)
+
+	baseURL := fmt.Sprintf("http://localhost:%d", port)
+	links := CrawlSiteForLinks(baseURL, 10)
+	if len(links) == 0 {
+		t.Errorf("Expected at least one link: %s", baseURL)
+	}
+
+	seenLinks := make(map[string]struct{})
+	for _, link := range links {
+		if _, ok := seenLinks[link]; ok {
+			t.Errorf("Link %s is listed at least twice", link)
+		} else {
+			seenLinks[link] = struct{}{}
+		}
+	}
+}
+
+func TestCrawlLinksSmallSite(t *testing.T) {
+	site := "./test-sites/sample-site/"
+	srv := setupServer(site)
+	_, portStr, err := net.SplitHostPort(srv.Addr)
+	if err != nil {
+		log.Fatalf("Failed to parse server address: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		log.Fatalf("Failed to convert port string to int: %v", err)
+	}
+	defer srv.Close()
+
+	fmt.Printf("test site running on port %d\n", port)
+	waitForServerToStart(port)
+
+	baseURL := fmt.Sprintf("http://localhost:%d", port)
+	links := CrawlSiteForLinks(baseURL, 10)
+	if len(links) != 4 {
+		t.Errorf("Expected exactly four links from %s; got %d", baseURL, len(links))
 	}
 }

@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Assembler relaxation - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="assembler-relaxation.html"
+                       rel="bookmark"
+                       title="Permalink to Assembler relaxation">
+                        Assembler relaxation
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> January 03, 2013 at 05:45</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/assembly.html">Assembly</a>
+        ,
+    <a href="../../../tag/compilation.html">Compilation</a>
+        ,
+    <a href="../../../tag/llvm-clang.html">LLVM & Clang</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>In this article I want to present a cool and little-known feature of assemblers called &quot;relaxation&quot;. Relaxation is cool because it's one of those things that are apparent in hindsight (&quot;<em>of course</em> this should be done&quot;), but is non-trivial to implement and has some interesting algorithms behind it. While relaxation is applicable to several CPU architectures and more than one kind of instructions, for this article I will focus on jumps for the Intel x86-64 architecture.</p>
+<p>And just so the nomenclature is clear, an <em>assembler</em> is a tool that translates <em>assembly language</em> into <em>machine code</em>, and this process is also usually referred to as <em>assembly</em>. That's it, we're good to go.</p>
+<div class="section" id="an-example">
+<h3>An example</h3>
+<p>Consider this x86 assembly function (in GNU assembler syntax):</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">  .text
+  .globl  foo
+  .align  16, 0x90
+  .type  foo, @function
+foo:
+  # Save used registers
+  pushq   %rbp
+  pushq   %r14
+  pushq   %rbx
+
+  movl    %edi, %ebx
+  callq   bar                 # eax &lt;- bar(num)
+  movl    %eax, %r14d         # r14 &lt;- bar(num)
+  imull   $17, %ebx, %ebp     # ebp &lt;- num * 17
+  movl    %ebx, %edi
+  callq   bar                 # eax &lt;- bar(num)
+  cmpl    %r14d, %ebp         # if !(t1 &gt; bar(num))
+  jle     .L_ELSE             # (*) jump to return num * bar(num)
+  addl    %ebp, %eax          # eax &lt;- compute num * bar(num)
+  jmp     .L_RET              # (*) and jump to return it
+.L_ELSE:
+  imull   %ebx, %eax
+.L_RET:
+
+  # Restore used registers and return
+  popq    %rbx
+  popq    %r14
+  popq    %rbp
+  ret
+</pre></div>
+<p>It was created by compiling the following C program with <tt class="docutils literal">gcc <span class="pre">-S</span> <span class="pre">-O2</span></tt>, cleaning up the output and adding some comments:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">extern</span> <span style="color: #00007f; font-weight: bold">int</span> bar(<span style="color: #00007f; font-weight: bold">int</span>);
+
+<span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">foo</span>(<span style="color: #00007f; font-weight: bold">int</span> num) {
+  <span style="color: #00007f; font-weight: bold">int</span> t1 = num * <span style="color: #007f7f">17</span>;
+  <span style="color: #00007f; font-weight: bold">if</span> (t1 &gt; bar(num))
+    <span style="color: #00007f; font-weight: bold">return</span> t1 + bar(num);
+  <span style="color: #00007f; font-weight: bold">return</span> num * bar(num);
+}
+</pre></div>
+<p>This is a completely arbitrary piece of code crafted for purposes of demonstration, so don't look too much into it. With the comments added, the relation between this code and the assembly above should be obvious.</p>
+<p>What we're interested in here is the translation of the jumps in the assembly code above (marked with <tt class="docutils literal">(*)</tt>) into machine code. This can be easily done by first assembling the file:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ gcc -c test.s
+</pre></div>
+<p>And then looking at the machine code (the jumps are once again marked):</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ objdump -d test.o
+
+test.o:     file format elf64-x86-64
+
+Disassembly of section .text:
+
+0000000000000000 &lt;foo&gt;:
+   0: 55                      push   %rbp
+   1: 41 56                   push   %r14
+   3: 53                      push   %rbx
+   4: 89 fb                   mov    %edi,%ebx
+   6: e8 00 00 00 00          callq  b &lt;foo+0xb&gt;
+   b: 41 89 c6                mov    %eax,%r14d
+   e: 6b eb 11                imul   $0x11,%ebx,%ebp
+  11: 89 df                   mov    %ebx,%edi
+  13: e8 00 00 00 00          callq  18 &lt;foo+0x18&gt;
+  18: 44 39 f5                cmp    %r14d,%ebp
+  1b: 7e 04                   jle    21 &lt;foo+0x21&gt;        (*)
+  1d: 01 e8                   add    %ebp,%eax
+  1f: eb 03                   jmp    24 &lt;foo+0x24&gt;        (*)
+  21: 0f af c3                imul   %ebx,%eax
+  24: 5b                      pop    %rbx
+  25: 41 5e                   pop    %r14
+  27: 5d                      pop    %rbp
+  28: c3                      retq
+</pre></div>
+<p>Note the instructions used for the jumping. For the JLE, the opcode is <tt class="docutils literal">0x7e</tt>, which means &quot;jump if less-or-equal with a 8-bit PC-relative offset&quot;. The offset is <tt class="docutils literal">0x04</tt> which jumps to the expected place. Similarly for the JMP, the opcode <tt class="docutils literal">0xeb</tt> means &quot;jump with a 8-bit PC-relative offset&quot;.</p>
+<p>Here comes the crux. 8-bit PC-relative offsets are enough to reach the destinations of the jumps in this example, but what if they weren't? This is where relaxation comes into play.</p>
+</div>
+<div class="section" id="relaxation">
+<h3>Relaxation</h3>
+<p>Relaxation is the process in which the assembler replaces certain instructions with other instructions, or picks certain encodings for instructions that would allow it to successfully assemble the the machine code.</p>
+<p>To see this in action, let's continue with our example, adding a twist that will make the assembler's life harder. Let's make sure that the targets of the jumps are too far to reach with a 8-bit PC-relative offset:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">  [... same as before]
+  jle     .L_ELSE             # jump to return num * bar(num)
+  addl    %ebp, %eax          # eax &lt;- compute num * bar(num)
+  jmp     .L_RET              # and jump to return it
+  .fill   130, 1, 0x90        # ++ added
+.L_ELSE:
+  imull   %ebx, %eax
+.L_RET:
+  [... same as before]
+</pre></div>
+<p>This is an excerpt of the assembly code with a directive added to insert a long stretch of NOPs between the jumps and their targets. The stretch is long enough so that the targets are more than 128 bytes away from the jumps referring to them <a class="footnote-reference" href="assembler-relaxation.html#id6" id="id1">[1]</a>.</p>
+<p>When this code is assembled, here's we get from <tt class="docutils literal">objdump</tt> when looking at the resulting machine code:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">[... same as before]
+1b:   0f 8e 89 00 00 00       jle    aa &lt;foo+0xaa&gt;
+21:   01 e8                   add    %ebp,%eax
+23:   e9 85 00 00 00          jmpq   ad &lt;foo+0xad&gt;
+28:   90                      nop
+29:   90                      nop
+[... many more NOPs]
+a8:   90                      nop
+a9:   90                      nop
+aa:   0f af c3                imul   %ebx,%eax
+ad:   5b                      pop    %rbx
+ae:   41 5e                   pop    %r14
+b0:   5d                      pop    %rbp
+b1:   c3                      retq
+</pre></div>
+<p>The jumps were now translated to different instruction opcodes. JLE uses <tt class="docutils literal">0x0f 0x8e</tt>, which has a 32-bit PC-relative offset. JMP uses <tt class="docutils literal">0xe9</tt>, which has a similar operand. These instructions have a much larger range that can now reach their targets, but they are less efficient. Since they are longer, the CPU has to read more data from memory in order to execute them. In addition, they make the code larger, which can also have a negative impact because instruction caching is very important for performance <a class="footnote-reference" href="assembler-relaxation.html#id7" id="id2">[2]</a>.</p>
+</div>
+<div class="section" id="iterating-relaxation">
+<h3>Iterating relaxation</h3>
+<p>From this point on I'm going to discuss some aspects of implementing relaxation in an assembler. Specifically, the LLVM assembler. Clang/LLVM has been usable as an industrial-strength compiler for some time now, and its assembler (based on the MC module) is an integral part of the compilation process. The assembler can be invoked directly either by calling the <tt class="docutils literal"><span class="pre">llvm-mc</span></tt> tool, or through the <tt class="docutils literal">clang</tt> driver (similarly to the <tt class="docutils literal">gcc</tt> driver). My description here applies to LLVM version 3.2 or thereabouts.</p>
+<p>To better understand the challenges involved in performing relaxation, here is a more interesting example. Consider this assembly code <a class="footnote-reference" href="assembler-relaxation.html#id8" id="id3">[3]</a>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">  .text
+  jmp AAA
+  jmp BBB
+  .fill 124, 1, 0x90   # FILL_TO_AAA
+AAA:
+  .fill 1, 1, 0x90     # FILL_TO_BBB
+BBB:
+  ret
+</pre></div>
+<p>Since by now we know that the short form of JMP (the one with a 8-bit immediate) is 2 bytes long, it's clear that it suffices for both JMP instructions, and no
+relaxation will be performed.</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">   0:   eb 7e                   jmp    80 &lt;AAA&gt;
+   2:   eb 7d                   jmp    81 &lt;BBB&gt;
+   [... many NOPs]
+0000000000000080 &lt;AAA&gt;:
+  80:   90                      nop
+
+0000000000000081 &lt;BBB&gt;:
+  81:   c3                      retq
+</pre></div>
+<p>If we increase <tt class="docutils literal">FILL_TO_BBB</tt> to 4, however, an interesting happens. Although <tt class="docutils literal">AAA</tt> is still in the range of the fist jump, <tt class="docutils literal">BBB</tt> will no longer be in the range of the second. This means that the second jump will be relaxed. But this will make it 5, instead of 2 bytes long. <em>This</em> event, in turn, will cause <tt class="docutils literal">AAA</tt> to become too far from the first jump, which will have to be relaxed as well.</p>
+<p>To solve this problem, the relaxation implemented in LLVM uses an iterative algorithm. The layout is performed multiple times as long as changes still happen. If a relaxation caused some instruction encoding to change, it means that other instructions may have become invalid (just as the example shows). So  relaxation will be performed again, until its run doesn't change anything. At that point we can confidently say that all offsets are valid and no more relaxation is needed.</p>
+<p>The output is then as expected:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">0000000000000000 &lt;AAA-0x86&gt;:
+   0:   e9 81 00 00 00          jmpq   86 &lt;AAA&gt;
+   5:   e9 80 00 00 00          jmpq   8a &lt;BBB&gt;
+   [... many NOPs]
+0000000000000086 &lt;AAA&gt;:
+  86:   90                      nop
+  87:   90                      nop
+  88:   90                      nop
+  89:   90                      nop
+
+000000000000008a &lt;BBB&gt;:
+  8a:   c3                      retq
+</pre></div>
+<p>Contrary to the first example in this article, here relaxation needed two iterations over the text section to finish, due to the reason presented above.</p>
+</div>
+<div class="section" id="laying-out-fragments">
+<h3>Laying-out fragments</h3>
+<p>Another interesting feature of LLVM's relaxation implementation is the way object file layout is done to support relaxation efficiently.</p>
+<p>In its final form, the object file consists of sections - chunks of data. Much of this data is encoded instructions, which is the kind we're most interested here because relaxation only applies to instructions. The most common way to represent chunks of data in programming is usually with some kind of byte arrays <a class="footnote-reference" href="assembler-relaxation.html#id9" id="id4">[4]</a>. This representation, however, would not work very well for representing machine code sections with relaxable instructions. Let's see why:</p>
+<img class="align-center" src="../../../images/2012/12/frag_layout_naive.png" />
+<p>Suppose this is a text section with several instructions (marked by line boundaries). The instructions were encoded into a byte array and now relaxation should happen. The instruction painted purple requires relaxation, growing by a few bytes. What happens next?</p>
+<p>Essentially, the byte array holding the instruction has to be re-allocated because it has to grow larger. Since the amount of instructions needing relaxation may be non-trivial, a lot of time may be spent on such re-allocations, which tend to be very expensive. In addition, it's not easy to avoid multiple re-allocations due to the iterative nature of the relaxation algorithm.</p>
+<p>A solution that immediately springs to mind in light of this problem is to keep the instructions in some kind of linked list, instead of a contiguous array. This way, an instruction being relaxed only means the re-allocation of the small array it was encoded into, but not of the whole section. LLVM MC takes a somewhat more clever approach, by recognizing that a lot of data in the array won't change once initially encoded. Therefore, it can be lumped together, leaving only the relaxable instructions separate. In MC nomenclature, these lumps are called &quot;fragments&quot;.</p>
+<img class="align-center" src="../../../images/2012/12/frag_layout_linked.png" />
+<p>So, the assembly emission process in LLVM MC has three distinct steps:</p>
+<ol class="arabic simple">
+<li>Assembly directives and instructions are parsed, encoded and collected into fragments. Data and instructions that don't need relaxation are placed into contiguous &quot;data&quot; fragments, while instructions that may need relaxation are placed into &quot;instruction&quot; fragments <a class="footnote-reference" href="assembler-relaxation.html#id10" id="id5">[5]</a>. Fragments are linked together in a list.</li>
+<li>Layout is performed. Layout is the process wherein the offsets of all fragments in a section are computed and relaxation is performed (iteratively). If some instruction gets relaxed, all that's required is to update the offsets of the subsequent fragments - no re-allocations.</li>
+<li>Finally, fragments are written into a single linear buffer for object-file emission (either into memory or into a file). At this step, all instructions have final sizes so it's safe to put them consecutively into a byte array.</li>
+</ol>
+</div>
+<div class="section" id="interaction-with-the-compiler">
+<h3>Interaction with the compiler</h3>
+<p>So far I've focused on the assembly part of the compilation process. But what about the compiler that emits these instructions in the first place? Once again, this interaction is highly dependent on the implementation, and I will focus on LLVM.</p>
+<p>The LLVM code generator doesn't yet know the addresses instructions and labels will land on (this is the task of the assembler), so it emits only the short versions for x86-64 jumps, relying on the assembler to do relaxation for those instructions that don't have a sufficient range. This ensures that the amount of relaxed instructions is as small as absolutely necessary.</p>
+<p>While the relaxation process is not free, it's a worthwhile optimization since it makes the code smaller and faster. Without this step, the compiler would have to assume no jump is close enough to its target and emit the long versions, which would make the generated code less than optimal.</p>
+<p>Compiler writers usually prefer to sacrifice compilation time for the efficiency of the resulting code. However, as different tradeoffs sometimes matter for programmers, this can be configured with compiler flags. For example, when compiling with <tt class="docutils literal"><span class="pre">-O0</span></tt>, the LLVM assembler simply relaxes all jumps it encounters on first sight. This allows it to put all instructions immediately into data fragments, which ensures there's much fewer fragments overall, so the assembly process is faster and consumes less memory.</p>
+</div>
+<div class="section" id="conclusion">
+<h3>Conclusion</h3>
+<p>The main goal of this article was to document relaxation - an important feature of assemblers which doesn't have too much written about it online. As a bonus, some high-level documentation of the way relaxation is implemented in the LLVM assembler (MC module) was provided. I hope it provides enough background to dive into the relevant sections of code inside MC and understand the smaller details.</p>
+<img class="align-center" src="../../../images/hline.jpg" style="width: 320px; height: 5px;" />
+<table class="docutils footnote" frame="void" id="id6" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="assembler-relaxation.html#id1">[1]</a></td><td>The PC-relative offset is signed, making its range +/- 7 bits.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id7" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="assembler-relaxation.html#id2">[2]</a></td><td>Incidentally, these instructions also have variations that accept 16-bit PC-relative immediates, but these are only available in 32-bit mode, while I'm building and running the programs in 64-bit mode.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id8" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="assembler-relaxation.html#id3">[3]</a></td><td>In which I give up all attempts to resemble something generated from a real program, leaving just the bare essentials required to present the issue.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id9" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="assembler-relaxation.html#id4">[4]</a></td><td>LLVM, like any self-respecting C++ project has its own abstraction for this called <tt class="docutils literal">SmallVector</tt>, that heaps a few layers of full-of-template-goodness classes on top; yet it's still an array of bytes underneath.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id10" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="assembler-relaxation.html#id5">[5]</a></td><td>Reality is somewhat more complex, and MC has special fragments for alignment and data fill assembly directives, but for the sake of this discussion I'll just focus on data and instruction fragments. In addition, I have to admit that &quot;instruction&quot; fragments have a misleading name (since data fragments also contain encoded instructions). Perhaps &quot;relaxable fragment&quot; would be more self-describing. <strong>Update</strong>: I've renamed this fragment to<code> MCRelaxableFragment</code> in LLVM trunk.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="assembler-relaxation.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

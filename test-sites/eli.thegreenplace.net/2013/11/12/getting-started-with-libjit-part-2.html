@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Getting started with libjit - part 2 - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="getting-started-with-libjit-part-2.html"
+                       rel="bookmark"
+                       title="Permalink to Getting started with libjit - part 2">
+                        Getting started with libjit - part 2
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> November 12, 2013 at 06:04</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/assembly.html">Assembly</a>
+        ,
+    <a href="../../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../../tag/code-generation.html">Code generation</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>This is part 2 in a series of articles on libjit. <a class="reference external" href="../../10/17/getting-started-with-libjit-part-1/index.html">Part 1</a> served as a basic introduction to the library and showed how to get started, along with some simple performance measurements. In this part, I want to discuss how to implement more interesting things with libjit, focusing on the fascinating boundary between JITed and host code.</p>
+<p>The &quot;host&quot; is the program that creates machine code at run-time and arranges for it to be executed. It's crucially important to understand this - complexity in the middle notwithstanding, JITing is eventually all about <a class="reference external" href="../05/how-to-jit-an-introduction/index.html">some code in your process calling some other code</a>. On the source level, this may be challenging to envision. Therefore, it's more useful to think about it on the binary level - after the host program is compiled and is actually executed in memory as machine code itself. I hope that the examples in this article will help explaining this concept. As usual, I'm using a pseudo-literate-programming approach - if the code samples aren't as readable as prose, please let me know.</p>
+<div class="section" id="calls-from-jited-to-jited-and-from-jited-to-host">
+<h3>Calls from JITed to JITed and from JITed to host</h3>
+<p>The iterative GCD example in <a class="reference external" href="../../10/17/getting-started-with-libjit-part-1/index.html">Part 1</a> demonstrated a self-contained JITed function that made no external calls. Let's now look at a more involved example - how JITed functions can call other JITed functions, and how they can call code in the host. The full code, as usual, is in the <a class="reference external" href="https://github.com/eliben/libjit-samples">libjit-samples repository</a>. Here I'll reveal it gradually, with explanations. Let's start by defining this simple JITed function:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">// Builds this function, and returns an uncompiled jit_function_t:</span>
+<span style="color: #007f00">//</span>
+<span style="color: #007f00">// int jit_adder(int x, y) {</span>
+<span style="color: #007f00">//    return x + y;</span>
+<span style="color: #007f00">// }</span>
+jit_function_t <span style="color: #00007f">build_jit_adder</span>(jit_context_t context) {
+  jit_context_build_start(context);
+
+  <span style="color: #007f00">// Create function signature and object. int (*)(int, int)</span>
+  jit_type_t params[<span style="color: #007f7f">2</span>] = {jit_type_int, jit_type_int};
+  jit_type_t signature = jit_type_create_signature(
+      jit_abi_cdecl, jit_type_int, params, <span style="color: #007f7f">2</span>, <span style="color: #007f7f">1</span>);
+  jit_function_t F = jit_function_create(context, signature);
+
+  <span style="color: #007f00">// x, y are the parameters; sum is a temporary</span>
+  jit_value_t x = jit_value_get_param(F, <span style="color: #007f7f">0</span>);
+  jit_value_t y = jit_value_get_param(F, <span style="color: #007f7f">1</span>);
+  jit_value_t sum = jit_value_create(F, jit_type_int);
+
+  <span style="color: #007f00">// sum = x + y</span>
+  jit_value_t temp_sum = jit_insn_add(F, x, y);
+  jit_insn_store(F, sum, temp_sum);
+
+  <span style="color: #007f00">// return sum</span>
+  jit_insn_return(F, sum);
+  jit_context_build_end(context);
+  <span style="color: #00007f; font-weight: bold">return</span> F;
+}
+</pre></div>
+<p>[if you went over <a class="reference external" href="../../10/17/getting-started-with-libjit-part-1/index.html">part 1</a>, this code should be trivial to grok].</p>
+<p>Now, let's define a very simple function in the host program:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">native_mult</span>(<span style="color: #00007f; font-weight: bold">int</span> a, <span style="color: #00007f; font-weight: bold">int</span> b) {
+  <span style="color: #00007f; font-weight: bold">return</span> a * b;
+}
+</pre></div>
+<p>Finally, let's use libjit to build a JITed function that does this:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">// void foo(int x, int y, int* result) {</span>
+<span style="color: #007f00">//   int t = jit_adder(x, y);</span>
+<span style="color: #007f00">//   *result = native_mult(t, y);</span>
+<span style="color: #007f00">// }</span>
+</pre></div>
+<p>There are at least two things here we haven't seen before. One is calling <tt class="docutils literal">jit_adder</tt> - a JITed function. The other is calling <tt class="docutils literal">native_mult</tt> - a host function. Without further ado, here's how we build <tt class="docutils literal">foo</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">// Returns an uncompiled jit_function_t</span>
+<span style="color: #007f00">// Note that jit_adder is a jit_function_t that&#39;s passed into this builder.</span>
+jit_function_t <span style="color: #00007f">build_foo</span>(jit_context_t context, jit_function_t jit_adder) {
+  jit_context_build_start(context);
+
+  <span style="color: #007f00">// Create function signature and object. void (*)(int, int, void*)</span>
+  <span style="color: #007f00">// libjit treats all native pointers as void*.</span>
+  jit_type_t params[] = {jit_type_int, jit_type_int, jit_type_void_ptr};
+  jit_type_t signature = jit_type_create_signature(
+      jit_abi_cdecl, jit_type_void, params, <span style="color: #007f7f">3</span>, <span style="color: #007f7f">1</span>);
+  jit_function_t F = jit_function_create(context, signature);
+
+  <span style="color: #007f00">// x, y, result are the parameters; t is a temporary</span>
+  jit_value_t x = jit_value_get_param(F, <span style="color: #007f7f">0</span>);
+  jit_value_t y = jit_value_get_param(F, <span style="color: #007f7f">1</span>);
+  jit_value_t result = jit_value_get_param(F, <span style="color: #007f7f">2</span>);
+  jit_value_t t = jit_value_create(F, jit_type_int);
+
+  <span style="color: #007f00">// t = jit_adder(x, y)</span>
+  jit_value_t adder_args[] = {x, y};
+  jit_value_t call_temp = jit_insn_call(
+      F, <span style="color: #7f007f">&quot;jit_adder&quot;</span>, jit_adder, <span style="color: #007f7f">0</span>, adder_args, <span style="color: #007f7f">2</span>, <span style="color: #007f7f">0</span>);
+
+  jit_insn_store(F, t, call_temp);
+
+  <span style="color: #007f00">// Prepare calling native_mult: create its signature</span>
+  jit_type_t mult_params[] = {jit_type_int, jit_type_int};
+  jit_type_t mult_signature = jit_type_create_signature(
+      jit_abi_cdecl, jit_type_int, params, <span style="color: #007f7f">2</span>, <span style="color: #007f7f">1</span>);
+
+  <span style="color: #007f00">// x = native_mult(t, y)</span>
+  jit_value_t mult_args[] = {t, y};
+  jit_value_t res = jit_insn_call_native(
+      F, <span style="color: #7f007f">&quot;native_mult&quot;</span>, native_mult, mult_signature,
+      mult_args, <span style="color: #00007f; font-weight: bold">sizeof</span>(mult_args) / <span style="color: #00007f; font-weight: bold">sizeof</span>(jit_value_t), JIT_CALL_NOTHROW);
+  jit_insn_store(F, x, res);
+
+  <span style="color: #007f00">// *result = x</span>
+  <span style="color: #007f00">// Note that this creates a store of a value libjit considers to be a</span>
+  <span style="color: #007f00">// jit_type_int, so the pointer must point to at least that size.</span>
+  jit_insn_store_relative(F, result, <span style="color: #007f7f">0</span>, x);
+
+  jit_context_build_end(context);
+  <span style="color: #00007f; font-weight: bold">return</span> F;
+}
+</pre></div>
+<p>The new libjit APIs used here for calling into other JITed code and into host code are <tt class="docutils literal">jit_insn_call</tt> and <tt class="docutils literal">jit_insn_call_native</tt>, respectively. One interesting thing to note is that for the native function, the libjit API accepts the raw function pointer - the address of the host function in memory. To know how to pass parameters to the native function and how to receive the return value back from it, a libjit &quot;signature&quot; is created with <tt class="docutils literal">jit_type_create_signature</tt> first.</p>
+<p>I had previously mentioned the boundary between JITed and host code. The following diagram will hopefully help clarify what I mean:</p>
+<img class="align-center" src="../../../images/2013/10/libjit_native_boundary.png" />
+<p>What it tries to depict is what actually happens at run-time when the JITed <tt class="docutils literal">foo</tt> is executed. It calls <tt class="docutils literal">jit_adder</tt>, which was also JITed so it's somewhere on the heap (see <a class="reference external" href="../05/how-to-jit-an-introduction/index.html">my introduction to JITing</a> for more background). It also calls <tt class="docutils literal">native_mult</tt>, which resides within the host program, so it's in the <tt class="docutils literal">.text</tt> section. As stated before, understanding the program flow at this level is easier than at the source level, because when the program runs, host code and JITed code are practically equals - they're both chunks of machine code tucked somewhere in the executable memory pages of the running process.</p>
+</div>
+<div class="section" id="passing-pointers-from-host-to-jited-code">
+<h3>Passing pointers from host to JITed code</h3>
+<p>Another novelty introduced by <tt class="docutils literal">build_foo</tt> is that the result is not <tt class="docutils literal">return</tt>-ed to the host code. Rather, the host code passes a pointer into the JITed code, into which <tt class="docutils literal">foo</tt> writes its result. libjit makes this quite easy to express. The third argument of <tt class="docutils literal">foo</tt> is declared to be a pointer in the signature. Then, <tt class="docutils literal">jit_insn_store_relative</tt> is called, which expects a pointer as its destination argument, along with an offset and generates code to store the value to <tt class="docutils literal">[dest + offest]</tt>.</p>
+<p>Here's how we invoke <tt class="docutils literal">foo</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">// Run foo with arguments and return its result</span>
+<span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">run_foo</span>(jit_function_t jit_foo, <span style="color: #00007f; font-weight: bold">int</span> x, <span style="color: #00007f; font-weight: bold">int</span> y) {
+  <span style="color: #00007f; font-weight: bold">int</span> result, *presult = &amp;result;
+  <span style="color: #00007f; font-weight: bold">void</span>* args[] = {&amp;x, &amp;y, &amp;presult};
+
+  jit_function_apply(jit_foo, args, <span style="color: #00007f">NULL</span>);
+  <span style="color: #00007f; font-weight: bold">return</span> result;
+}
+</pre></div>
+<p>The way <tt class="docutils literal">result</tt> is passed in needs some explaining. <tt class="docutils literal">jit_function_apply</tt> accepts <tt class="docutils literal">args</tt> as an array of <tt class="docutils literal">void*</tt>; quoting from the docs - &quot;each element in <tt class="docutils literal">args</tt> is a pointer to one of the arguments&quot;. So normal (non-pointer) arguments are also passed by pointer as you see above. What do we do, then, when we actually need to pass a pointer in? Right, we also pass it by pointer, just like everything else. Hence <tt class="docutils literal">presult</tt>.</p>
+</div>
+<div class="section" id="using-the-standard-c-library-from-jited-code">
+<h3>Using the standard C library from JITed code</h3>
+<p>We've seen how JITed code can call native code using <tt class="docutils literal">jit_insn_call_native</tt>. Can the same technique be used to leverage the standard C library from JITed code? Absolutely. C library functions are just normal native functions after all. Let's see an example. The following is a code sample that JITs a simple <tt class="docutils literal">void foo()</tt> and makes it call <tt class="docutils literal">puts</tt> to print out a string.</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">  <span style="color: #007f00">// void foo()</span>
+  jit_function_t F = jit_function_create(context,
+      jit_type_create_signature(jit_abi_cdecl, jit_type_void, <span style="color: #00007f">NULL</span>, <span style="color: #007f7f">0</span>, <span style="color: #007f7f">1</span>));
+
+<span style="color: #007f00">  // Approach #1: allocate the string buffer on stack inside the jit-ed</span>
+<span style="color: #007f00">  // function and store the desired characters into it.</span>
+
+<span style="color: #007f00">  // char* bufptr</span>
+<span style="color: #007f00">#define CONST_BYTE(v) (jit_value_create_nint_constant(F, jit_type_ubyte, v))</span>
+  jit_type_t type_cstring = jit_type_create_pointer(jit_type_sys_char, <span style="color: #007f7f">1</span>);
+  jit_value_t bufptr = jit_value_create(F, type_cstring);
+
+  <span style="color: #007f00">// Make bufptr point to a 4-byte buffer allocated on the stack</span>
+  jit_insn_store(F, bufptr, jit_insn_alloca(F, CONST_BYTE(<span style="color: #007f7f">4</span>)));
+
+  <span style="color: #007f00">// Store &quot;abc&quot; (with explicit terminating zero) into bufptr</span>
+  jit_insn_store_relative(F, bufptr, <span style="color: #007f7f">0</span>, CONST_BYTE(<span style="color: #7f007f">&#39;a&#39;</span>));
+  jit_insn_store_relative(F, bufptr, <span style="color: #007f7f">1</span>, CONST_BYTE(<span style="color: #7f007f">&#39;b&#39;</span>));
+  jit_insn_store_relative(F, bufptr, <span style="color: #007f7f">2</span>, CONST_BYTE(<span style="color: #7f007f">&#39;c&#39;</span>));
+  jit_insn_store_relative(F, bufptr, <span style="color: #007f7f">3</span>, CONST_BYTE(<span style="color: #7f007f">&#39;\x00&#39;</span>));
+
+  <span style="color: #007f00">// Create the signature of puts: int (*)(char*)</span>
+  jit_type_t puts_signature = jit_type_create_signature(
+      jit_abi_cdecl, jit_type_int, &amp;type_cstring, <span style="color: #007f7f">1</span>, <span style="color: #007f7f">1</span>);
+
+  <span style="color: #007f00">// puts(bufptr);</span>
+  jit_insn_call_native(
+      F, <span style="color: #7f007f">&quot;puts&quot;</span>, puts, puts_signature, &amp;bufptr, <span style="color: #007f7f">1</span>, JIT_CALL_NOTHROW);
+
+  <span style="color: #007f00">// Approach #2: use the address of a string literal in the host code</span>
+  <span style="color: #007f00">// directly, storing it into a constant. Note that this has to explicitly</span>
+  <span style="color: #007f00">// specify that host pointers are 64-bit.</span>
+
+  jit_value_t hostmemptr = jit_value_create_long_constant(
+      F, type_cstring, (<span style="color: #00007f; font-weight: bold">long</span>)<span style="color: #7f007f">&quot;foobar&quot;</span>);
+
+  jit_insn_call_native(
+      F, <span style="color: #7f007f">&quot;puts&quot;</span>, puts, puts_signature, &amp;hostmemptr, <span style="color: #007f7f">1</span>, JIT_CALL_NOTHROW);
+
+  jit_dump_function(stdout, F, <span style="color: #7f007f">&quot;F [uncompiled]&quot;</span>);
+  jit_function_compile(F);
+  jit_dump_function(stdout, F, <span style="color: #7f007f">&quot;F [compiled]&quot;</span>);
+
+  <span style="color: #007f00">// Run</span>
+  jit_function_apply(F, <span style="color: #00007f">NULL</span>, <span style="color: #00007f">NULL</span>);
+</pre></div>
+<p>This code demonstrates two alternative ways to get a string constant into the JITed code:</p>
+<ol class="arabic simple">
+<li>Using purely JITed instructions to allocate a 4-byte buffer on the stack and store the characters <tt class="docutils literal">{'a', 'b', 'c', '\0'}</tt> into it.</li>
+<li>Passing a pointer to the host-allocated string constant <tt class="docutils literal">&quot;foobar&quot;</tt> with <tt class="docutils literal">jit_value_create_long_constant</tt>.</li>
+</ol>
+<p>The first way is more straightforward, IMHO, because the second one touches once more on the interface between host and JITed code. When <tt class="docutils literal">jit_value_create_long_constant</tt> is called, it expects a numeric constant. By passing <tt class="docutils literal"><span class="pre">(long)&quot;foobar&quot;</span></tt> into it, we pass the address of the string constant <a class="footnote-reference" href="getting-started-with-libjit-part-2.html#id4" id="id3">[1]</a>. When the JITed code runs and tries to access this address (by passing it to <tt class="docutils literal">puts</tt> - back into host-code!), the address still points at the string constant, so everything works.</p>
+</div>
+<div class="section" id="final-words">
+<h3>Final words</h3>
+<p>In this article I tried to make a special focus on the interface between host and JITed code. This is to emphasize the importance of this interface - which is sometimes tricky to grok, but nonetheless is one of the most important things about modern JITs.</p>
+<p>For example, the technique of passing a host pointer directly to JITed code shown in the previous section is just a hint of the tricks employed by modern JITs. The shared in-process execution of host and JITed code enables such things to be done without losing much performance in the process.</p>
+<p>Note that some JITs allow more advanced execution modes, such as a remote code emission mode, where code is emitted to run in a different process. For example, LLVM's MCJIT does that for the LLDB (debugger) use case to emit code that will run in the debugged process's memory space. In this case special provision is obviously required to have references between host and JITed code.</p>
+<img class="align-center" src="../../../images/hline.jpg" style="width: 320px; height: 5px;" />
+<table class="docutils footnote" frame="void" id="id4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="getting-started-with-libjit-part-2.html#id3">[1]</a></td><td>Note that by casting the pointer to <tt class="docutils literal">long</tt>, we also expose a platform-specific detail: this code runs on 64-bit Linux, which is LP64.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="getting-started-with-libjit-part-2.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Python internals: adding a new statement to Python - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../../index.html" class="navbar-brand">
+                <img src="../../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="../python-internals-adding-a-new-statement-to-python.html"
+                       rel="bookmark"
+                       title="Permalink to Python internals: adding a new statement to Python">
+                        Python internals: adding a new statement to Python
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> June 30, 2010 at 19:18</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../../tag/python.html">Python</a>
+        ,
+    <a href="../../../../tag/python-internals.html">Python internals</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>This article is an attempt to better understand how the front-end of Python works. Just reading documentation and source code may be a bit boring, so I'm taking a hands-on approach here: I'm going to add an <tt class="docutils literal"><span class="pre">until</span></tt> statement to Python.</p>
+<p>All the coding for this article was done against the cutting-edge Py3k branch in the <a class="reference external" href="http://code.python.org/hg/branches/py3k/">Python Mercurial repository mirror</a>.</p>
+<div class="section" id="the-until-statement">
+<h3>The <tt class="docutils literal"><span class="pre">until</span></tt> statement</h3>
+<p>Some languages, like Ruby, have an <tt class="docutils literal"><span class="pre">until</span></tt> statement, which is the complement to <tt class="docutils literal"><span class="pre">while</span></tt> (<tt class="docutils literal"><span class="pre">until</span> <span class="pre">num</span> <span class="pre">==</span> <span class="pre">0</span></tt> is equivalent to <tt class="docutils literal"><span class="pre">while</span> <span class="pre">num</span> <span class="pre">!=</span> <span class="pre">0</span></tt>). In Ruby, I can write:</p>
+<div class="highlight"><pre>num = <span style="color: #007f7f">3</span>
+<span style="color: #00007f; font-weight: bold">until</span> num == <span style="color: #007f7f">0</span> <span style="color: #00007f; font-weight: bold">do</span>
+  <span style="color: #00007f">puts</span> num
+  num -= <span style="color: #007f7f">1</span>
+<span style="color: #00007f; font-weight: bold">end</span>
+</pre></div>
+<p>And it will print:</p>
+<div class="highlight"><pre>3
+2
+1
+</pre></div>
+<p>So, I want to add a similar capability to Python. That is, being able to write:</p>
+<div class="highlight"><pre>num = <span style="color: #007f7f">3</span>
+until num == <span style="color: #007f7f">0</span>:
+  <span style="color: #00007f; font-weight: bold">print</span>(num)
+  num -= <span style="color: #007f7f">1</span>
+</pre></div>
+</div>
+<div class="section" id="a-language-advocacy-digression">
+<h3>A language-advocacy digression</h3>
+<p>This article doesn't attempt to suggest the addition of an <tt class="docutils literal"><span class="pre">until</span></tt> statement to Python. Although I think such a statement would make some code clearer, and this article displays how easy it is to add, I completely respect Python's philosophy of minimalism. All I'm trying to do here, really, is gain some insight into the inner workings of Python.</p>
+</div>
+<div class="section" id="modifying-the-grammar">
+<h3>Modifying the grammar</h3>
+<p>Python uses a custom parser generator named <tt class="docutils literal"><span class="pre">pgen</span></tt>. This is a LL(1) parser that converts Python source code into a parse tree. The input to the parser generator is the file <tt class="docutils literal"><span class="pre">Grammar/Grammar</span></tt> <a class="footnote-reference" href="index.html#id4" id="id1">[1]</a>. This is a simple text file that specifies the grammar of Python.</p>
+<p>Two modifications have to be made to the grammar file. The first is to add a definition for the <tt class="docutils literal"><span class="pre">until</span></tt> statement. I found where the <tt class="docutils literal"><span class="pre">while</span></tt> statement was defined (<tt class="docutils literal"><span class="pre">while_stmt</span></tt>), and added <tt class="docutils literal"><span class="pre">until_stmt</span></tt> below <a class="footnote-reference" href="index.html#id5" id="id2">[2]</a>:</p>
+<div class="highlight"><pre>compound_stmt: if_stmt | while_stmt | until_stmt | for_stmt | try_stmt | with_stmt | funcdef | classdef | decorated
+if_stmt: &#39;if&#39; test &#39;:&#39; suite (&#39;elif&#39; test &#39;:&#39; suite)* [&#39;else&#39; &#39;:&#39; suite]
+while_stmt: &#39;while&#39; test &#39;:&#39; suite [&#39;else&#39; &#39;:&#39; suite]
+until_stmt: &#39;until&#39; test &#39;:&#39; suite
+</pre></div>
+<p>Note that I've decided to exclude the <tt class="docutils literal"><span class="pre">else</span></tt> clause from my definition of <tt class="docutils literal"><span class="pre">until</span></tt>, just to make it a little bit different (and because frankly I dislike the <tt class="docutils literal"><span class="pre">else</span></tt> clause of loops and don't think it fits well with the Zen of Python).</p>
+<p>The second change is to modify the rule for <tt class="docutils literal"><span class="pre">compound_stmt</span></tt> to include <tt class="docutils literal"><span class="pre">until_stmt</span></tt>, as you can see in the snippet above. It's right after <tt class="docutils literal"><span class="pre">while_stmt</span></tt>, again.</p>
+<p>When you run <tt class="docutils literal"><span class="pre">make</span></tt> after modifying <tt class="docutils literal"><span class="pre">Grammar/Grammar</span></tt>, notice that the <tt class="docutils literal"><span class="pre">pgen</span></tt> program is run to re-generate <tt class="docutils literal"><span class="pre">Include/graminit.h</span></tt> and <tt class="docutils literal"><span class="pre">Python/graminit.c</span></tt>, and then several files get re-compiled.</p>
+</div>
+<div class="section" id="modifying-the-ast-generation-code">
+<h3>Modifying the AST generation code</h3>
+<p>After the Python parser has created a parse tree, this tree is converted into an AST, since ASTs are <a class="reference external" href="../../../../2009/02/16/abstract-vs-concrete-syntax-trees/index.html">much simpler to work with</a> in subsequent stages of the compilation process.</p>
+<p>So, we're going to visit <tt class="docutils literal"><span class="pre">Parser/Python.asdl</span></tt> which defines the structure of Python's ASTs and add an AST node for our new <tt class="docutils literal"><span class="pre">until</span></tt> statement, again right below the <tt class="docutils literal"><span class="pre">while</span></tt>:</p>
+<div class="highlight"><pre>| While(expr test, stmt* body, stmt* orelse)
+| Until(expr test, stmt* body)
+</pre></div>
+<p>If you now run <tt class="docutils literal"><span class="pre">make</span></tt>, notice that before compiling a bunch of files, <tt class="docutils literal"><span class="pre">Parser/asdl_c.py</span></tt> is run to generate C code from the AST definition file. This (like <tt class="docutils literal"><span class="pre">Grammar/Grammar</span></tt>) is another example of the Python source-code using a mini-language (in other words, a DSL) to simplify programming. Also note that since <tt class="docutils literal"><span class="pre">Parser/asdl_c.py</span></tt> is a Python script, this is a kind of <a class="reference external" href="http://en.wikipedia.org/wiki/Bootstrapping_%28compilers%29">bootstrapping</a> - to build Python from scratch, Python already has to be available.</p>
+<p>While <tt class="docutils literal"><span class="pre">Parser/asdl_c.py</span></tt> generated the code to manage our newly defined AST node (into the files <tt class="docutils literal"><span class="pre">Include/Python-ast.h</span></tt> and <tt class="docutils literal"><span class="pre">Python/Python-ast.c</span></tt>), we still have to write the code that converts a relevant parse-tree node into it by hand. This is done in the file <tt class="docutils literal"><span class="pre">Python/ast.c</span></tt>. There, a function named <tt class="docutils literal"><span class="pre">ast_for_stmt</span></tt> converts parse tree nodes for statements into AST nodes. Again, guided by our old friend <tt class="docutils literal"><span class="pre">while</span></tt>, we jump right into the big <tt class="docutils literal"><span class="pre">switch</span></tt> for handling compound statements and add a clause for <tt class="docutils literal"><span class="pre">until_stmt</span></tt>:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">case</span> while_stmt:
+    <span style="color: #00007f; font-weight: bold">return</span> ast_for_while_stmt(c, ch);
+<span style="color: #00007f; font-weight: bold">case</span> until_stmt:
+    <span style="color: #00007f; font-weight: bold">return</span> ast_for_until_stmt(c, ch);
+</pre></div>
+<p>Now we should implement <tt class="docutils literal"><span class="pre">ast_for_until_stmt</span></tt>. Here it is:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">static</span> stmt_ty
+<span style="color: #00007f">ast_for_until_stmt</span>(<span style="color: #00007f; font-weight: bold">struct</span> compiling *c, <span style="color: #00007f; font-weight: bold">const</span> node *n)
+{
+    <span style="color: #007f00">/* until_stmt: &#39;until&#39; test &#39;:&#39; suite */</span>
+    REQ(n, until_stmt);
+
+    <span style="color: #00007f; font-weight: bold">if</span> (NCH(n) == <span style="color: #007f7f">4</span>) {
+        expr_ty expression;
+        asdl_seq *suite_seq;
+
+        expression = ast_for_expr(c, CHILD(n, <span style="color: #007f7f">1</span>));
+        <span style="color: #00007f; font-weight: bold">if</span> (!expression)
+            <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">NULL</span>;
+        suite_seq = ast_for_suite(c, CHILD(n, <span style="color: #007f7f">3</span>));
+        <span style="color: #00007f; font-weight: bold">if</span> (!suite_seq)
+            <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">NULL</span>;
+        <span style="color: #00007f; font-weight: bold">return</span> Until(expression, suite_seq, LINENO(n), n-&gt;n_col_offset, c-&gt;c_arena);
+    }
+
+    PyErr_Format(PyExc_SystemError,
+                 <span style="color: #7f007f">&quot;wrong number of tokens for &#39;until&#39; statement: %d&quot;</span>,
+                 NCH(n));
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f">NULL</span>;
+}
+</pre></div>
+<p>Again, this was coded while closely looking at the equivalent <tt class="docutils literal"><span class="pre">ast_for_while_stmt</span></tt>, with the difference that for <tt class="docutils literal"><span class="pre">until</span></tt> I've decided not to support the <tt class="docutils literal"><span class="pre">else</span></tt> clause. As expected, the AST is created recursively, using other AST creating functions like <tt class="docutils literal"><span class="pre">ast_for_expr</span></tt> for the condition expression and <tt class="docutils literal"><span class="pre">ast_for_suite</span></tt> for the body of the <tt class="docutils literal"><span class="pre">until</span></tt> statement. Finally, a new node named <tt class="docutils literal"><span class="pre">Until</span></tt> is returned.</p>
+<p>Note that we access the parse-tree node <tt class="docutils literal"><span class="pre">n</span></tt> using some macros like <tt class="docutils literal"><span class="pre">NCH</span></tt> and <tt class="docutils literal"><span class="pre">CHILD</span></tt>. These are worth understanding - their code is in <tt class="docutils literal"><span class="pre">Include/node.h</span></tt>.</p>
+</div>
+<div class="section" id="digression-ast-composition">
+<h3>Digression: AST composition</h3>
+<p>I chose to create a new type of AST for the <tt class="docutils literal"><span class="pre">until</span></tt> statement, but actually this isn't necessary. I could've saved some work and implemented the new functionality using composition of existing AST nodes, since:</p>
+<div class="highlight"><pre>until condition:
+   <span style="color: #007f00"># do stuff</span>
+</pre></div>
+<p>Is functionally equivalent to:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">while</span> <span style="color: #0000aa">not</span> condition:
+  <span style="color: #007f00"># do stuff</span>
+</pre></div>
+<p>Instead of creating the <tt class="docutils literal"><span class="pre">Until</span></tt> node in <tt class="docutils literal"><span class="pre">ast_for_until_stmt</span></tt>, I could have created a <tt class="docutils literal"><span class="pre">Not</span></tt> node with an <tt class="docutils literal"><span class="pre">While</span></tt> node as a child. Since the AST compiler already knows how to handle these nodes, the next steps of the process could be skipped.</p>
+</div>
+<div class="section" id="compiling-asts-into-bytecode">
+<h3>Compiling ASTs into bytecode</h3>
+<p>The next step is compiling the AST into Python bytecode. The compilation has an intermediate result which is a CFG (Control Flow Graph), but since the same code handles it I will ignore this detail for now and leave it for another article.</p>
+<p>The code we will look at next is <tt class="docutils literal"><span class="pre">Python/compile.c</span></tt>. Following the lead of <tt class="docutils literal"><span class="pre">while</span></tt>, we find the function <tt class="docutils literal"><span class="pre">compiler_visit_stmt</span></tt>, which is responsible for compiling statements into bytecode. We add a clause for <tt class="docutils literal"><span class="pre">Until</span></tt>:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">case</span> While_kind:
+    <span style="color: #00007f; font-weight: bold">return</span> compiler_while(c, s);
+<span style="color: #00007f; font-weight: bold">case</span> Until_kind:
+    <span style="color: #00007f; font-weight: bold">return</span> compiler_until(c, s);
+</pre></div>
+<p>If you wonder what <tt class="docutils literal"><span class="pre">Until_kind</span></tt> is, it's a constant (actually a value of the <tt class="docutils literal"><span class="pre">_stmt_kind</span></tt> enumeration) automatically generated from the AST definition file into <tt class="docutils literal"><span class="pre">Include/Python-ast.h</span></tt>. Anyway, we call <tt class="docutils literal"><span class="pre">compiler_until</span></tt> which, of course, still doesn't exist. I'll get to it an a moment.</p>
+<p>If you're curious like me, you'll notice that <tt class="docutils literal"><span class="pre">compiler_visit_stmt</span></tt> is peculiar. No amount of <tt class="docutils literal"><span class="pre">grep</span></tt>-ping the source tree reveals where it is called. When this is the case, only one option remains - C macro-fu. Indeed, a short investigation leads us to the <tt class="docutils literal"><span class="pre">VISIT</span></tt> macro defined in <tt class="docutils literal"><span class="pre">Python/compile.c</span></tt>:</p>
+<div class="highlight"><pre><span style="color: #007f00">#define VISIT(C, TYPE, V) {\</span>
+<span style="color: #007f00">    if (!compiler_visit_ ## TYPE((C), (V))) \</span>
+<span style="color: #007f00">        return 0; \</span>
+</pre></div>
+<p>It's used to invoke <tt class="docutils literal"><span class="pre">compiler_visit_stmt</span></tt> in <tt class="docutils literal"><span class="pre">compiler_body</span></tt>. Back to our business, however...</p>
+<p>As promised, here's <tt class="docutils literal"><span class="pre">compiler_until</span></tt>:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">static</span> <span style="color: #00007f; font-weight: bold">int</span>
+<span style="color: #00007f">compiler_until</span>(<span style="color: #00007f; font-weight: bold">struct</span> compiler *c, stmt_ty s)
+{
+    basicblock *loop, *end, *anchor = <span style="color: #00007f">NULL</span>;
+    <span style="color: #00007f; font-weight: bold">int</span> constant = expr_constant(s-&gt;v.Until.test);
+
+    <span style="color: #00007f; font-weight: bold">if</span> (constant == <span style="color: #007f7f">1</span>) {
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">1</span>;
+    }
+    loop = compiler_new_block(c);
+    end = compiler_new_block(c);
+    <span style="color: #00007f; font-weight: bold">if</span> (constant == -<span style="color: #007f7f">1</span>) {
+        anchor = compiler_new_block(c);
+        <span style="color: #00007f; font-weight: bold">if</span> (anchor == <span style="color: #00007f">NULL</span>)
+            <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">0</span>;
+    }
+    <span style="color: #00007f; font-weight: bold">if</span> (loop == <span style="color: #00007f">NULL</span> || end == <span style="color: #00007f">NULL</span>)
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">0</span>;
+
+    ADDOP_JREL(c, SETUP_LOOP, end);
+    compiler_use_next_block(c, loop);
+    <span style="color: #00007f; font-weight: bold">if</span> (!compiler_push_fblock(c, LOOP, loop))
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">0</span>;
+    <span style="color: #00007f; font-weight: bold">if</span> (constant == -<span style="color: #007f7f">1</span>) {
+        VISIT(c, expr, s-&gt;v.Until.test);
+        ADDOP_JABS(c, POP_JUMP_IF_TRUE, anchor);
+    }
+    VISIT_SEQ(c, stmt, s-&gt;v.Until.body);
+    ADDOP_JABS(c, JUMP_ABSOLUTE, loop);
+
+    <span style="color: #00007f; font-weight: bold">if</span> (constant == -<span style="color: #007f7f">1</span>) {
+        compiler_use_next_block(c, anchor);
+        ADDOP(c, POP_BLOCK);
+    }
+    compiler_pop_fblock(c, LOOP, loop);
+    compiler_use_next_block(c, end);
+
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">1</span>;
+}
+</pre></div>
+<p>I have a confession to make: this code wasn't written based on a deep understanding of Python bytecode. Like the rest of the article, it was done in imitation of the kin <tt class="docutils literal"><span class="pre">compiler_while</span></tt> function. By reading it carefully, however, keeping in mind that the Python VM is stack-based, and glancing into the documentation of the <tt class="docutils literal"><span class="pre">dis</span></tt> module, which has <a class="reference external" href="http://docs.python.org/py3k/library/dis.html">a list of Python bytecodes</a> with descriptions, it's possible to understand what's going on.</p>
+</div>
+<div class="section" id="that-s-it-we-re-done-aren-t-we">
+<h3>That's it, we're done... Aren't we?</h3>
+<p>After making all the changes and running <tt class="docutils literal"><span class="pre">make</span></tt>, we can run the newly compiled Python and try our new <tt class="docutils literal"><span class="pre">until</span></tt> statement:</p>
+<div class="highlight"><pre>&gt;&gt;&gt; until num == <span style="color: #007f7f">0</span>:
+...   <span style="color: #00007f; font-weight: bold">print</span>(num)
+...   num -= <span style="color: #007f7f">1</span>
+...
+<span style="color: #007f7f">3</span>
+<span style="color: #007f7f">2</span>
+<span style="color: #007f7f">1</span>
+</pre></div>
+<p>Voila, it works! Let's see the bytecode created for the new statement by using the <tt class="docutils literal"><span class="pre">dis</span></tt> module as follows:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">import</span> <span style="color: #00007f">dis</span>
+
+<span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">myfoo</span>(num):
+    until num == <span style="color: #007f7f">0</span>:
+        <span style="color: #00007f; font-weight: bold">print</span>(num)
+        num -= <span style="color: #007f7f">1</span>
+
+dis.dis(myfoo)
+</pre></div>
+<p>Here's the result:</p>
+<div class="highlight"><pre>4           0 SETUP_LOOP              36 (to 39)
+      &gt;&gt;    3 LOAD_FAST                0 (num)
+            6 LOAD_CONST               1 (0)
+            9 COMPARE_OP               2 (==)
+           12 POP_JUMP_IF_TRUE        38
+
+5          15 LOAD_NAME                0 (print)
+           18 LOAD_FAST                0 (num)
+           21 CALL_FUNCTION            1
+           24 POP_TOP
+
+6          25 LOAD_FAST                0 (num)
+           28 LOAD_CONST               2 (1)
+           31 INPLACE_SUBTRACT
+           32 STORE_FAST               0 (num)
+           35 JUMP_ABSOLUTE            3
+      &gt;&gt;   38 POP_BLOCK
+      &gt;&gt;   39 LOAD_CONST               0 (None)
+           42 RETURN_VALUE
+</pre></div>
+<p>The most interesting operation is number 12: if the condition is true, we jump to after the loop. This is correct semantics for <tt class="docutils literal"><span class="pre">until</span></tt>. If the jump isn't executed, the loop body keeps running until it jumps back to the condition at operation 35.</p>
+<p>Feeling good about my change, I then tried running the function (executing <tt class="docutils literal"><span class="pre">myfoo(3)</span></tt>) instead of showing its bytecode. The result was less than encouraging:</p>
+<div class="highlight"><pre>Traceback (most recent call last):
+  File &quot;zy.py&quot;, line 9, in &lt;module&gt;
+    myfoo(3)
+  File &quot;zy.py&quot;, line 5, in myfoo
+    print(num)
+SystemError: no locals when loading &#39;print&#39;
+</pre></div>
+<p>Whoa... this can't be good. So what went wrong?</p>
+</div>
+<div class="section" id="the-case-of-the-missing-symbol-table">
+<h3>The case of the missing symbol table</h3>
+<p>One of the steps the Python compiler performs when compiling the AST is create a symbol table for the code it compiles. The call to <tt class="docutils literal"><span class="pre">PySymtable_Build</span></tt> in <tt class="docutils literal"><span class="pre">PyAST_Compile</span></tt> calls into the symbol table module (<tt class="docutils literal"><span class="pre">Python/symtable.c</span></tt>), which walks the AST in a manner similar to the code generation functions. Having a symbol table for each scope helps the compiler figure out some key information, such as which variables are global and which are local to a scope.</p>
+<p>To fix the problem, we have to modify the <tt class="docutils literal"><span class="pre">symtable_visit_stmt</span></tt> function in <tt class="docutils literal"><span class="pre">Python/symtable.c</span></tt>, adding code for handling <tt class="docutils literal"><span class="pre">until</span></tt> statements, after the similar code for <tt class="docutils literal"><span class="pre">while</span></tt> statements <a class="footnote-reference" href="index.html#id6" id="id3">[3]</a>:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">case</span> While_kind:
+    VISIT(st, expr, s-&gt;v.While.test);
+    VISIT_SEQ(st, stmt, s-&gt;v.While.body);
+    <span style="color: #00007f; font-weight: bold">if</span> (s-&gt;v.While.orelse)
+        VISIT_SEQ(st, stmt, s-&gt;v.While.orelse);
+    <span style="color: #00007f; font-weight: bold">break</span>;
+<span style="color: #00007f; font-weight: bold">case</span> Until_kind:
+    VISIT(st, expr, s-&gt;v.Until.test);
+    VISIT_SEQ(st, stmt, s-&gt;v.Until.body);
+    <span style="color: #00007f; font-weight: bold">break</span>;
+</pre></div>
+<p>And now we really are done. Compiling the source after this change makes the execution of <tt class="docutils literal"><span class="pre">myfoo(3)</span></tt> work as expected.</p>
+</div>
+<div class="section" id="conclusion">
+<h3>Conclusion</h3>
+<p>In this article I've demonstrated how to add a new statement to Python. Albeit requiring quite a bit of tinkering in the code of the Python compiler, the change wasn't difficult to implement, because I used a similar and existing statement as a guideline.</p>
+<p>The Python compiler is a sophisticated chunk of software, and I don't claim being an expert in it. However, I am really interested in the internals of Python, and particularly its front-end. Therefore, I found this exercise a very useful companion to theoretical study of the compiler's principles and source code. It will serve as a base for future articles that will get deeper into the compiler.</p>
+</div>
+<div class="section" id="references">
+<h3>References</h3>
+<p>I used a few excellent references for the construction of this article. Here they are, in no particular order:</p>
+<ul class="simple">
+<li><a class="reference external" href="http://www.python.org/dev/peps/pep-0339/">PEP 339: Design of the CPython compiler</a> - probably the most important and comprehensive piece of <em>official</em> documentation for the Python compiler. Being very short, it painfully displays the scarcity of good documentation of the internals of Python.</li>
+<li>&quot;Python Compiler Internals&quot; - an article by Thomas Lee</li>
+<li>&quot;Python: Design and Implementation&quot; - a presentation by Guido van Rossum</li>
+<li>Python (2.5) Virtual Machine, A guided tour - a presentation by Peter Tröger</li>
+</ul>
+<div align="center" class="align-center"><img class="align-center" src="../../../../images/hline.jpg" style="width: 320px; height: 5px;" /></div>
+<table class="docutils footnote" frame="void" id="id4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id1">[1]</a></td><td>From here on, references to files in the Python source are given relatively to the root of the source tree, which is the directory where you run <tt class="docutils literal"><span class="pre">configure</span></tt> and <tt class="docutils literal"><span class="pre">make</span></tt> to build Python.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id2">[2]</a></td><td>This demonstrates a common technique I use when modifying source code I'm not familiar with: <em>work by similarity</em>. This principle won't solve all your problems, but it can definitely ease the process. Since everything that has to be done for <tt class="docutils literal"><span class="pre">while</span></tt> also has to be done for <tt class="docutils literal"><span class="pre">until</span></tt>, it serves as a pretty good guideline.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id6" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id3">[3]</a></td><td>By the way, without this code there's a compiler warning for <tt class="docutils literal"><span class="pre">Python/symtable.c</span></tt>. The compiler notices that the <tt class="docutils literal"><span class="pre">Until_kind</span></tt> enumeration value isn't handled in the switch statement of <tt class="docutils literal"><span class="pre">symtable_visit_stmt</span></tt> and complains. It's always important to check for compiler warnings!</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../../theme/js/count.js"></script>
+</body>
+</html>

@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Life of an HTTP request in a Go server - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Life of an HTTP request in a Go server">
+                        Life of an HTTP request in a Go server
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> February 20, 2021 at 06:31</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/network-programming.html">Network Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>Go is a common and well-suited tool for writing HTTP servers. This post
+discusses the route a typical HTTP request takes through a Go server, touching
+upon routers, middleware and other related issues like concurrency.</p>
+<p>To have some concrete code to look at, let's start with this trivial server
+(taken from <a class="reference external" href="https://gobyexample.com/http-servers">https://gobyexample.com/http-servers</a>):</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span><span class="w"> </span><span class="nx">main</span><span class="w"></span>
+
+<span class="kn">import</span><span class="w"> </span><span class="p">(</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;fmt&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;net/http&quot;</span><span class="w"></span>
+<span class="p">)</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">hello</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;hello\n&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">headers</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">headers</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">Header</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">h</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">headers</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;%v: %v\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">h</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">http</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/hello&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">hello</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">http</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/headers&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">headers</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">http</span><span class="p">.</span><span class="nx">ListenAndServe</span><span class="p">(</span><span class="s">&quot;:8090&quot;</span><span class="p">,</span><span class="w"> </span><span class="kc">nil</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>We'll begin tracing the life of an HTTP request through this server by looking
+at the <tt class="docutils literal">http.ListenAndServe</tt> function:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">ListenAndServe</span><span class="p">(</span><span class="nx">addr</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">handler</span><span class="w"> </span><span class="nx">Handler</span><span class="p">)</span><span class="w"> </span><span class="kt">error</span><span class="w"></span>
+</pre></div>
+<p>A simplified flow of what's going on when it's called is shown in this diagram:</p>
+<img alt="http.ListenAndServe simplified flow" class="align-center" src="../../images/2021/http-request-listenandserve.png" />
+<p>This is a heavily &quot;inlined&quot; version of the actual sequence of function and
+method calls, but <a class="reference external" href="https://go.googlesource.com/go/+/go1.15.8/src/net/http/server.go">the original code</a> isn't too
+hard to follow.</p>
+<p>The main flow is pretty much what you'd expect: <tt class="docutils literal">ListenAndServe</tt> listens on
+the TCP port for the given address, and then loops accepting new connections.
+For each new connection it spins a goroutine to serve it (more on this later).
+Serving the connection involves a loop of:</p>
+<ul class="simple">
+<li>Parse an HTTP request from the connection; produce <tt class="docutils literal">http.Request</tt></li>
+<li>Pass the <tt class="docutils literal">http.Request</tt> to the user-defined handler</li>
+</ul>
+<p>A handler is anything that implements the <tt class="docutils literal">http.Handler</tt> interface:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">Handler</span><span class="w"> </span><span class="kd">interface</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">ServeHTTP</span><span class="p">(</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">Request</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<div class="section" id="the-default-handler">
+<h2>The default handler</h2>
+<p>In our sample code, <tt class="docutils literal">ListenAndServe</tt> is invoked with <tt class="docutils literal">nil</tt> as the second
+argument, which is supposed to be the user-defined handler. What's going on?</p>
+<p>Our diagram simplifies some details; in reality, when the HTTP package serves a
+request, it doesn't call the user's handler directly but uses this adapter:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">serverHandler</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">srv</span><span class="w"> </span><span class="o">*</span><span class="nx">Server</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">sh</span><span class="w"> </span><span class="nx">serverHandler</span><span class="p">)</span><span class="w"> </span><span class="nx">ServeHTTP</span><span class="p">(</span><span class="nx">rw</span><span class="w"> </span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">handler</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">sh</span><span class="p">.</span><span class="nx">srv</span><span class="p">.</span><span class="nx">Handler</span><span class="w"></span>
+<span class="hll"><span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">handler</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+</span><span class="hll"><span class="w">    </span><span class="nx">handler</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">DefaultServeMux</span><span class="w"></span>
+</span><span class="hll"><span class="w">  </span><span class="p">}</span><span class="w"></span>
+</span><span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">RequestURI</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s">&quot;*&quot;</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">Method</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="s">&quot;OPTIONS&quot;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">handler</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">globalOptionsHandler</span><span class="p">{}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">handler</span><span class="p">.</span><span class="nx">ServeHTTP</span><span class="p">(</span><span class="nx">rw</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Note the highlighted lines: if <tt class="docutils literal">handler == nil</tt>, then <tt class="docutils literal">http.DefaultServeMux</tt>
+is used as the handler. This is the <em>default server mux</em> - a global instance of
+the <tt class="docutils literal">http.ServeMux</tt> type held in the <tt class="docutils literal">http</tt> package. Incidentally, when
+our sample code registers handlers with <tt class="docutils literal">http.HandleFunc</tt>, it registers them
+on this very same default mux.</p>
+<p>We could rewrite our sample server as follows, without using the default mux.
+Only the <tt class="docutils literal">main</tt> function changes, so I won't show the <tt class="docutils literal">hello</tt> and
+<tt class="docutils literal">headers</tt> handlers, but you can see the <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2021/go-life-http-request/basic-server-mux-object.go">full code here</a>.
+There's no change in functionality <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">mux</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">NewServeMux</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">mux</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/hello&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">hello</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">mux</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/headers&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">headers</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">http</span><span class="p">.</span><span class="nx">ListenAndServe</span><span class="p">(</span><span class="s">&quot;:8090&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">mux</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+</div>
+<div class="section" id="a-servemux-is-just-a-handler">
+<h2>A <tt class="docutils literal">ServeMux</tt> is just a <tt class="docutils literal">Handler</tt></h2>
+<p>When reading lots of Go server examples it's easy to come to believe that
+<tt class="docutils literal">ListenAndServe</tt> &quot;takes a mux&quot; as argument, but this isn't precise. As
+we've seen above, what <tt class="docutils literal">ListenAndServe</tt> takes is a value implementing the
+<tt class="docutils literal">http.Handler</tt> interface. We could write the following server without any
+muxes:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">PoliteServer</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">ms</span><span class="w"> </span><span class="o">*</span><span class="nx">PoliteServer</span><span class="p">)</span><span class="w"> </span><span class="nx">ServeHTTP</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Welcome! Thanks for visiting!\n&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ps</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">PoliteServer</span><span class="p">{}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">http</span><span class="p">.</span><span class="nx">ListenAndServe</span><span class="p">(</span><span class="s">&quot;:8090&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">ps</span><span class="p">))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>There is no routing here; all HTTP requests go to the <tt class="docutils literal">ServeHTTP</tt> method of
+<tt class="docutils literal">PoliteServer</tt> and it replies with the same message to all of them. Try
+<tt class="docutils literal">curl</tt>-ing this server with different paths and methods; it's nothing if not
+consistent.</p>
+<p>We can simplify our polite server even more by using <tt class="docutils literal">http.HandlerFunc</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">politeGreeting</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Welcome! Thanks for visiting!\n&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">http</span><span class="p">.</span><span class="nx">ListenAndServe</span><span class="p">(</span><span class="s">&quot;:8090&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">HandlerFunc</span><span class="p">(</span><span class="nx">politeGreeting</span><span class="p">)))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Where <tt class="docutils literal">HandlerFunc</tt> is this clever adapter living in the <tt class="docutils literal">http</tt> package:</p>
+<div class="highlight"><pre><span></span><span class="c1">// The HandlerFunc type is an adapter to allow the use of</span><span class="w"></span>
+<span class="c1">// ordinary functions as HTTP handlers. If f is a function</span><span class="w"></span>
+<span class="c1">// with the appropriate signature, HandlerFunc(f) is a</span><span class="w"></span>
+<span class="c1">// Handler that calls f.</span><span class="w"></span>
+<span class="kd">type</span><span class="w"> </span><span class="nx">HandlerFunc</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">Request</span><span class="p">)</span><span class="w"></span>
+
+<span class="c1">// ServeHTTP calls f(w, r).</span><span class="w"></span>
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">f</span><span class="w"> </span><span class="nx">HandlerFunc</span><span class="p">)</span><span class="w"> </span><span class="nx">ServeHTTP</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">r</span><span class="w"> </span><span class="o">*</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">f</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nx">r</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>If you'll notice <tt class="docutils literal">http.HandleFunc</tt> in the first example in the post <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>, it
+uses the same adapter for functions that have the <tt class="docutils literal">HandlerFunc</tt> signature.</p>
+<p>Just like <tt class="docutils literal">PoliteServer</tt>, <tt class="docutils literal">http.ServeMux</tt> is a type implementing the
+<tt class="docutils literal">http.Handler</tt> interface. You can peruse its <a class="reference external" href="https://go.googlesource.com/go/+/go1.15.8/src/net/http/server.go">full code</a> if you'd
+like; here's an outline:</p>
+<ul class="simple">
+<li><tt class="docutils literal">ServeMux</tt> keeps a sorted (by length) slice of <tt class="docutils literal">{pattern, handler}</tt> pairs.</li>
+<li><tt class="docutils literal">Handle</tt> or <tt class="docutils literal">HandleFunc</tt> adds a new handler to the slice</li>
+<li><tt class="docutils literal">ServeHTTP</tt>:<ul>
+<li>Finds the handler for the request's path (by searching the
+sorted slice of pairs)</li>
+<li>Calls the handler's <tt class="docutils literal">ServeHTTP</tt> method</li>
+</ul>
+</li>
+</ul>
+<p>As such, the mux can be seen as a <em>forwarding handler</em>; this pattern is
+extremely common in HTTP server programming. This is <em>middleware</em>.</p>
+</div>
+<div class="section" id="http-handler-middleware">
+<h2><tt class="docutils literal">http.Handler</tt> Middleware</h2>
+<p>Middleware is difficult to define precisely because it means slightly different
+things in different contexts, languages and frameworks.</p>
+<p>Let's take the flow diagram from the beginning of this post and simplify it a
+bit, hiding the details of what the <tt class="docutils literal">http</tt> package does:</p>
+<img alt="http.ListenAndServe even more simplified flow" class="align-center" src="../../images/2021/http-request-simplified.png" />
+<p>Now, here's how the flow looks when we add middleware.</p>
+<img alt="http.ListenAndServe flow with middleware" class="align-center" src="../../images/2021/http-request-with-middleware.png" />
+<p>In Go, middleware is just another HTTP handler which wraps a different handler.
+The middleware handler is registered to be called by <tt class="docutils literal">ListenAndServe</tt>; when
+called, it can do arbitrary preprocessing, call the wrapper handler and then do
+arbitrary postprocessing.</p>
+<p>We've seen one example of middleware above - <tt class="docutils literal">http.ServeMux</tt>; in that case,
+the preprocessing is selecting the right user handler to call, based on the path
+of the request. There is no postprocessing.</p>
+<p>For another concrete example, let's revisit our polite server and add some basic
+<em>logging middleware</em>. This middleware logs details of every request, including
+how long it took to execute:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">LoggingMiddleware</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">handler</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">Handler</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">lm</span><span class="w"> </span><span class="o">*</span><span class="nx">LoggingMiddleware</span><span class="p">)</span><span class="w"> </span><span class="nx">ServeHTTP</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">start</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Now</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">lm</span><span class="p">.</span><span class="nx">handler</span><span class="p">.</span><span class="nx">ServeHTTP</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;%s %s %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">Method</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">RequestURI</span><span class="p">,</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Since</span><span class="p">(</span><span class="nx">start</span><span class="p">))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">type</span><span class="w"> </span><span class="nx">PoliteServer</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">ms</span><span class="w"> </span><span class="o">*</span><span class="nx">PoliteServer</span><span class="p">)</span><span class="w"> </span><span class="nx">ServeHTTP</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Welcome! Thanks for visiting!\n&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ps</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">PoliteServer</span><span class="p">{}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">lm</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">LoggingMiddleware</span><span class="p">{</span><span class="nx">handler</span><span class="p">:</span><span class="w"> </span><span class="nx">ps</span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">http</span><span class="p">.</span><span class="nx">ListenAndServe</span><span class="p">(</span><span class="s">&quot;:8090&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">lm</span><span class="p">))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Note how <tt class="docutils literal">LoggingMiddleware</tt> is itself an <tt class="docutils literal">http.Handler</tt> that holds the user
+handler as a field. When <tt class="docutils literal">ListenAndServe</tt> calls its <tt class="docutils literal">ServeHTTP</tt> method, it
+does:</p>
+<ol class="arabic simple">
+<li>Preprocessing: record a time stamp before the user handler runs</li>
+<li>Call the user handler with the request and response writer</li>
+<li>Postprocessing: log the request details, along with time elapsed</li>
+</ol>
+<p>The great thing about middleware is that it's composable. The &quot;user handler&quot;
+wrapped by middleware can be another middleware, and so on. It's a chain of
+<tt class="docutils literal">http.Handler</tt> values wrapping each other. In fact, this is a common pattern
+in Go, which leads us to how Go middleware typically looks. Here's our logging
+polite server again, with a more recognizable Go middleware implementation:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">politeGreeting</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Welcome! Thanks for visiting!\n&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">loggingMiddleware</span><span class="p">(</span><span class="nx">next</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">Handler</span><span class="p">)</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">Handler</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">HandlerFunc</span><span class="p">(</span><span class="kd">func</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">start</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Now</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">next</span><span class="p">.</span><span class="nx">ServeHTTP</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;%s %s %s&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">Method</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">RequestURI</span><span class="p">,</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Since</span><span class="p">(</span><span class="nx">start</span><span class="p">))</span><span class="w"></span>
+<span class="w">  </span><span class="p">})</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">lm</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">loggingMiddleware</span><span class="p">(</span><span class="nx">http</span><span class="p">.</span><span class="nx">HandlerFunc</span><span class="p">(</span><span class="nx">politeGreeting</span><span class="p">))</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">http</span><span class="p">.</span><span class="nx">ListenAndServe</span><span class="p">(</span><span class="s">&quot;:8090&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">lm</span><span class="p">))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Instead of creating a struct with a method, <tt class="docutils literal">loggingMiddleware</tt> leverages
+<tt class="docutils literal">http.HandlerFunc</tt> in combination with a <em>closure</em> to make the code much more
+succinct, while preserving the same functionality. What's more important is that
+this demonstrates a de-facto standard <em>signature</em> for middleware: a function
+that takes a <tt class="docutils literal">http.Handler</tt>, sometimes along with other state, and returns
+a different <tt class="docutils literal">http.Handler</tt>. The returned handler should now be used in lieu of
+the handler passed into the middleware, and will &quot;magically&quot; perform its
+original functionality wrapped with the middleware's functionality.</p>
+<p>For example, the standard library has the following middleware included:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">TimeoutHandler</span><span class="p">(</span><span class="nx">h</span><span class="w"> </span><span class="nx">Handler</span><span class="p">,</span><span class="w"> </span><span class="nx">dt</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Duration</span><span class="p">,</span><span class="w"> </span><span class="nx">msg</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="nx">Handler</span><span class="w"></span>
+</pre></div>
+<p>So if we have a <tt class="docutils literal">http.Handler</tt> in our code, wrapping it like:</p>
+<div class="highlight"><pre><span></span><span class="nx">handler</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">TimeoutHandler</span><span class="p">(</span><span class="nx">handler</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Second</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;timed out&quot;</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>Creates a new version of the handler with a 2-second timeout mechanism built in.</p>
+<p>The composability of middleware can be demonstrated as follows:</p>
+<div class="highlight"><pre><span></span><span class="nx">handler</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">TimeoutHandler</span><span class="p">(</span><span class="nx">handler</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Second</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;timed out&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="nx">handler</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">loggingMiddleware</span><span class="p">(</span><span class="nx">handler</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>After these two lines, <tt class="docutils literal">handler</tt> will have timeouts <em>and</em> logging installed.
+You may note that long chains of middleware can become tedious to write; Go has
+a number of popular packages to address this, but that's outside the scope of
+this post.</p>
+<p>By the way, even the <tt class="docutils literal">http</tt> package uses middleware internally for its needs;
+see for example the <tt class="docutils literal">serverHandler</tt> adapter described earlier in this post.
+It provides a clean way to handle <tt class="docutils literal">nil</tt> user handlers in a default way (by
+passing the request to the default mux).</p>
+<p>I hope this makes it clear why middleware is an attractive design aid. We can
+work on our &quot;business logic&quot; handlers, while completely orthogonally we leverage
+generic middleware that can enhance our handlers in many ways. I'll leave a
+fuller exploration of the possibilities here for a different post, however.</p>
+</div>
+<div class="section" id="concurrency-and-panic-handling">
+<h2>Concurrency and panic handling</h2>
+<p>To finish up our exploration of what an HTTP request goes through in a Go
+HTTP server, let's cover two additional topics: concurrency and panic handling.</p>
+<p>First, <em>concurrency</em>. As I've briefly mentioned above, each connection is
+handled in a new goroutine by <tt class="docutils literal">http.Server.Serve</tt>.</p>
+<p>This is a strong feature of Go's <tt class="docutils literal">net/http</tt>, as it leverages Go's excellent
+concurrency capabilities, with cheap goroutines ensuring a very clean
+concurrency model for HTTP handlers. A handler can block (for example, by
+reading from a database) without worrying about stalling other handlers. This
+requires some care in writing handlers that have shared data, though. Read my
+<a class="reference external" href="../../2019/on-concurrency-in-go-http-servers.html">earlier post</a> for
+more details.</p>
+<p>Finally, <em>panic handling</em>. An HTTP server is typically meant to be a
+long-running process in the background. Suppose that something bad happens in
+a certain user-provided request handler, e.g. some sort of bug that leads to
+a runtime panic. This may crash the whole server, which isn't a great scenario.
+To protect yourself against this, you may consider adding a <tt class="docutils literal">recover</tt> to your
+server's <tt class="docutils literal">main</tt> function, but that won't help for a couple of reasons:</p>
+<ol class="arabic simple">
+<li>By the time control returns to <tt class="docutils literal">main</tt>, <tt class="docutils literal">ListenAndServe</tt> is already
+done so no more serving will happen.</li>
+<li>Since each connection is handled in a separate goroutine, panics from
+handlers won't even reach <tt class="docutils literal">main</tt> but will instead crash the process.</li>
+</ol>
+<p>To provide some protection against this, <tt class="docutils literal">net/http</tt> has built-in recovery for
+each serving goroutine (in the <tt class="docutils literal">conn.serve</tt> method). We can see it in action
+with a simple example:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">hello</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;hello\n&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">doPanic</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nb">panic</span><span class="p">(</span><span class="s">&quot;oops&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">http</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/hello&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">hello</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">http</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/panic&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">doPanic</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">http</span><span class="p">.</span><span class="nx">ListenAndServe</span><span class="p">(</span><span class="s">&quot;:8090&quot;</span><span class="p">,</span><span class="w"> </span><span class="kc">nil</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>If we run this server and <tt class="docutils literal">curl</tt> to the <tt class="docutils literal">/panic</tt> path, we'll see this:</p>
+<div class="highlight"><pre><span></span>$ curl localhost:8090/panic
+curl: (52) Empty reply from server
+</pre></div>
+<p>And the server will print this to its log:</p>
+<div class="highlight"><pre><span></span>2021/02/16 09:44:31 http: panic serving 127.0.0.1:52908: oops
+goroutine 8 [running]:
+net/http.(*conn).serve.func1(0xc00010cbe0)
+  /usr/local/go/src/net/http/server.go:1801 +0x147
+panic(0x654840, 0x6f0b80)
+  /usr/local/go/src/runtime/panic.go:975 +0x47a
+main.doPanic(0x6fa060, 0xc0001401c0, 0xc000164200)
+[... rest of stack dump here ...]
+</pre></div>
+<p>However, the server will keep running and we can still contact it!</p>
+<p>While this built-in protection is better than crashing the server, many
+developers find it somewhat limiting. All it does is close the connection and
+log the error; often, it's more useful to return some sort of error response to
+the client (such as code 500 - internal server error) with additional details.</p>
+<p>Having read this post, it should be easy to write middleware that accomplishes
+this. Try it as an exercise! I'll cover this use case in a future post.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>There are good reasons to prefer this version over the one using the
+default mux. The default mux is somewhat of a security risk; as a global
+it can be modified by any package your project imports. A malicious
+package could use for nefarious needs.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>Careful: <tt class="docutils literal">http.HandleFunc</tt> and <tt class="docutils literal">http.HandlerFunc</tt> are distinct
+entities with different, though related, roles.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

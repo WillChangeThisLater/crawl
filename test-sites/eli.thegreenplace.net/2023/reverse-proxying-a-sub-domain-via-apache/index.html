@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Reverse proxying a sub-domain via Apache - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Reverse proxying a sub-domain via Apache">
+                        Reverse proxying a sub-domain via Apache
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> January 21, 2023 at 06:26</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/network-programming.html">Network Programming</a>
+        ,
+    <a href="../../tag/internet.html">Internet</a>
+        ,
+    <a href="../../tag/software-tools.html">Software & Tools</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>Suppose you have a domain that hosts your website: <tt class="docutils literal">domain.com</tt>, and the
+website is served with the venerable <a class="reference external" href="https://en.wikipedia.org/wiki/Apache_HTTP_Server">Apache HTTP server</a>. Suppose, also, that you
+want to run some backend application on the same domain, perhaps using a
+sub-domain like <tt class="docutils literal">sub.domain.com</tt>. Running an application on a non-standard
+port (not 80 or 443) is not a problem, but what it you need it to run on port
+80? Apache occupies port 80 in order to serve <tt class="docutils literal">domain.com</tt>, so at least on
+the surface this seems like a problem.</p>
+<img alt="Logo of the Apache HTTP server project" class="align-center" src="../../images/2023/apache-logo.png" style="width: 500px;" />
+<p>This post talks about how to make it work using the reverse-proxying
+capabilities of Apache. It assumes you control a virtual machine that has
+a top-level domain like <tt class="docutils literal">domain.com</tt> mapped to it, and that the machine runs
+Linux.</p>
+<div class="section" id="setting-up-apache-as-a-proxy-with-mod-proxy">
+<h2>Setting up Apache as a proxy with mod_proxy</h2>
+<p>If you need to brush up on proxy concepts, consider reading <a class="reference external" href="../../2022/go-and-proxy-servers-part-1-http-proxies/index.html">this series of
+posts</a>
+first.</p>
+<p>Assuming Apache is already installed and running on the server, you'll first
+have to enable the <a class="reference external" href="https://httpd.apache.org/docs/2.4/mod/mod_proxy.html">proxy module</a> and restart the
+service:</p>
+<div class="highlight"><pre><span></span>$ sudo a2enmod proxy proxy_http
+$ sudo systemctl restart apache2
+</pre></div>
+<p>Sub-domains typically have their own configuration file in
+<tt class="docutils literal"><span class="pre">/etc/apache2/sites-available</span></tt>. Create a new configuration file in
+that directory, named <tt class="docutils literal">sub.domain.com.conf</tt> or some such; here's what should
+be in it (adjust as needed):</p>
+<div class="highlight"><pre><span></span>&lt;VirtualHost *:80&gt;
+        ProxyPreserveHost On
+        ProxyPass / http://127.0.0.1:5000/
+        ProxyPassReverse / http://127.0.0.1:5000/
+
+        ServerName sub.domain.com
+        ServerAdmin your@email.com
+
+        ErrorLog ${APACHE_LOG_DIR}/error.log
+        CustomLog ${APACHE_LOG_DIR}/access.log combined
+&lt;/VirtualHost&gt;
+</pre></div>
+<p>This tells Apache that the <tt class="docutils literal">sub.domain.com</tt> route should be proxied to a
+service running locally on port 5000; naturally, the service address can have a
+different port or run on a different domain altogether.</p>
+<p>Next you'll want to register that configuration with Apache and restart it
+again:</p>
+<div class="highlight"><pre><span></span>$ sudo a2ensite sub.domain.com.conf
+$ sudo systemctl restart apache2
+</pre></div>
+</div>
+<div class="section" id="running-the-backend-service">
+<h2>Running the backend service</h2>
+<p>Now that Apache is all set up, it's time to run the actual backend service at
+port 5000. As an example, you can run
+<a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2022/go-and-proxies/http-server-debug-request-headers.go">this simple header debugging server</a>:</p>
+<div class="highlight"><pre><span></span>$ go run http-server-debug-request-headers.go -addr 127.0.0.1:5000
+2023/01/17 01:01:20 Starting server on 127.0.0.1:5000
+</pre></div>
+<p>To test that it runs properly, in a separate terminal (on the same machine!)
+let's run <tt class="docutils literal">curl</tt>:</p>
+<div class="highlight"><pre><span></span>$ curl 127.0.0.1:5000/headers
+hello /headers
+</pre></div>
+<p>And looking at the terminal where the server is running, you should see some
+useful logging:</p>
+<div class="highlight"><pre><span></span>2023/01/17 01:02:50 127.0.0.1:42406   GET     /headers        Host: 127.0.0.1:5000
+User-Agent: curl/7.81.0
+Accept: */*
+</pre></div>
+<p>If you've followed all the steps in this and the previous session, it should
+work via the sub-domain now (from any machine):</p>
+<div class="highlight"><pre><span></span>$ curl http://sub.domain.com/headers
+hello /headers
+</pre></div>
+<p>Apache listens on port 80 for <tt class="docutils literal">domain.com</tt>, and when it sees requests to
+<tt class="docutils literal">sub.domain.com</tt>, it proxies them to the server running on port <tt class="docutils literal">5000</tt> on
+the same machine.</p>
+<p>If this doesn't work for you, take a careful look at the Apache logs - both
+the error log and the access log may be useful.</p>
+</div>
+<div class="section" id="bonus-tls-with-let-s-encrypt">
+<h2>Bonus: TLS with Let's Encrypt</h2>
+<p>If your server is set up to serve <tt class="docutils literal">domain.com</tt> via TLS using Let's Encrypt,
+I have good news for you -- it will <em>just work</em> for <tt class="docutils literal">sub.domain.com</tt> as well!</p>
+<p>Presumably you've set up Let's Encrypt certificates using <tt class="docutils literal">certbot</tt>. Since
+we've now added an additional Apache configuration (<tt class="docutils literal">sub.domain.com.conf</tt>), we
+should run <tt class="docutils literal">certbot</tt> again:</p>
+<div class="highlight"><pre><span></span>$ sudo certbot --apache
+</pre></div>
+<p>And carefully follow the on-screen instructions. <tt class="docutils literal">certbot</tt> should detect
+there's a new sub-domain to get a certificate for; if everything goes as
+expected, it succeeds and from that point on you should be able to access the
+backend server via HTTPS:</p>
+<div class="highlight"><pre><span></span>$ curl https://sub.domain.com/headers
+hello /headers
+</pre></div>
+<p>Note that the backend Go server serves HTTP; the reverse proxy (Apache)
+terminates the TLS connection and passes HTTP to the backend server. This is
+a fairly common way to structure backends. While the backend server
+serves unencrypted traffic, it's not actually accessible from outside the
+machine (port 5000 is unlikely to be exposed). The only way to access it is
+via the reverse-proxy on <tt class="docutils literal">sub.domain.com</tt>, which can use TLS if needed.</p>
+<p>I was wondering how this works. <tt class="docutils literal">certbot</tt> uses the HTTP challenge with Let's
+Encrypt, wherein it's asked to serve a special file on a special path
+(typically something like <tt class="docutils literal"><span class="pre">.well-known/acme-challenge</span></tt>) to prove to Let's
+Encrypt that it controls the domain. But here all requests get forwarded to
+the backend server...</p>
+<p>After scratching my head for a minute I found the answer in <tt class="docutils literal">certbot</tt>'s logs,
+where it honestly explains its tricky ways. It turns out it adds a
+<tt class="docutils literal">RewriteRule</tt> to our <tt class="docutils literal">sub.domain.com.conf</tt> file for the duration of the
+Let's Encrypt handshake, sending any requests starting with
+<tt class="docutils literal"><span class="pre">.well-known/acme-challenge</span></tt> to a known disk location it controls. After all
+is done, it quietly removes these rules from the configuration file.</p>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

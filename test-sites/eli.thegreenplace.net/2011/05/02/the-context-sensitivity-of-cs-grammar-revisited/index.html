@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>The context sensitivity of C’s grammar, revisited - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../../index.html" class="navbar-brand">
+                <img src="../../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="../the-context-sensitivity-of-cs-grammar-revisited.html"
+                       rel="bookmark"
+                       title="Permalink to The context sensitivity of C’s grammar, revisited">
+                        The context sensitivity of C’s grammar, revisited
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> May 02, 2011 at 05:55</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../../../tag/compilation.html">Compilation</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>A few years ago I've written about the <a class="reference external" href="../../../../2007/11/24/the-context-sensitivity-of-cs-grammar/index.html">context sensitivity of the grammar of C</a> - the nasty <em>typedef-name</em> problem that makes the grammar of C ambiguous and requires a hack in the lexer to make it possible for YACC to correctly parse the grammar.</p>
+<p>Since then, I have implemented this technique in <a class="reference external" href="https://github.com/eliben/pycparser">pycparser</a>, and it successfully parses real-world C99 code. However, it turns out that when mixed with the scope rules of C, the <em>typedef-name</em> problem rears its ugly head again, causing even more trouble.</p>
+<div class="section" id="the-problem">
+<h3>The problem</h3>
+<p>The C standard states that names defined with <tt class="docutils literal"><span class="pre">typedef</span></tt> behave in a manner similar to other names in the language. In particular, they should obey the lexical scoping rules. The following is invalid:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">typedef</span> <span style="color: #00007f; font-weight: bold">int</span> AA;
+<span style="color: #00007f; font-weight: bold">int</span> AA;
+</pre></div>
+<p>Since <tt class="docutils literal"><span class="pre">AA</span></tt> is first defined as a type and then redefined as a variable name, in the <em>same scope</em>. This, however, <em>is</em> valid:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">typedef</span> <span style="color: #00007f; font-weight: bold">int</span> AA;
+
+<span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">main</span>()
+{
+  <span style="color: #00007f; font-weight: bold">int</span> AA;           <span style="color: #007f00">/* OK - redefining AA in internal scope */</span>
+  <span style="color: #00007f; font-weight: bold">int</span> BB = AA * <span style="color: #007f7f">2</span>;  <span style="color: #007f00">/* OK - AA is an identifier in this scope! */</span>
+}
+</pre></div>
+<p>Because <tt class="docutils literal"><span class="pre">int</span> <span class="pre">AA</span></tt> redefines the name <tt class="docutils literal"><span class="pre">AA</span></tt> in the scope of the <tt class="docutils literal"><span class="pre">main</span></tt> function to be the name of an integer variable, not a type.</p>
+<p>So this is a hole in the simple solution for the <em>typedef-name</em> problem. The parser now has to handle another context-sensitivity - taking scopes into account. Here's another example:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">main</span>()
+{
+  <span style="color: #00007f; font-weight: bold">typedef</span> <span style="color: #00007f; font-weight: bold">int</span> AA;
+}
+
+<span style="color: #00007f; font-weight: bold">void</span> <span style="color: #00007f">foo</span>()
+{
+  AA aa;  <span style="color: #007f00">/* should be an error - AA isn&#39;t a type in this scope */</span>
+}
+</pre></div>
+<p>Since <tt class="docutils literal"><span class="pre">AA</span></tt> is defined as a type in the internal scope of <tt class="docutils literal"><span class="pre">main</span></tt>, this definition is invisible in the internal scope of <tt class="docutils literal"><span class="pre">foo</span></tt> - so <tt class="docutils literal"><span class="pre">AA</span></tt> can't be used as a type there.</p>
+</div>
+<div class="section" id="complications">
+<h3>Complications</h3>
+<p>Unfortunately, simply keeping track of the scopes isn't enough. A careful examination discovers a more serious problem. Consider this code:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">typedef</span> <span style="color: #00007f; font-weight: bold">int</span> AA;
+
+<span style="color: #00007f; font-weight: bold">void</span> <span style="color: #00007f">foo</span>()
+{
+  AA aa;       <span style="color: #007f00">/* OK - define variable aa of type AA */</span>
+  <span style="color: #00007f; font-weight: bold">float</span> AA;    <span style="color: #007f00">/* OK - define variable AA of type float */</span>
+}
+</pre></div>
+<p>Both lines are valid C, and yet, how can the parser know it? Say our fancy symbol table is in place and the parser, when inside <tt class="docutils literal"><span class="pre">foo</span></tt>, knows it's an internal scope and that the type <tt class="docutils literal"><span class="pre">AA</span></tt> is defined in the scope above it. Still, how does it distinguish between the two different references to <tt class="docutils literal"><span class="pre">AA</span></tt>?</p>
+<p>Here's another example. You're unlikely to see such code in real life, but the parser should still handle it:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">typedef</span> <span style="color: #00007f; font-weight: bold">int</span> AA;
+
+<span style="color: #00007f; font-weight: bold">void</span> <span style="color: #00007f">foo</span>()
+{
+  AA AA;            <span style="color: #007f00">/* OK - define variable AA of type AA */</span>
+  <span style="color: #00007f; font-weight: bold">int</span> BB = AA * <span style="color: #007f7f">2</span>;  <span style="color: #007f00">/* OK - AA is just a variable name here */</span>
+}
+</pre></div>
+<p>The <tt class="docutils literal"><span class="pre">AA</span> <span class="pre">AA;</span></tt> line is pure evil, and yet <em>it is valid</em>. The lexer must somehow figure out that the first <tt class="docutils literal"><span class="pre">AA</span></tt> is a type, and the second <tt class="docutils literal"><span class="pre">AA</span></tt> is an identifier.</p>
+<p>Just for kicks, here's another example:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">typedef</span> <span style="color: #00007f; font-weight: bold">char</span> AA;
+
+<span style="color: #00007f; font-weight: bold">void</span> <span style="color: #00007f">foo</span>()
+{
+  <span style="color: #00007f; font-weight: bold">int</span> aa = <span style="color: #00007f; font-weight: bold">sizeof</span>(AA), AA, bb = <span style="color: #00007f; font-weight: bold">sizeof</span>(AA);
+}
+</pre></div>
+<p>This is also perfectly valid, and on a typical 32-bit machine the value of <tt class="docutils literal"><span class="pre">aa</span></tt> is going to be 1, while the value of <tt class="docutils literal"><span class="pre">bb</span></tt> is going to be 4, since the declaration of <tt class="docutils literal"><span class="pre">AA</span></tt> as an <tt class="docutils literal"><span class="pre">int</span></tt> variable kicks in immediately, ready to be used in the same line after the comma.</p>
+</div>
+<div class="section" id="possible-solutions">
+<h3>Possible solutions</h3>
+<p>I do not intend to claim these are non-solvable problems. Obviously, C compilers exist and many parse these code samples correctly. One thing is clear though - this problem makes the C grammar nasty, and the pure-and-nice YACC grammar samples you find online for it are <em>wrong</em> <a class="footnote-reference" href="index.html#id5" id="id1">[1]</a>.</p>
+<p>After doing a lot of reading online, I found the following approaches to the &quot;C parsing problem&quot; most common:</p>
+<div class="section" id="tweaking-the-lexer-and-yacc-grammar">
+<h4>Tweaking the lexer and YACC grammar</h4>
+<p>It is actually possible to correctly parse C with a YACC-generated parser, but it requires a considerable amount of tweaking both in the lexer and parser code. The exact changes required will take another article (or five) to describe, but in short, the recipe is:</p>
+<ul class="simple">
+<li>The parser should keep scoping information along the parse. To make this possible, the rules for handling scope-opening chars (<tt class="docutils literal"><span class="pre">{</span></tt>, <tt class="docutils literal"><span class="pre">(</span></tt>, <tt class="docutils literal"><span class="pre">)</span></tt> and <tt class="docutils literal"><span class="pre">}</span></tt>) have to me modified to maintain a scope level.</li>
+<li>New types defined by <tt class="docutils literal"><span class="pre">typedef</span></tt> should be kept in a hierarchical symbol table and the parser &amp; lexer should know their scope <a class="footnote-reference" href="index.html#id6" id="id2">[2]</a>. The lexer, in particular, now has to consult the hierarchical symbol table regarding a possible type.</li>
+<li>Many rules in the parser have to be modified to signal to the lexer with a special flag where usage of a name as a type is allowed.</li>
+</ul>
+<p>Don't underestimate the havoc these changes wreak in a YACC grammar. Rules have to be modified, split, duplicated and in general complicated, moving the grammar farther (in appearance) from the formal grammar of C.</p>
+</div>
+<div class="section" id="glr">
+<h4>GLR</h4>
+<p>Another way to handle ambiguity in YACC grammars is by using a <a class="reference external" href="http://en.wikipedia.org/wiki/GLR_parser">GLR parser</a>. When a GLR parser runs into a case where there is more than one parse possible <a class="footnote-reference" href="index.html#id7" id="id3">[3]</a>, it parses both options. The result of such a parse is a DAG rather than a tree, and the subsequent steps of the compiler have to resolve the ambiguity.</p>
+<p>This is a good thing, since the subsequent steps also have more information, and they are built on a much more flexible framework of tree processing. For example, while the parse tree (or DAG in case of a GLR parse) is being walked, a symbol table is usually being constructed anyway, so scope resolution is almost free. The other problems can also be resolved by applying heuristics while walking the tree.</p>
+<p>Specifically, to approach the <em>typedef-name</em> problem, a GLR parser will simply use an identifier instead of a type name everywhere. In a regular YACC grammar, that would cause a lot of conflicts, but a GLR parser doesn't care about that. During the actual parse, in places where a conflict is detected, both paths in the tree will be recorded. After the parser has finished generating the ambiguous parse tree, another pass in the compiler will disambiguate it based on scope information and additional heuristics.</p>
+</div>
+<div class="section" id="hand-written-parsers">
+<h4>Hand-written parsers</h4>
+<p>The most popular option for parsing C, however, seems to be just leaving LR and YACC behind and use a hand-written recursive descent parser. This is the path now taken by GCC, as well as the new C/C++ compiler Clang. At least a few other compilers I've checked also go this route - LCC and tcc (Tiny C compiler), for example.</p>
+<p>But why do this? Isn't YACC supposed to help us write parsers much quicker? Maybe it is, and for this reason it's probably the best approach to take when you need to quickly code a parser for some small language <a class="footnote-reference" href="index.html#id8" id="id4">[4]</a>. However, when you have a very complex parser to write, and this parser is at the core of your product, hand-coding it appears to be the preferred approach. I think Joel Spolsky put this well in his <a class="reference external" href="http://www.joelonsoftware.com/articles/fog0000000007.html">Defense of Not-Invented-Here Syndrome</a>.</p>
+<p>The biggest problem with YACC-based parsers, IMHO, is that you're tied to the LR(1) parsing power such grammars can provide, and are forced to live inside the YACC parsing framework. Frameworks are great as long as they give you what you need. But once your needs transcend the abilities of the framework, you often find yourself spending more time fighting with its idiosyncrasies than solving the problem itself.</p>
+<p>A hand-written parser won't make the problems demonstrated in this article magically go away. Parsing of declarations will still be complex and resolution between types and identifiers will still have to depend on a symbol table. But since the the parser code is completely custom and doesn't have to be constrained to what YACC accepts, handling these issues is much less of a deal.</p>
+</div>
+</div>
+<div class="section" id="what-about-c">
+<h3>What about C++?</h3>
+<p>The problems with C's grammar are magnified ten-fold in C++, which has even more ambiguous constructs. In fact, I'm not aware of a single industrial-strength compiler that uses YACC to fully parse modern C++ - please point me to one if I'm wrong. AFAIK most C++ parsers out there are hand-written recursive descent.</p>
+<p><em>[P.S. I'd like to thank</em> <a class="reference external" href="http://dp.grhack.net/">huku</a> <em>for the interesting email discussions that helped me understand better the possible approach to solve the typedef problem within a YACC parser].</em></p>
+<div align="center" class="align-center"><img class="align-center" src="../../../../images/hline.jpg" style="width: 320px; height: 5px;" /></div>
+<table class="docutils footnote" frame="void" id="id5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id1">[1]</a></td><td>Including the C syntax pages at the end of K&amp;R2, which blissfully ignores this problem, assuming that the lexer somehow magically infers the distinctions correctly (which isn't possible unless the lexer does a lot of parsing on its own).</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id6" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id2">[2]</a></td><td>Curiously, later stages of compilation definitely use a hierarchical symbol table, because of the same problems. To even know to which variable a name refers (during, say, type checking) the compiler has to know the current scope and all the scopes above it. The <em>typedef-name</em> problem pushes a similar symbol table into the parser.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id7" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id3">[3]</a></td><td>Such as a reduce-reduce conflict.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id8" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id4">[4]</a></td><td>Given, of course, that the grammar of this small language is reasonable, unlike C.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../../theme/js/count.js"></script>
+</body>
+</html>

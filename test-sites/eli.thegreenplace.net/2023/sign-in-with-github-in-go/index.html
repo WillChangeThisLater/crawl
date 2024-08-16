@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Sign in with GitHub in Go - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Sign in with GitHub in Go">
+                        Sign in with GitHub in Go
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> December 09, 2023 at 14:15</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/internet.html">Internet</a>
+        ,
+    <a href="../../tag/network-programming.html">Network Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>It's common to see web applications that let you log in through third-party
+services. &quot;Sign in with Google&quot; is particularly popular; on developer-oriented
+websites, &quot;Sign in with GitHub&quot; also pops up quite a bit. In this post, I want
+to briefly explore OAuth - the technology that enables these delegated logins,
+and present some ways to integrate GitHub login in your Go service.
+<a class="reference external" href="../../2024/sign-in-with-google-in-go/index.html">Signing in through Google is covered in a separate post</a>.</p>
+<p>A note about authentication terminology:</p>
+<ul class="simple">
+<li>Authentication (authn): is the process of verifying the identity of a user
+or entity. It answers the question, &quot;Who are you?&quot;, typically
+through credentials like usernames and passwords, 2FA etc.</li>
+<li>Authorization (authz): is the process of determining what permissions an
+authenticated user has with a given service (e.g. Editor, Commenter or
+Viewer on Google Documents).</li>
+</ul>
+<p>This post is about authn, though GitHub really provides a more general authz
+mechanism. In GitHub, when you attempt to use OAuth login, you ask for specific
+permissions (called &quot;scopes&quot;) ahead of time; so a user authentication process
+combines authn (does this user have a valid GitHub account?) with authz
+(can this app get the following permissions to the user's account?)</p>
+<p>We try to focus only on authn though, not asking GitHub for any particular
+permissions other than verifying that a user has an account and getting some
+basic user information (email) that can be used to uniquely identify the user
+in our application.</p>
+<p>This post provides code samples for accomplishing this task in three ways:</p>
+<ol class="arabic simple">
+<li>Using nothing but the Go standard library</li>
+<li>Using a semi-standard package for handling some of the OAuth minutiae,
+saving some code</li>
+<li>Using a third-party package for handling more of the process, saving
+even more code</li>
+</ol>
+<div class="section" id="a-brief-overview-of-oauth">
+<h2>A brief overview of OAuth</h2>
+<p>OAuth is an authorization standard; currently in version 2.0, it's formally
+described in <a class="reference external" href="https://datatracker.ietf.org/doc/html/rfc6750">RFC 6750</a>.
+In this post I'll only provide a brief introduction to the standard in the
+context of the GitHub authentication flow I'm describing; I recommend reading
+more - start with the <a class="reference external" href="https://en.wikipedia.org/wiki/OAuth">Wikipedia page</a>
+and follow links from there as needed.</p>
+<p>Here's a useful diagram describing the OAuth 2.0 (it's taken from
+<a class="reference external" href="https://www.digitalocean.com/community/tutorials/an-introduction-to-oauth-2">this post by Digital Ocean</a>,
+which is also a good introduction to the subject):</p>
+<img alt="Diagram describing the steps and actors in an OAuth 2 auth flow" class="align-center" src="../../images/2023/auth-flow-digitalocean.png" />
+<p>When we want to provide a &quot;Sign-in with GitHub&quot; in our application, the actors
+involved in the diagram are:</p>
+<ul class="simple">
+<li>Application (or client): is our application - a web app that wants to allow
+users to log in with their GitHub account rather than (or in addition to)
+implementing its own authentication flow.</li>
+<li>User: wants to log into our app, and has a GitHub account.</li>
+<li>User-agent: the user's web browser</li>
+<li>Auth Server: the GitHub OAuth authorization server</li>
+</ul>
+<p>The steps involved are:</p>
+<ol class="arabic simple">
+<li>The user visits the application's website and chooses to log in with GitHub
+credentials. The application redirects the user to the GitHub auth server
+which notifies them that &quot;Application FOO&quot; wants them to log in.</li>
+<li>The user logs into GitHub; note that this is happening on GitHub's website,
+in a secured HTTPS session vs. GitHub's server. The user enters their
+email, password and 2FA if required.</li>
+<li>If the login is successful, the auth server redirects the user's browser
+back to the application, and provides the application with a temporary code
+it can use to ask for access tokens.</li>
+<li>The application uses the temporary code from GitHub along with a secret it
+has pre-registered with GitHub to request an access token to the user's
+account.</li>
+<li>GitHub checks that everything is kosher and provides an access token to
+the application.</li>
+</ol>
+<p>From this stage on, the application can use the token to query the GitHub API
+on behalf of the logged-in user, based on the permissions (or &quot;scopes&quot;) the
+user agreed to provide to the application <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>. For logging in, the application
+just needs to know what the user's email address is.</p>
+<p>One important aspect to understand about OAuth for web applications is that
+it leverages HTTP redirection (status code 301) to route the user between
+the different servers involved. This is important for user control, security
+and also convenience (for example, it allows us to register <tt class="docutils literal">localhost</tt>
+endpoints with GitHub for testing). The way it works is that in step (1) when
+our application sends the user to GitHub, it adds a redirection URL
+for GitHub in a request parameter; GitHub uses this to redirect the user back
+to our page in step (3). We'll see this in action soon.</p>
+</div>
+<div class="section" id="sample-1-github-oauth-flow-using-raw-stdlib">
+<h2>Sample 1: GitHub OAuth flow using raw stdlib</h2>
+<p>In <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2023/go-github-login/using-stdlib-only">our first sample</a>,
+we're not going to be using any 3rd party
+packages; instead, we implement a complete GitHub auth flow using the Go
+standard library.</p>
+<p>This sample follows the GitHub documentation: <a class="reference external" href="https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps">Authorizing OAuth apps</a>,
+as described in the &quot;Web application&quot; flow <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>. The steps outlined on that page
+are directly mapped to steps in my sample Go program. If you want to follow
+along, make sure to <a class="reference external" href="https://github.com/settings/applications/new">register an application with GitHub</a>,
+set a compatible callback path and write down your client ID and client secret;
+my code expects these to be in the env vars <tt class="docutils literal">GITHUB_CLIENT_ID</tt> and
+<tt class="docutils literal">GITHUB_CLIENT_SECRET</tt>, respectively.</p>
+<p>Our application starts by registering some HTTP routes:</p>
+<div class="highlight"><pre><span></span><span class="c1">// These should be taken from your GitHub application settings</span><span class="w"></span>
+<span class="c1">// at https://github.com/settings/developers</span><span class="w"></span>
+<span class="kd">var</span><span class="w"> </span><span class="nx">GithubClientID</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Getenv</span><span class="p">(</span><span class="s">&quot;GITHUB_CLIENT_ID&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="kd">var</span><span class="w"> </span><span class="nx">GithubClientSecret</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Getenv</span><span class="p">(</span><span class="s">&quot;GITHUB_CLIENT_SECRET&quot;</span><span class="p">)</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">GithubClientID</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">GithubClientSecret</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;Set GITHUB_CLIENT_* env vars&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">http</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">rootHandler</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">http</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/login/&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">githubLoginHandler</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">http</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/github/callback/&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">githubCallbackHandler</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">addr</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="s">&quot;localhost:8080&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;Listening on: http://%s\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">addr</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Panic</span><span class="p">(</span><span class="nx">http</span><span class="p">.</span><span class="nx">ListenAndServe</span><span class="p">(</span><span class="nx">addr</span><span class="p">,</span><span class="w"> </span><span class="kc">nil</span><span class="p">))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>When the server runs, the user is expected to visit the root route <tt class="docutils literal">/</tt>, where
+they're presented with a link to &quot;Log in with GitHub&quot;. This is done with the
+following handler:</p>
+<div class="highlight"><pre><span></span><span class="kd">const</span><span class="w"> </span><span class="nx">rootHTML</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s">`</span>
+<span class="s">&lt;h1&gt;My web app&lt;/h1&gt;</span>
+<span class="s">&lt;p&gt;Using raw HTTP OAuth 2.0&lt;/p&gt;</span>
+<span class="s">&lt;p&gt;You can log into this app with your GitHub credentials:&lt;/p&gt;</span>
+<span class="s">&lt;p&gt;&lt;a href=&quot;/login/&quot;&gt;Log in with GitHub&lt;/a&gt;&lt;/p&gt;</span>
+<span class="s">`</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">rootHandler</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">r</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprint</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nx">rootHTML</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Once the user clicks the &quot;log in&quot; link, they're taken to the <tt class="docutils literal">/login/</tt>
+handler:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">githubLoginHandler</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">r</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Step 1: Request a user&#39;s GitHub identity</span><span class="w"></span>
+<span class="w">  </span><span class="c1">//</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// ... by redirecting the user&#39;s browser to a GitHub login endpoint. We&#39;re not</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// setting redirect_uri, leaving it to GitHub to use the default we set for</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// this application: /github/callback</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// We&#39;re also not asking for any specific scope, because we only need access</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// to the user&#39;s public information to know that the user is really logged in.</span><span class="w"></span>
+<span class="w">  </span><span class="c1">//</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// We&#39;re setting a random state cookie for the client to return</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// to us when the call comes back, to prevent CSRF per</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// section 10.12 of https://www.rfc-editor.org/rfc/rfc6749.html</span><span class="w"></span>
+<span class="w">  </span><span class="nx">state</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">randString</span><span class="p">(</span><span class="mi">16</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nb">panic</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">c</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">http</span><span class="p">.</span><span class="nx">Cookie</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Name</span><span class="p">:</span><span class="w">     </span><span class="s">&quot;state&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Value</span><span class="p">:</span><span class="w">    </span><span class="nx">state</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Path</span><span class="p">:</span><span class="w">     </span><span class="s">&quot;/&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">MaxAge</span><span class="p">:</span><span class="w">   </span><span class="nb">int</span><span class="p">(</span><span class="nx">time</span><span class="p">.</span><span class="nx">Hour</span><span class="p">.</span><span class="nx">Seconds</span><span class="p">()),</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Secure</span><span class="p">:</span><span class="w">   </span><span class="nx">r</span><span class="p">.</span><span class="nx">TLS</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">HttpOnly</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">http</span><span class="p">.</span><span class="nx">SetCookie</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nx">c</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">redirectURL</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Sprintf</span><span class="p">(</span><span class="s">&quot;https://github.com/login/oauth/authorize?client_id=%s&amp;state=%s&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">GithubClientID</span><span class="p">,</span><span class="w"> </span><span class="nx">state</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">http</span><span class="p">.</span><span class="nx">Redirect</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nx">r</span><span class="p">,</span><span class="w"> </span><span class="nx">redirectURL</span><span class="p">,</span><span class="w"> </span><span class="mi">301</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The comment explains how this maps to step 1 in the <a class="reference external" href="https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps">documented GitHub flow</a>.
+The note about <tt class="docutils literal">redirect_url</tt> is important; typically the auth
+server expects a <tt class="docutils literal">redirect_url</tt> path. However, it should also be configured
+when you register the application. Here I opt for using the default
+configuration and am not passing <tt class="docutils literal">redirect_url</tt> explicitly.</p>
+<p>This code implements CSRF protection by generating a random string, storing
+it in a cookie for this user's session and sending it with the <tt class="docutils literal">state</tt> URL
+parameter to GitHub. When GitHub calls our redirect URL, it will attach this
+state - we can thus verify the request is legit and not a malicious attack.</p>
+<p>At this point the user is presented with a familiar &quot;sign-in to GitHub&quot; screen
+on GitHub's website:</p>
+<img alt="Sign-in screenshot from GitHub" class="align-center" src="../../images/2023/github-auth-login.png" />
+<p>The user verifies their credentials vs. GitHub; then GitHub redirects the user's
+browser back to the redirect URL provided (or configured in the GitHub app
+settings). In our case, the redirect goes to
+<a class="reference external" href="http://localhost:8080/github/callback/">http://localhost:8080/github/callback/</a> <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>, which is mapped to
+<tt class="docutils literal">githubCallbackHandler</tt>. Here's the first part of this function, implementing
+step 2 from the documented GitHub flow:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">githubCallbackHandler</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">r</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Step 2: Users are redirected back to your site by GitHub</span><span class="w"></span>
+<span class="w">  </span><span class="c1">//</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// The user is authenticated w/ GitHub by this point, and GH provides us</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// a temporary code we can exchange for an access token using the app&#39;s</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// full credentials.</span><span class="w"></span>
+<span class="w">  </span><span class="c1">//</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Start by checking the state returned by GitHub matches what</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// we&#39;ve stored in the cookie.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">state</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">Cookie</span><span class="p">(</span><span class="s">&quot;state&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">http</span><span class="p">.</span><span class="nx">Error</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;state not found&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">StatusBadRequest</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Query</span><span class="p">().</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;state&quot;</span><span class="p">)</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nx">state</span><span class="p">.</span><span class="nx">Value</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">http</span><span class="p">.</span><span class="nx">Error</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;state did not match&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">StatusBadRequest</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// We use the code, alongside our client ID and secret to ask GH for an</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// access token to the API.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">code</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Query</span><span class="p">().</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;code&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">requestBodyMap</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="kd">map</span><span class="p">[</span><span class="kt">string</span><span class="p">]</span><span class="kt">string</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="s">&quot;client_id&quot;</span><span class="p">:</span><span class="w">     </span><span class="nx">GithubClientID</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="s">&quot;client_secret&quot;</span><span class="p">:</span><span class="w"> </span><span class="nx">GithubClientSecret</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="s">&quot;code&quot;</span><span class="p">:</span><span class="w">          </span><span class="nx">code</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">requestJSON</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">json</span><span class="p">.</span><span class="nx">Marshal</span><span class="p">(</span><span class="nx">requestBodyMap</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nb">panic</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">NewRequest</span><span class="p">(</span><span class="s">&quot;POST&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;https://github.com/login/oauth/access_token&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">bytes</span><span class="p">.</span><span class="nx">NewBuffer</span><span class="p">(</span><span class="nx">requestJSON</span><span class="p">))</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nb">panic</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">req</span><span class="p">.</span><span class="nx">Header</span><span class="p">.</span><span class="nx">Set</span><span class="p">(</span><span class="s">&quot;Content-Type&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;application/json&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">req</span><span class="p">.</span><span class="nx">Header</span><span class="p">.</span><span class="nx">Set</span><span class="p">(</span><span class="s">&quot;Accept&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;application/json&quot;</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">resp</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">DefaultClient</span><span class="p">.</span><span class="nx">Do</span><span class="p">(</span><span class="nx">req</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">http</span><span class="p">.</span><span class="nx">Error</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;unable to connect to access_token endpoint&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">StatusInternalServerError</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">respbody</span><span class="p">,</span><span class="w"> </span><span class="nx">_</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">io</span><span class="p">.</span><span class="nx">ReadAll</span><span class="p">(</span><span class="nx">resp</span><span class="p">.</span><span class="nx">Body</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Represents the response received from Github</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">ghresp</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">AccessToken</span><span class="w"> </span><span class="kt">string</span><span class="w"> </span><span class="s">`json:&quot;access_token&quot;`</span><span class="w"></span>
+<span class="w">    </span><span class="nx">TokenType</span><span class="w">   </span><span class="kt">string</span><span class="w"> </span><span class="s">`json:&quot;token_type&quot;`</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Scope</span><span class="w">       </span><span class="kt">string</span><span class="w"> </span><span class="s">`json:&quot;scope&quot;`</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">json</span><span class="p">.</span><span class="nx">Unmarshal</span><span class="p">(</span><span class="nx">respbody</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">ghresp</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// {...}</span><span class="w"></span>
+</pre></div>
+<p>The function does just what it says on the box: after verifying the CSRF token,
+it provides the code it got from GitHub back to GitHub's OAuth access token
+endpoint, along with a secret shared only by the application and GitHub
+(it's in the app settings). In return it gets a token that can be used as
+a bearer token for HTTP auth when accessing the GitHub API on behalf of the
+logged-in user. Here's the rest of the code:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">githubCallbackHandler</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">r</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// {...}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Step 3: Use the access token to access the API</span><span class="w"></span>
+<span class="w">  </span><span class="c1">//</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// With the access token in hand, we can access the GitHub API on behalf</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// of the user. Since we didn&#39;t provide a scope, we only get access to</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// the user&#39;s public information.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">userInfo</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">getGitHubUserInfo</span><span class="p">(</span><span class="nx">ghresp</span><span class="p">.</span><span class="nx">AccessToken</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">w</span><span class="p">.</span><span class="nx">Header</span><span class="p">().</span><span class="nx">Set</span><span class="p">(</span><span class="s">&quot;Content-type&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;application/json&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprint</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nb">string</span><span class="p">(</span><span class="nx">userInfo</span><span class="p">))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="c1">// getGitHubUserInfo queries GitHub&#39;s user API for information about the</span><span class="w"></span>
+<span class="c1">// authorized user, given the access token received earlier.</span><span class="w"></span>
+<span class="kd">func</span><span class="w"> </span><span class="nx">getGitHubUserInfo</span><span class="p">(</span><span class="nx">accessToken</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="kt">string</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Query the GH API for user info</span><span class="w"></span>
+<span class="w">  </span><span class="nx">req</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">NewRequest</span><span class="p">(</span><span class="s">&quot;GET&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;https://api.github.com/user&quot;</span><span class="p">,</span><span class="w"> </span><span class="kc">nil</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nb">panic</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">req</span><span class="p">.</span><span class="nx">Header</span><span class="p">.</span><span class="nx">Set</span><span class="p">(</span><span class="s">&quot;Authorization&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Bearer &quot;</span><span class="o">+</span><span class="nx">accessToken</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">resp</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">DefaultClient</span><span class="p">.</span><span class="nx">Do</span><span class="p">(</span><span class="nx">req</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nb">panic</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">respbody</span><span class="p">,</span><span class="w"> </span><span class="nx">_</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">io</span><span class="p">.</span><span class="nx">ReadAll</span><span class="p">(</span><span class="nx">resp</span><span class="p">.</span><span class="nx">Body</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nb">string</span><span class="p">(</span><span class="nx">respbody</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The end result of this is dumping a JSON map with the logged-in user's
+information to output. This is just an example, of course. A real web
+application would now use the user's email as a unique ID to look up
+things in its own DB - it knows the user is authenticated now!</p>
+</div>
+<div class="section" id="sample-2-using-the-x-oauth2-package">
+<h2>Sample 2: using the x/oauth2 package</h2>
+<p><a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2023/go-github-login/using-x-oauth2-package">The second sample</a>
+uses the <a class="reference external" href="https://pkg.go.dev/golang.org/x/oauth2">golang.org/x/oauth2 package</a>
+to take care of some of the OAuth
+details instead of doing everything manually. Much of the code remains the same
+- I just want to highlight some places where <tt class="docutils literal">x/oauth2</tt> is used instead of
+writing code from scratch. First, we create a configuration struct in our
+<tt class="docutils literal">main</tt> function:</p>
+<div class="highlight"><pre><span></span><span class="nx">conf</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">oauth2</span><span class="p">.</span><span class="nx">Config</span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">ClientID</span><span class="p">:</span><span class="w">     </span><span class="nx">GithubClientID</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="nx">ClientSecret</span><span class="p">:</span><span class="w"> </span><span class="nx">GithubClientSecret</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="nx">Scopes</span><span class="p">:</span><span class="w">       </span><span class="p">[]</span><span class="kt">string</span><span class="p">{},</span><span class="w"></span>
+<span class="w">        </span><span class="nx">Endpoint</span><span class="p">:</span><span class="w">     </span><span class="nx">github</span><span class="p">.</span><span class="nx">Endpoint</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Here <tt class="docutils literal">github</tt> refers to the <a class="reference external" href="https://pkg.go.dev/golang.org/x/oauth2&#64;v0.15.0/github">x/oauth2/github subpackage</a>, which
+holds some constants useful for GitHub OAuth. Specifically, <tt class="docutils literal">github.Endpoint</tt>
+is an alias to:</p>
+<div class="highlight"><pre><span></span><span class="kd">var</span><span class="w"> </span><span class="nx">GitHub</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">oauth2</span><span class="p">.</span><span class="nx">Endpoint</span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">AuthURL</span><span class="p">:</span><span class="w">       </span><span class="s">&quot;https://github.com/login/oauth/authorize&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="nx">TokenURL</span><span class="p">:</span><span class="w">      </span><span class="s">&quot;https://github.com/login/oauth/access_token&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="nx">DeviceAuthURL</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;https://github.com/login/device/code&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>So our code needn't have these paths hard-coded.</p>
+<p>In <tt class="docutils literal">githubLoginHandler</tt>, we can use the <a class="reference external" href="https://pkg.go.dev/golang.org/x/oauth2#Config.AuthCodeURL">AuthCodeURL method</a> instead of
+constructing the URL manually.</p>
+<p>Finally, in <tt class="docutils literal">githubCallbackHandler</tt> we get help in two ways:</p>
+<div class="highlight"><pre><span></span><span class="nx">code</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Query</span><span class="p">().</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;code&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="nx">tok</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">lf</span><span class="p">.</span><span class="nx">conf</span><span class="p">.</span><span class="nx">Exchange</span><span class="p">(</span><span class="nx">context</span><span class="p">.</span><span class="nx">Background</span><span class="p">(),</span><span class="w"> </span><span class="nx">code</span><span class="p">)</span><span class="w"> </span><span class="c1">// 1: token exchange</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="c1">// This client will have a bearer token to access the GitHub API on</span><span class="w"></span>
+<span class="c1">// the user&#39;s behalf.</span><span class="w"></span>
+<span class="nx">client</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">lf</span><span class="p">.</span><span class="nx">conf</span><span class="p">.</span><span class="nx">Client</span><span class="p">(</span><span class="nx">context</span><span class="p">.</span><span class="nx">Background</span><span class="p">(),</span><span class="w"> </span><span class="nx">tok</span><span class="p">)</span><span class="w">     </span><span class="c1">// 2: client with token</span><span class="w"></span>
+<span class="nx">resp</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">Get</span><span class="p">(</span><span class="s">&quot;https://api.github.com/user&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nb">panic</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="nx">respbody</span><span class="p">,</span><span class="w"> </span><span class="nx">_</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">io</span><span class="p">.</span><span class="nx">ReadAll</span><span class="p">(</span><span class="nx">resp</span><span class="p">.</span><span class="nx">Body</span><span class="p">)</span><span class="w"></span>
+<span class="nx">userInfo</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nb">string</span><span class="p">(</span><span class="nx">respbody</span><span class="p">)</span><span class="w"></span>
+
+<span class="nx">w</span><span class="p">.</span><span class="nx">Header</span><span class="p">().</span><span class="nx">Set</span><span class="p">(</span><span class="s">&quot;Content-type&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;application/json&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprint</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nb">string</span><span class="p">(</span><span class="nx">userInfo</span><span class="p">))</span><span class="w"></span>
+</pre></div>
+<p>First, we can call <tt class="docutils literal">Exchange</tt> to ask <tt class="docutils literal">x/oauth2</tt> to perform the &quot;code for
+token&quot; exchange step. Second, we get an HTTP client with the bearer token
+already configured and don't have to do it manually. The resulting code is
+somewhat shorter and has fewer hard-coded operations, delegating some of the
+work to the <tt class="docutils literal">x/oauth2</tt> package.</p>
+</div>
+<div class="section" id="sample-3-using-the-gologin-package">
+<h2>Sample 3: using the gologin package</h2>
+<p>Finally, <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2023/go-github-login/using-gologin">our third sample</a>
+uses the third-party
+<a class="reference external" href="https://pkg.go.dev/github.com/dghubble/gologin">gologin package</a>.
+<tt class="docutils literal">gologin</tt> implements helpers for logging into various services like GitHub,
+Google and Twitter. It encapsulates even more functionality. Here's the
+relevant part of the <tt class="docutils literal">main</tt> function in this sample:</p>
+<div class="highlight"><pre><span></span><span class="nx">conf</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">oauth2</span><span class="p">.</span><span class="nx">Config</span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">ClientID</span><span class="p">:</span><span class="w">     </span><span class="nx">GithubClientID</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="nx">ClientSecret</span><span class="p">:</span><span class="w"> </span><span class="nx">GithubClientSecret</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="nx">Scopes</span><span class="p">:</span><span class="w">       </span><span class="p">[]</span><span class="kt">string</span><span class="p">{},</span><span class="w"></span>
+<span class="w">        </span><span class="nx">Endpoint</span><span class="p">:</span><span class="w">     </span><span class="nx">oauth2github</span><span class="p">.</span><span class="nx">Endpoint</span><span class="p">,</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="c1">// gologin has a default cookie configuration for debug deployments (no TLS).</span><span class="w"></span>
+<span class="nx">cookieConf</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">gologin</span><span class="p">.</span><span class="nx">DebugOnlyCookieConfig</span><span class="w"></span>
+<span class="nx">http</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">rootHandler</span><span class="p">)</span><span class="w"></span>
+
+<span class="nx">loginHandler</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">github</span><span class="p">.</span><span class="nx">LoginHandler</span><span class="p">(</span><span class="nx">conf</span><span class="p">,</span><span class="w"> </span><span class="kc">nil</span><span class="p">)</span><span class="w"></span>
+<span class="nx">http</span><span class="p">.</span><span class="nx">Handle</span><span class="p">(</span><span class="s">&quot;/login/&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">github</span><span class="p">.</span><span class="nx">StateHandler</span><span class="p">(</span><span class="nx">cookieConf</span><span class="p">,</span><span class="w"> </span><span class="nx">loginHandler</span><span class="p">))</span><span class="w"></span>
+
+<span class="nx">callbackHandler</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">github</span><span class="p">.</span><span class="nx">CallbackHandler</span><span class="p">(</span><span class="nx">conf</span><span class="p">,</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">HandlerFunc</span><span class="p">(</span><span class="nx">githubCallbackHandler</span><span class="p">),</span><span class="w"> </span><span class="kc">nil</span><span class="p">)</span><span class="w"></span>
+<span class="nx">http</span><span class="p">.</span><span class="nx">Handle</span><span class="p">(</span><span class="nx">callbackPath</span><span class="p">,</span><span class="w"> </span><span class="nx">github</span><span class="p">.</span><span class="nx">StateHandler</span><span class="p">(</span><span class="nx">cookieConf</span><span class="p">,</span><span class="w"> </span><span class="nx">callbackHandler</span><span class="p">))</span><span class="w"></span>
+</pre></div>
+<p><tt class="docutils literal">gologin</tt> relies upon the <tt class="docutils literal">x/oauth2</tt> package and uses its <tt class="docutils literal">Config</tt>. The
+rest of the code registers the HTTP handlers, and it has two interesting
+properties:</p>
+<ol class="arabic simple">
+<li><tt class="docutils literal">gologin</tt> handles the CSRF cookie management for us, using its
+<tt class="docutils literal">StateHandler</tt> middleware.</li>
+<li>It also handles the token exchange with GitHub automatically, by exposing
+a <tt class="docutils literal">CallbackHandler</tt> middleware that wraps our <tt class="docutils literal">githubCallbackHandler</tt>
+handler.</li>
+</ol>
+<p>Our handler gets user information through the request context:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">githubCallbackHandler</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">r</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ctx</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">Context</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">githubUser</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">github</span><span class="p">.</span><span class="nx">UserFromContext</span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">http</span><span class="p">.</span><span class="nx">Error</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">Error</span><span class="p">(),</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">StatusInternalServerError</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">w</span><span class="p">.</span><span class="nx">Header</span><span class="p">().</span><span class="nx">Set</span><span class="p">(</span><span class="s">&quot;Content-type&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;application/json&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">buf</span><span class="p">,</span><span class="w"> </span><span class="nx">_</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">json</span><span class="p">.</span><span class="nx">Marshal</span><span class="p">(</span><span class="nx">githubUser</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprint</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nb">string</span><span class="p">(</span><span class="nx">buf</span><span class="p">))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>That's about it! <tt class="docutils literal">gologin</tt> encapsulates the rest of the functionality through
+its middleware, enabling GitHub logins in only a handful of lines of code.</p>
+</div>
+<div class="section" id="which-approach-to-choose">
+<h2>Which approach to choose?</h2>
+<p>All the samples in this post accomplish the same goal - they let a web app
+delegate its user authentication to GitHub. The samples are presented in
+increasing level of encapsulation and external dependency - from a completely
+raw HTTP-based approach using only the stdlib, to using a package that does
+almost all the work for us.</p>
+<p>How to choose between these is a question every project may answer differently,
+based on their stage, resources and <a class="reference external" href="../../2017/benefits-of-dependencies-in-software-projects-as-a-function-of-effort/index.html">approach to dependencies</a>.
+I'd probably go for the second approach - using <tt class="docutils literal">x/oauth2</tt> - since it balances
+dependencies with utility.</p>
+<p>The <tt class="docutils literal">x/oauth2</tt> package is &quot;semi-official&quot;, maintained by some members of Go
+team and other Go users at Google, and it's helpful without being magical. That
+said, the <tt class="docutils literal">gologin</tt> package also looks pretty solid, so that could be a good
+option too if your tolerance to third-party dependencies is higher.</p>
+</div>
+<div class="section" id="code">
+<h2>Code</h2>
+<p>The full code for this post is available <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2023/go-github-login">on GitHub</a>.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>This is an artifact of using GitHub's authz flow for authn. Generally,
+this flow allows applications (think CI systems) to have broader access
+to the user's GitHub account in order to render some useful service
+to the user. In our case we only use the flow for authn, so all we need
+is &quot;basic account access&quot;, to know that the user indeed has valid access
+to a GitHub account and the public details of this account.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>Kudos to GitHub for the solid documentation they have on this topic.
+They also have a complete <a class="reference external" href="https://docs.github.com/en/apps/creating-github-apps/writing-code-for-a-github-app/building-a-login-with-github-button-with-a-github-app">sample in Ruby</a>
+which is similar to my Sample 1.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>This is a good time to admire the choice OAuth made to use redirects for
+this step. Consider the following questions: without redirects, how
+would you tell GitHub to dial to some arbitrary path on your <tt class="docutils literal">localhost</tt>?
+Also, without redirects how could this request use the user's browser
+cookies to enable easy storage of CSRF tokens?</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

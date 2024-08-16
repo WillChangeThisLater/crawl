@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Go compiler internals: adding a new statement to Go - Part 2 - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Go compiler internals: adding a new statement to Go - Part 2">
+                        Go compiler internals: adding a new statement to Go - Part 2
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> July 04, 2019 at 05:56</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/compilation.html">Compilation</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p><strong>Updated (2023-05-08):</strong> the Go compiler keeps evolving and it takes time to
+keep up with changes. While the general gist of this post remains true and it's
+worth reading to understand how the compiler works on a high level, the details
+of the modifications are slightly different now.</p>
+<p>To see up-do-date changes that work with the latest Go (in-development version
+1.21 at the time of this update), check out the <a class="reference external" href="https://github.com/eliben/go/tree/adduntil-121-part2">adduntil-121-part2 branch</a> from my GitHub fork of
+the Go repository. Diff it vs. the <tt class="docutils literal">master</tt> branch to see the full list of
+changes.</p>
+<hr class="docutils" />
+<p>This is the second post in a two-part series exploring the Go compiler. In
+<a class="reference external" href="../go-compiler-internals-adding-a-new-statement-to-go-part-1/index.html">part 1</a>,
+we added a new statement to the Go language by building a custom version of the
+compiler. To do this, we've covered the first five stages of the compiler per
+this diagram:</p>
+<img alt="Go gc compiler flow" class="align-center" src="../../images/2019/go-compiler-flow.png" />
+<p>We ended up implementing <tt class="docutils literal">until</tt> by <em>lowering</em> it to <tt class="docutils literal">for</tt> in the &quot;rewrite
+AST&quot; stage; specifically, in <tt class="docutils literal">walk/stmt.go</tt> where other, similar
+transformations are done before the compiler gets to SSA conversion and code
+generation.</p>
+<p>In this part, we'll cover the remaining stages of the compiler by handling the
+new <tt class="docutils literal">until</tt> statement later on in the compilation flow.</p>
+<div class="section" id="ssa">
+<h2>SSA</h2>
+<p>After <tt class="docutils literal">gc</tt> runs <tt class="docutils literal">walk</tt> transforms, it calls <tt class="docutils literal">Compile</tt> (in
+<tt class="docutils literal">ssagen/pgen.go</tt>) to convert the AST into a new intermediate representation
+(IR) that's in <a class="reference external" href="https://en.wikipedia.org/wiki/Static_single_assignment_form">static single assignment (SSA) form</a>.</p>
+<p>What does SSA mean, and why does the compiler do this? Let's start with the
+first question; I recommend reading the SSA wikipedia page linked above and
+additional resources, but here is a quick explanation.</p>
+<p>Static single assignment means that every variable assigned in the IR is only
+assigned once. Consider this pseudo-IR:</p>
+<div class="highlight"><pre><span></span>x = 1
+y = 7
+// do stuff with x and y
+x = y
+y = func()
+// do more stuff with x and y
+</pre></div>
+<p>This is not SSA, because the names <tt class="docutils literal">x</tt> and <tt class="docutils literal">y</tt> are assigned multiple times.
+If we convert this snippet to SSA, we may get something like:</p>
+<div class="highlight"><pre><span></span>x = 1
+y = 7
+// do stuff with x and y
+x_1 = y
+y_1 = func()
+// do more stuff with x_1 and y_1
+</pre></div>
+<p>Note how every assignment got a unique variable name. When <tt class="docutils literal">x</tt> got reassigned
+a different value, a new name <tt class="docutils literal">x_1</tt> was created instead. You may wonder how
+this works in the general case... what happens with code like this:</p>
+<div class="highlight"><pre><span></span>x = 1
+if condition: x = 2
+use(x)
+</pre></div>
+<p>If we simply rename the second assignment to <tt class="docutils literal">x_1 = 2</tt>, what will <tt class="docutils literal">use</tt>
+take? <tt class="docutils literal">x</tt> or <tt class="docutils literal">x_1</tt> or ...? To handle this important scenario, IRs in SSA
+form have special <em>phi</em> (originally <em>phony</em>) functions that select a value
+based on which code path it came from. It's going to look like this:</p>
+<img alt="CFG diagram for previous example showing phi node" class="align-center" src="../../images/2019/simple-ssa-phi.png" />
+<p>This <em>phi node</em> is used by the compiler to maintain SSA while analyzing and
+optimizing such IRs, and is replaced by actual machine code at a later stage.</p>
+<p>The <em>static</em> part of the SSA name plays a role similar to the one in <em>static
+typing</em>; it means the assignment for each name is unique
+when looking at the source code (at compile time, or <em>statically</em>), while it can
+happen multiple times at run-time. If the code sample shown above is in a loop,
+then the actual <tt class="docutils literal">x_1 = 2</tt> assignment can happen many times.</p>
+<p>Now that we have a basic idea of what SSA <em>is</em>, the next question is <em>why</em>.</p>
+<p>Optimizations are an important part of a compiler backend <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>, and backends
+are usually structured specifically to facilitate effective and efficient
+optimizations. Looking at this code snippet again:</p>
+<div class="highlight"><pre><span></span>x = 1
+if condition: x = 2
+use(x)
+</pre></div>
+<p>And suppose the compiler wants to run a very common optimization - <em>constant
+propagation</em>; that is, it wants to replace all uses of <tt class="docutils literal">x</tt> with 1 after
+the <tt class="docutils literal">x = 1</tt> assignment. How would it go about that? It can't just find all
+the references to <tt class="docutils literal">x</tt> following the assignment because <tt class="docutils literal">x</tt> can be rewritten
+to something else (as in our example).</p>
+<p>Consider this snippet:</p>
+<div class="highlight"><pre><span></span>z = x + y
+</pre></div>
+<p>In the general case, the compiler has to perform <em>data-flow analysis</em> to find:</p>
+<ol class="arabic simple">
+<li>Which definitions <tt class="docutils literal">x</tt> and <tt class="docutils literal">y</tt> refer to. This isn't easy in the presence
+of control flow, and requires <em>dominance</em> analysis.</li>
+<li>Where <tt class="docutils literal">z</tt> is used after this definition, which is similarly challenging.</li>
+</ol>
+<p>Such analysis is expensive to create and to maintain, both in terms of time and
+space. Moreover, it has to be rerun after every optimization (at least
+partially).</p>
+<p>SSA provides a great alternative. If <tt class="docutils literal">z = x + y</tt> is in SSA, we know
+immediately which definitions <tt class="docutils literal">x</tt> and <tt class="docutils literal">y</tt> refer to (there can only be one!),
+and we know immediately where <tt class="docutils literal">z</tt> is used (all references to <tt class="docutils literal">z</tt> following
+this statement). In SSA, the uses and definitions are encoded in the IR, and
+optimizations don't violate the invariant.</p>
+</div>
+<div class="section" id="ssa-in-the-go-compiler">
+<h2>SSA in the Go compiler</h2>
+<p>We move on to describe how SSA is constructed and used in the Go compiler. SSA
+was added Go <a class="reference external" href="https://blog.golang.org/go1.7">in release 1.7</a>. Much of its code
+lives in <tt class="docutils literal">ssa/</tt> and <tt class="docutils literal">ssagen/</tt> (recall that all these paths are relative to
+<tt class="docutils literal">src/cmd/internal/compile/</tt> in the Go source checkout). The <tt class="docutils literal">README</tt> file in
+the <tt class="docutils literal">ssa</tt> directory is a very useful explanation of the Go SSA - check it out!</p>
+<p>The Go SSA implementation also has some of the best compiler tooling I've seen
+(having worked on compilers for many years). By setting the <tt class="docutils literal">GOSSAFUNC</tt>
+environment variable, we get an HTML page with all the compilation stages and
+the IR after each, so we can easily detect which optimization goes awry
+if needed. An additional setting can draw the control-flow graph as SVG
+for every pass.</p>
+<p>Let's study the initial SSA created from AST for this code snippet:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">usefor</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">4</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">!(</span><span class="nx">i</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">i</span><span class="o">--</span><span class="w"></span>
+<span class="w">    </span><span class="nx">sayhi</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">sayhi</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;Hello, for!&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The reason I moved the printout to its own function is to make the result SSA
+cleaner. Compiling with <tt class="docutils literal"><span class="pre">-l</span></tt> to disable inlining, this leaves a tiny call
+for <tt class="docutils literal">sayhi()</tt> (whereas the call for <tt class="docutils literal">fmt.Printl</tt> generates much more code
+due to the constant string).</p>
+<p>The resulting SSA is:</p>
+<div class="highlight"><pre><span></span>b1:
+
+        v1 (?) = InitMem &lt;mem&gt;
+        v2 (?) = SP &lt;uintptr&gt;
+        v3 (?) = SB &lt;uintptr&gt;
+        v4 (?) = Const64 &lt;int&gt; [4] (i[int])
+        v6 (?) = Const64 &lt;int&gt; [0]
+        v9 (?) = Const64 &lt;int&gt; [1]
+    Plain → b2 (10)
+
+    b2: ← b1 b4
+
+        v5 (10) = Phi &lt;int&gt; v4 v10 (i[int])
+        v14 (14) = Phi &lt;mem&gt; v1 v12
+        v7 (10) = Eq64 &lt;bool&gt; v5 v6
+    If v7 → b5 b3 (unlikely) (10)
+
+    b3: ← b2
+
+        v8 (11) = Copy &lt;int&gt; v5 (i[int])
+        v10 (11) = Sub64 &lt;int&gt; v8 v9 (i[int])
+        v11 (12) = Copy &lt;mem&gt; v14
+        v12 (12) = StaticCall &lt;mem&gt; {&quot;&quot;.sayhi} v11
+    Plain → b4 (12)
+
+    b4: ← b3
+    Plain → b2 (10)
+
+    b5: ← b2
+
+        v13 (14) = Copy &lt;mem&gt; v14
+    Ret v13
+</pre></div>
+<p>The interesting pieces to note here are:</p>
+<ul class="simple">
+<li><tt class="docutils literal">bN</tt> are the basic blocks of the control-flow graph.</li>
+<li><tt class="docutils literal">Phi</tt> nodes are explicit. The most interesting one is the assignment
+to <tt class="docutils literal">v5</tt>. This is precisely the selector assigning into <tt class="docutils literal">i</tt>; one path
+comes from <tt class="docutils literal">v4</tt> (the initializer), another from <tt class="docutils literal">v10</tt> (the <tt class="docutils literal"><span class="pre">i--</span></tt>)
+inside the body loop.</li>
+<li>Ignore the nodes with <tt class="docutils literal">&lt;mem&gt;</tt> for the purpose of this exercise. Go has
+an interesting way to explicitly propagate memory state in its IR, and we
+don't deal with it in this post. See the aforementioned <tt class="docutils literal">README</tt> for more
+details, if interested.</li>
+</ul>
+<p>Incidentally, the kind of <tt class="docutils literal">for</tt> loop here is exactly what we'd like to
+transform our <tt class="docutils literal">until</tt> statements to.</p>
+</div>
+<div class="section" id="converting-until-ast-nodes-to-ssa">
+<h2>Converting <tt class="docutils literal">until</tt> AST nodes to SSA</h2>
+<p>As usual, our code will be modeled on the handling of <tt class="docutils literal">for</tt> statements.
+First, let's start by sketching how the control-flow graph should look for
+<tt class="docutils literal">until</tt> statements:</p>
+<img alt="CFG for until nodes" class="align-center" src="../../images/2019/until-cfg.png" />
+<p>Now we just have to build this CFG in code. Reminder: the new AST node type we
+added in <a class="reference external" href="../go-compiler-internals-adding-a-new-statement-to-go-part-1/index.html">part 1</a>
+is <tt class="docutils literal">OUNTIL</tt>. We'll add a new switch clause in the <tt class="docutils literal">state.stmt</tt> method in
+<tt class="docutils literal">ssagen/stmt.go</tt> to translate an AST node with the <tt class="docutils literal">OUNTIL</tt> op to SSA. The
+naming of blocks and comments should make following the code easy and provide
+correlation to the CFG shown above.</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="nx">ir</span><span class="p">.</span><span class="nx">OUNTIL</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// OUNTIL: until Ninit; Left { Nbody }</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// cond (Left); body (Nbody)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">n</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">n</span><span class="p">.(</span><span class="o">*</span><span class="nx">ir</span><span class="p">.</span><span class="nx">UntilStmt</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">bCond</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">f</span><span class="p">.</span><span class="nx">NewBlock</span><span class="p">(</span><span class="nx">ssa</span><span class="p">.</span><span class="nx">BlockPlain</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">bBody</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">f</span><span class="p">.</span><span class="nx">NewBlock</span><span class="p">(</span><span class="nx">ssa</span><span class="p">.</span><span class="nx">BlockPlain</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">bEnd</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">f</span><span class="p">.</span><span class="nx">NewBlock</span><span class="p">(</span><span class="nx">ssa</span><span class="p">.</span><span class="nx">BlockPlain</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">bBody</span><span class="p">.</span><span class="nx">Pos</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">n</span><span class="p">.</span><span class="nx">Pos</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// first, entry jump to the condition</span><span class="w"></span>
+<span class="w">  </span><span class="nx">b</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">endBlock</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">b</span><span class="p">.</span><span class="nx">AddEdgeTo</span><span class="p">(</span><span class="nx">bCond</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// generate code to test condition</span><span class="w"></span>
+<span class="w">  </span><span class="nx">s</span><span class="p">.</span><span class="nx">startBlock</span><span class="p">(</span><span class="nx">bCond</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">n</span><span class="p">.</span><span class="nx">Cond</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">s</span><span class="p">.</span><span class="nx">condBranch</span><span class="p">(</span><span class="nx">n</span><span class="p">.</span><span class="nx">Cond</span><span class="p">,</span><span class="w"> </span><span class="nx">bEnd</span><span class="p">,</span><span class="w"> </span><span class="nx">bBody</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">b</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">endBlock</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">b</span><span class="p">.</span><span class="nx">Kind</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">ssa</span><span class="p">.</span><span class="nx">BlockPlain</span><span class="w"></span>
+<span class="w">    </span><span class="nx">b</span><span class="p">.</span><span class="nx">AddEdgeTo</span><span class="p">(</span><span class="nx">bBody</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// set up for continue/break in body</span><span class="w"></span>
+<span class="w">  </span><span class="nx">prevContinue</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">continueTo</span><span class="w"></span>
+<span class="w">  </span><span class="nx">prevBreak</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">breakTo</span><span class="w"></span>
+<span class="w">  </span><span class="nx">s</span><span class="p">.</span><span class="nx">continueTo</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">bCond</span><span class="w"></span>
+<span class="w">  </span><span class="nx">s</span><span class="p">.</span><span class="nx">breakTo</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">bEnd</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">lab</span><span class="w"> </span><span class="o">*</span><span class="nx">ssaLabel</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">sym</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">n</span><span class="p">.</span><span class="nx">Label</span><span class="p">;</span><span class="w"> </span><span class="nx">sym</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// labeled until loop</span><span class="w"></span>
+<span class="w">    </span><span class="nx">lab</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">label</span><span class="p">(</span><span class="nx">sym</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">lab</span><span class="p">.</span><span class="nx">continueTarget</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">bCond</span><span class="w"></span>
+<span class="w">    </span><span class="nx">lab</span><span class="p">.</span><span class="nx">breakTarget</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">bEnd</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// generate body</span><span class="w"></span>
+<span class="w">  </span><span class="nx">s</span><span class="p">.</span><span class="nx">startBlock</span><span class="p">(</span><span class="nx">bBody</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">s</span><span class="p">.</span><span class="nx">stmtList</span><span class="p">(</span><span class="nx">n</span><span class="p">.</span><span class="nx">Body</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// tear down continue/break</span><span class="w"></span>
+<span class="w">  </span><span class="nx">s</span><span class="p">.</span><span class="nx">continueTo</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">prevContinue</span><span class="w"></span>
+<span class="w">  </span><span class="nx">s</span><span class="p">.</span><span class="nx">breakTo</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">prevBreak</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">lab</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">lab</span><span class="p">.</span><span class="nx">continueTarget</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="w">    </span><span class="nx">lab</span><span class="p">.</span><span class="nx">breakTarget</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// done with body, goto cond</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">b</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">s</span><span class="p">.</span><span class="nx">endBlock</span><span class="p">();</span><span class="w"> </span><span class="nx">b</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">b</span><span class="p">.</span><span class="nx">AddEdgeTo</span><span class="p">(</span><span class="nx">bCond</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">s</span><span class="p">.</span><span class="nx">startBlock</span><span class="p">(</span><span class="nx">bEnd</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>If you're wondering where <tt class="docutils literal">n.Init</tt> is handled - it's done before the
+<tt class="docutils literal">switch</tt>, uniformly for all node types.</p>
+<p>One more thing; we should remove the AST rewrite we've added to <tt class="docutils literal">walk/stmt.go</tt>
+to no longer rewrite <tt class="docutils literal">UntilStmt</tt> nodes to <tt class="docutils literal">ForStmt</tt>, since we've taught the
+SSA layer to handle <tt class="docutils literal">until</tt>s directly. <tt class="docutils literal">walkUntil</tt> thus becomes:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">walkUntil</span><span class="p">(</span><span class="nx">n</span><span class="w"> </span><span class="o">*</span><span class="nx">ir</span><span class="p">.</span><span class="nx">UntilStmt</span><span class="p">)</span><span class="w"> </span><span class="nx">ir</span><span class="p">.</span><span class="nx">Node</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">n</span><span class="p">.</span><span class="nx">Cond</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">init</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">ir</span><span class="p">.</span><span class="nx">TakeInit</span><span class="p">(</span><span class="nx">n</span><span class="p">.</span><span class="nx">Cond</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">walkStmtList</span><span class="p">(</span><span class="nx">init</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">n</span><span class="p">.</span><span class="nx">Cond</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">walkExpr</span><span class="p">(</span><span class="nx">n</span><span class="p">.</span><span class="nx">Cond</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">init</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">n</span><span class="p">.</span><span class="nx">Cond</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">ir</span><span class="p">.</span><span class="nx">InitExpr</span><span class="p">(</span><span class="nx">init</span><span class="p">,</span><span class="w"> </span><span class="nx">n</span><span class="p">.</span><span class="nx">Cond</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">walkStmtList</span><span class="p">(</span><span class="nx">n</span><span class="p">.</span><span class="nx">Body</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">n</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This is it! If we run the compiler - dumping the SSA as before - on this code:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">useuntil</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">4</span><span class="w"></span>
+<span class="w">  </span><span class="nx">until</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">i</span><span class="o">--</span><span class="w"></span>
+<span class="w">    </span><span class="nx">sayhi</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">sayhi</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;Hello, for!&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>We'll get SSA which is structurally equivalent to the one we had for the <tt class="docutils literal">for</tt>
+loop with a negated condition, as expected.</p>
+</div>
+<div class="section" id="ssa-transformations">
+<h2>SSA transformations</h2>
+<p>After the initial SSA is constructed, the compiler runs a long sequence of
+passes on the SSA IR to:</p>
+<ol class="arabic simple">
+<li>Perform optimizations</li>
+<li>Lower it to a form closer to machine code</li>
+</ol>
+<p>All the passes can be found in the <tt class="docutils literal">passes</tt> slice in <tt class="docutils literal">ssa/compile.go</tt>, and
+some constraints on the order in which they can be run in the <tt class="docutils literal">passOrder</tt>
+slice in the same file. The optimizations are fairly standard for modern
+compilers. Lowering consists of instruction selection for the specific
+architecture we're compiling, and register allocation.</p>
+<p>For additional details on these passes see the <a class="reference external" href="https://github.com/golang/go/blob/master/src/cmd/compile/internal/ssa/README.md">SSA README</a>
+and also <a class="reference external" href="https://quasilyte.dev/blog/post/go_ssa_rules/">this post</a>, which
+goes into interesting details of how SSA optimization rules are specified.</p>
+</div>
+<div class="section" id="generate-machine-code">
+<h2>Generate machine code</h2>
+<p>Finally, the compiler invokes <tt class="docutils literal">genssa</tt> (in <tt class="docutils literal">genssa/ssa.go</tt>) to emit machine
+code from the SSA IR. We don't have to modify any of this code because the SSA
+we've emitted for <tt class="docutils literal">until</tt> statements consists of building blocks that are
+used elsewhere in the compiler - we don't add new instruction types, etc.</p>
+<p>However, it's instructional to study the machine code generated for our
+<tt class="docutils literal">useuntil</tt> function. Go has <a class="reference external" href="https://golang.org/doc/asm">its own assembly syntax</a> with historical roots. I won't go into all the
+details here, but the following is an annotated (with <tt class="docutils literal"># comments</tt>) assembly
+dump which should be reasonably easy to follow. I've removed some directives
+for the garbage collector (<tt class="docutils literal">PCDATA</tt> and <tt class="docutils literal">FUNCDATA</tt>) to make the output
+smaller.</p>
+<div class="highlight"><pre><span></span>&quot;&quot;.useuntil STEXT size=76 args=0x0 locals=0x10
+  0x0000 00000 (useuntil.go:5)  TEXT  &quot;&quot;.useuntil(SB), ABIInternal, $16-0
+
+  # Function prologue
+
+  0x0000 00000 (useuntil.go:5)  MOVQ  (TLS), CX
+  0x0009 00009 (useuntil.go:5)  CMPQ  SP, 16(CX)
+  0x000d 00013 (useuntil.go:5)  JLS  69
+  0x000f 00015 (useuntil.go:5)  SUBQ  $16, SP
+  0x0013 00019 (useuntil.go:5)  MOVQ  BP, 8(SP)
+  0x0018 00024 (useuntil.go:5)  LEAQ  8(SP), BP
+
+  # AX will be used to hold &#39;i&#39;, the loop counter; it&#39;s initialized
+  # with the constant 4. Then, unconditional jump to the &#39;cond&#39; block.
+
+  0x001d 00029 (useuntil.go:5)  MOVL  $4, AX
+  0x0022 00034 (useuntil.go:7)  JMP  62
+
+  # The end block is here, it executes the function epilogue and returns.
+
+  0x0024 00036 (&lt;unknown line number&gt;)  MOVQ  8(SP), BP
+  0x0029 00041 (&lt;unknown line number&gt;)  ADDQ  $16, SP
+  0x002d 00045 (&lt;unknown line number&gt;)  RET
+
+  # This is the loop body. AX is saved on the stack, so as to
+  # avoid being clobbered by &quot;sayhi&quot; (this is the caller-saved
+  # calling convention). Then &quot;sayhi&quot; is called.
+
+  0x002e 00046 (useuntil.go:7)  MOVQ  AX, &quot;&quot;.i(SP)
+  0x0032 00050 (useuntil.go:9)  CALL  &quot;&quot;.sayhi(SB)
+
+  # Restore AX (i) from the stack and decrement it.
+
+  0x0037 00055 (useuntil.go:8)  MOVQ  &quot;&quot;.i(SP), AX
+  0x003b 00059 (useuntil.go:8)  DECQ  AX
+
+  # The cond block is here. AX == 0 is tested, and if it&#39;s true, jump to
+  # the end block. Otherwise, it jumps to the loop body.
+
+  0x003e 00062 (useuntil.go:7)  TESTQ  AX, AX
+  0x0041 00065 (useuntil.go:7)  JEQ  36
+  0x0043 00067 (useuntil.go:7)  JMP  46
+  0x0045 00069 (useuntil.go:7)  NOP
+  0x0045 00069 (useuntil.go:5)  CALL  runtime.morestack_noctxt(SB)
+  0x004a 00074 (useuntil.go:5)  JMP  0
+</pre></div>
+<p>You may have noticed that the &quot;cond&quot; block moved to the end of the function,
+which is not where it was originally in the SSA representation. What gives?</p>
+<p>The answer is the &quot;loop rotate&quot; pass that runs on SSA towards the very end.
+This pass reorders the blocks such that the body flows directly into the cond,
+avoiding an extra jump per iteration. See <tt class="docutils literal">ssa/looprotate.go</tt> for more details
+if you're interested.</p>
+</div>
+<div class="section" id="conclusion">
+<h2>Conclusion</h2>
+<p>That's it! In these two posts we've examined some of the internals of the Go
+compiler by implementing a new statement in two different ways. This is only
+the tip of the iceberg, of course, but I hope it provides a good starting point
+to begin exploring on your own.</p>
+<p>A final note: we've built a working compiler here, but none of the Go tooling
+will recognize the new <tt class="docutils literal">until</tt> keyword. Unfortunately, at this time the Go
+tooling uses a mostly different path for parsing Go code and doesn't share
+this code with the Go compiler itself. I'll write about processing Go code with
+tools in much more detail in future posts.</p>
+</div>
+<div class="section" id="appendix-reproducing-these-results">
+<h2>Appendix - reproducing these results</h2>
+<p>To reproduce the version of the Go toolchain we ended up with here, you can
+start from
+<a class="reference external" href="../go-compiler-internals-adding-a-new-statement-to-go-part-1/index.html">part 1</a>,
+and follow this post's code snippets. Or you could just grab the
+<a class="reference external" href="https://github.com/eliben/go/tree/adduntil-119-part2">adduntil-119-part2 branch from my fork</a>.</p>
+<p>To get the SSA for all the SSA and code generation passes in a single convenient
+HTML file, run the following after building the toolchain:</p>
+<div class="highlight"><pre><span></span>GOSSAFUNC=useuntil &lt;src checkout&gt;/bin/go tool compile -l useuntil.go
+</pre></div>
+<p>And open <tt class="docutils literal">ssa.html</tt> in your browser. If you also want to see the CFG for
+some pass, add the pass name after the function name, separated by <tt class="docutils literal">:</tt>; for
+example <tt class="docutils literal">GOSSAFUNC=useuntil:number_lines</tt>.</p>
+<p>To get the machine code dump, run:</p>
+<div class="highlight"><pre><span></span>&lt;src checkout&gt;/bin/go tool compile -l -S useuntil.go
+</pre></div>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td><p class="first">I specifically try to avoid saying &quot;frontend&quot; and &quot;backend&quot; too much
+in these posts. These terms are
+overloaded and imprecise, but usually the frontent is everything that
+happens until the AST is constructed, while the backend is the stages
+that work on representations closer to the machine than to the original
+language. This leaves a lot of place in the middle, of course, and
+<em>middle-end</em> is also widely used (though nonsensical) to describe
+everything that happens in-between.</p>
+<p>In large and complex compilers you'll hear about &quot;the backend of the
+frontend&quot; and &quot;the frontend of the backend&quot; and similar mashups with
+&quot;middle&quot;.</p>
+<p class="last">In Go the situation isn't very bad and the boundary is reasonably clearly
+deliniated. The AST is syntactically close to the input language while
+the SSA is not. The conversion from AST to SSA is a good line to
+draw as the front/back split of the Go compiler.</p>
+</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label">[2]</td><td><tt class="docutils literal"><span class="pre">-S</span></tt> tells the compiler to dump assembly source to stdout; <tt class="docutils literal"><span class="pre">-l</span></tt>
+disables inlining, which would obscure the main loop a bit by inlining
+the <tt class="docutils literal">fmt.Println</tt> call.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Adventures in parsing C: ASTs for switch statements - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="adventures-in-parsing-c-asts-for-switch-statements.html"
+                       rel="bookmark"
+                       title="Permalink to Adventures in parsing C: ASTs for switch statements">
+                        Adventures in parsing C: ASTs for switch statements
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> February 03, 2012 at 16:02</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../../tag/compilation.html">Compilation</a>
+        ,
+    <a href="../../../tag/python.html">Python</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>Last week I received an email from a user of <a class="reference external" href="https://github.com/eliben/pycparser/">pycparser</a> that mentioned the strange AST that results when pycparser parses a <tt class="docutils literal">switch</tt> statement.</p>
+<p>Let's take the following snippet of C code for example. Don't look for semantic sense in it - it's just used to test the parser:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">switch</span> (myvar) {
+    <span style="color: #00007f; font-weight: bold">case</span> <span style="color: #007f7f">10</span>:
+        k = <span style="color: #007f7f">10</span>;
+        p = k + <span style="color: #007f7f">1</span>;
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">10</span>;
+    <span style="color: #00007f; font-weight: bold">case</span> <span style="color: #007f7f">20</span>:
+    <span style="color: #00007f; font-weight: bold">case</span> <span style="color: #007f7f">30</span>:
+        <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">20</span>;
+    default:
+        <span style="color: #00007f; font-weight: bold">break</span>;
+}
+</pre></div>
+<p>And the AST pycparser was generating for this code:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">Switch:
+  ID: myvar
+  Compound:
+    Case:
+      Constant: int, 10
+      Assignment: =
+        ID: k
+        Constant: int, 10
+    Assignment: =
+      ID: p
+      BinaryOp: +
+        ID: k
+        Constant: int, 1
+    Return:
+      Constant: int, 10
+    Case:
+      Constant: int, 20
+      Case:
+        Constant: int, 30
+        Return:
+          Constant: int, 20
+    Default:
+      Break:
+</pre></div>
+<p>There are two problems here:</p>
+<ol class="arabic simple">
+<li>Only the first statement inside each <tt class="docutils literal">case</tt> is made a child of that <tt class="docutils literal">case</tt> - the other statements are siblings.</li>
+<li>Two consecutive <tt class="docutils literal">case</tt> statements without any other statements in between (fall-through) cause the second <tt class="docutils literal">case</tt> to become the child of the first one. If additional consecutive <tt class="docutils literal">case</tt> statements follow, they nest even further.</li>
+</ol>
+<p>Since the parser follows the C grammar pretty closely, I immediately went to look into the C99 standard, and indeed, this is exactly the parse tree that it mandates. Here's the relevant portion of the language grammar (from section A.2.3):</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">(6.8) statement:
+              labeled-statement
+              compound-statement
+              expression-statement
+              selection-statement
+              iteration-statement
+              jump-statement
+(6.8.1) labeled-statement:
+              identifier : statement
+              case constant-expression : statement
+              default : statement
+</pre></div>
+<p>Note that a <tt class="docutils literal">case</tt> (and <tt class="docutils literal">default</tt>, which is equivalent to <tt class="docutils literal">case</tt> in this whole discussion) must be followed by one, and only one other <em>statement</em>. This explains why pycparser parses the code above the way it does.</p>
+<p>However, the goal of pycparser is not to generate a parse tree. It is to generate an <em>abstract syntax tree</em> (AST), which follows the language semantics rather than its grammar. Hey, <a class="reference external" href="../../../2009/02/16/abstract-vs-concrete-syntax-trees/index.html">I already wrote about this stuff!</a></p>
+<p>So today I fixed this part of pycparser, by adding a dedicated AST transformation after parsing a <tt class="docutils literal">switch</tt> statement. The transformation isn't really complicated, and the AST pycparser generates now is much friendlier. Here it is, for the same code:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">Switch:
+  ID: myvar
+  Compound:
+    Case:
+      Constant: int, 10
+      Assignment: =
+        ID: k
+        Constant: int, 10
+      Assignment: =
+        ID: p
+        BinaryOp: +
+          ID: k
+          Constant: int, 1
+      Return:
+        Constant: int, 10
+    Case:
+      Constant: int, 20
+    Case:
+      Constant: int, 30
+      Return:
+        Constant: int, 20
+    Default:
+      Break:
+</pre></div>
+<p>As you can see, the problems mentioned above were fixed. This fix is available in the pycparser repo, and will be part of the next release.</p>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="adventures-in-parsing-c-asts-for-switch-statements.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

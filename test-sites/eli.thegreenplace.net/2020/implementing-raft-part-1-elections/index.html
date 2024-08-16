@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Implementing Raft: Part 1 - Elections - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Implementing Raft: Part 1 - Elections">
+                        Implementing Raft: Part 1 - Elections
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> February 24, 2020 at 05:16</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/concurrency.html">Concurrency</a>
+        ,
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/network-programming.html">Network Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This is Part 1 in a series of posts describing the Raft distributed consensus
+algorithm and its complete implementation in Go. Here is a list of
+posts in the series:</p>
+<ul class="simple">
+<li><a class="reference external" href="../implementing-raft-part-0-introduction/index.html">Part 0: Introduction</a></li>
+<li>Part 1: Elections (this post)</li>
+<li><a class="reference external" href="../implementing-raft-part-2-commands-and-log-replication/index.html">Part 2: Commands and log replication</a></li>
+<li><a class="reference external" href="../implementing-raft-part-3-persistence-and-optimizations/index.html">Part 3: Persistence and optimizations</a></li>
+</ul>
+<p>In this part, I'm going to explain the general structure of our Raft
+implementation and focus on the <em>leader election</em> facet of the algorithm. The
+<a class="reference external" href="https://github.com/eliben/raft/tree/main/part1">code for this part</a>
+includes a fully functional test harness with some tests you can run to
+experiment with the system. It doesn't answer client requests though, and it
+doesn't maintain a log; all of that will be added in part 2.</p>
+<div class="section" id="code-structure">
+<h2>Code structure</h2>
+<p>A few words on how the Raft implementation is structured; this
+applies to all parts in the series.</p>
+<p>Typically, Raft is implemented as an object you embed into some service. Since
+we're not actually developing a service here, but only studying Raft itself,
+I've created a simple <tt class="docutils literal">Server</tt> type that wraps a <tt class="docutils literal">ConsensusModule</tt> type to
+isolate the interesting parts of the code as much as possible:</p>
+<img alt="Architecture of a consensus module embedded into a server" class="align-center" src="../../images/2020/server-cm-architecture.png" />
+<p>The consensus module (CM) implements the heart of the Raft algorithm, and is in
+file <tt class="docutils literal">raft.go</tt>. It's completely abstracted away from the details of networking
+and connections to other replicas in the cluster. The only fields in
+<tt class="docutils literal">ConsensusModule</tt> relevant to networking are:</p>
+<div class="highlight"><pre><span></span><span class="c1">// id is the server ID of this CM.</span><span class="w"></span>
+<span class="nx">id</span><span class="w"> </span><span class="kt">int</span><span class="w"></span>
+
+<span class="c1">// peerIds lists the IDs of our peers in the cluster.</span><span class="w"></span>
+<span class="nx">peerIds</span><span class="w"> </span><span class="p">[]</span><span class="kt">int</span><span class="w"></span>
+
+<span class="c1">// server is the server containing this CM. It&#39;s used to issue RPC calls</span><span class="w"></span>
+<span class="c1">// to peers.</span><span class="w"></span>
+<span class="nx">server</span><span class="w"> </span><span class="o">*</span><span class="nx">Server</span><span class="w"></span>
+</pre></div>
+<p>In the implementation, each Raft replica calls the other replicas in the cluster
+its &quot;peers&quot;. Each peer in the cluster has a unique numeric ID, and a list of
+IDs of all its peers. The <tt class="docutils literal">server</tt> field is a pointer to the containing
+<tt class="docutils literal">Server</tt> (implemented in <tt class="docutils literal">server.go</tt>), which enables <tt class="docutils literal">ConsensusModule</tt>
+to send messages to peers. We'll see how it's done later on.</p>
+<p>The goal of this design is to leave all the networking details out of the
+picture, focusing on the Raft algorithm. In general, to map the Raft paper onto
+this implementation all you need is the <tt class="docutils literal">ConsensusModule</tt> type and its
+methods. The <tt class="docutils literal">Server</tt> code is a fairly straightforward Go networking scaffold,
+with some minor intricacies to enable rigorous testing. I won't spend time on it
+in this series, but feel free to ask questions if something is not clear about
+it.</p>
+</div>
+<div class="section" id="raft-server-states">
+<h2>Raft server states</h2>
+<p>On a high level, a Raft CM is a state machine with 3 states <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>:</p>
+<img alt="Raft high level state machine (Figure 4 from Raft paper)" class="align-center" src="../../images/2020/raft-highlevel-state-machine.png" />
+<p>This can be a little confusing since <a class="reference external" href="../implementing-raft-part-0-introduction/index.html">part 0</a>
+spent a lot of time explaining how Raft helps <em>implement</em> state machines; as is
+often the case, the term <em>state</em> is overloaded here. Raft is an algorithm for
+implementing arbitrary replicated state machines, but Raft also has a small
+state machine inside it. Going forward, which state is meant where should be
+clear from context - and I'll make sure to point it out when it isn't.</p>
+<p>In a typical steady-state scenario, one server in a cluster is a leader, while
+all the others are followers. While we'd like things to continue this way
+forever, the goal of Raft is to be fault tolerant, so we're going to spend most
+of our time discussing atypical, <em>failure scenarios</em>, where some servers crash,
+others get disconnected, etc.</p>
+<p>As was mentioned before, Raft uses a <em>strong leadership</em> model. The leader
+answers client requests, adds new entries to the log and replicates them to
+followers. Every follower is always ready to take over leadership in case the
+leader fails or stops communicating. This is the &quot;times out, start election&quot;
+transition from Follower to Candidate in the diagram.</p>
+</div>
+<div class="section" id="terms">
+<h2>Terms</h2>
+<p>Just like in regular elections, those in Raft have <em>terms</em>. A term is the period
+of time for which a certain server is a leader. A new election triggers a new
+term, and the Raft algorithm ensures that a given term has a single leader.</p>
+<p>The analogy shouldn't be taken too far, however, since Raft elections are very
+different from real elections. In Raft, the elections are much more cooperative;
+the goal of a candidate is not to win election at all costs - all candidates
+share the goal of having <em>some</em> suitable server win the election in any given
+term. We'll talk more about what &quot;suitable&quot; means here shortly.</p>
+</div>
+<div class="section" id="election-timer">
+<h2>Election timer</h2>
+<p>A key building block of the Raft algorithm is the <em>election timer</em>. This is the
+timer every follower runs continuously, restarting it every time it hears from
+the current leader. The leader is sending periodic heartbeats, so when these
+stop arriving a follower assumes that the leader has crashed or got
+disconnected, and starts an election (switches to the Candidate state).</p>
+<p><strong>Q:</strong> Wouldn't all followers become candidates simultaneously?</p>
+<p><strong>A:</strong> The election timer is randomized, and this is one of the keys to Raft's
+simplicity. Raft uses this randomization to lower the chance of multiple
+followers running elections simultaneously. But even if they do become candidates
+at the same time, only one will be elected as a leader for any given term. In
+rare cases where the vote becomes <em>split</em> such that no candidate can win, a new
+election (with a new term) will run. While it's theoretically possible to re-run
+elections forever, the chance of this happening gets much lower with each
+election round.</p>
+<p><strong>Q:</strong> What if a follower gets disconnected (partitioned) from the cluster?
+Won't it start an election because it doesn't hear from a leader?</p>
+<p><strong>A:</strong> This is the insidiousness of network partitions, because the follower has
+no way of distinguishing who is partitioned. Yes, it will start an election. But
+if it's this follower that has been disconnected, this election will simply go
+nowhere - since it can't contact the other peers, it won't get any votes. It
+will likely keep spinning in the candidate state (restarting a new election
+every once in a while) until it reconnects to the cluster. We'll study this
+scenario in more detail later on.</p>
+</div>
+<div class="section" id="inter-peer-rpcs">
+<h2>Inter-peer RPCs</h2>
+<p>Raft has two kinds of RPCs peers send each other. For detailed arguments and
+rules for these RPCs please see Figure 2 in the paper. I will briefly discuss
+their goals:</p>
+<ul class="simple">
+<li><tt class="docutils literal">RequestVotes</tt> (RV): used only in the candidate state; candidates use it
+to request votes from peers in an election. The reply contains an indication
+of whether a vote is granted.</li>
+<li><tt class="docutils literal">AppendEntries</tt> (AE): used only in the leader state; leaders use this RPC
+to replicate log entries to followers, but also to send heartbeats. This RPC
+is periodically sent to each follower even if there are no new log entries to
+replicate.</li>
+</ul>
+<p>Diligent readers will infer from the above that followers don't send any RPCs.
+This is correct; followers don't initiate RPCs to peers, but they have an
+election timer running in the background. If this timer elapses without hearing
+from a current leader, the follower becomes a candidate and starts sending RVs.</p>
+</div>
+<div class="section" id="implementing-the-election-timer">
+<h2>Implementing the election timer</h2>
+<p>It's time to dive into the code. Unless stated otherwise, all the code
+samples shown below are taken from <a class="reference external" href="https://github.com/eliben/raft/blob/main/part1/raft.go">this file</a>. I won't provide a
+full listing of the fields of the <tt class="docutils literal">ConsensusModule</tt> struct - you can see it in
+that file.</p>
+<p>Our CM implements the election timer by running the following function in a
+goroutine:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">cm</span><span class="w"> </span><span class="o">*</span><span class="nx">ConsensusModule</span><span class="p">)</span><span class="w"> </span><span class="nx">runElectionTimer</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">timeoutDuration</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">electionTimeout</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">termStarted</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">currentTerm</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;election timer started (%v), term=%d&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">timeoutDuration</span><span class="p">,</span><span class="w"> </span><span class="nx">termStarted</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// This loops until either:</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// - we discover the election timer is no longer needed, or</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// - the election timer expires and this CM becomes a candidate</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// In a follower, this typically keeps running in the background for the</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// duration of the CM&#39;s lifetime.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ticker</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">NewTicker</span><span class="p">(</span><span class="mi">10</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Millisecond</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">ticker</span><span class="p">.</span><span class="nx">Stop</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="o">&lt;-</span><span class="nx">ticker</span><span class="p">.</span><span class="nx">C</span><span class="w"></span>
+
+<span class="w">    </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nx">Candidate</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nx">Follower</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;in election timer state=%s, bailing out&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">state</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">termStarted</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">currentTerm</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;in election timer term changed from %d to %d, bailing out&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">termStarted</span><span class="p">,</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">currentTerm</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// Start an election if we haven&#39;t heard from a leader or haven&#39;t voted for</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// someone for the duration of the timeout.</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">elapsed</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Since</span><span class="p">(</span><span class="nx">cm</span><span class="p">.</span><span class="nx">electionResetEvent</span><span class="p">);</span><span class="w"> </span><span class="nx">elapsed</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="nx">timeoutDuration</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">cm</span><span class="p">.</span><span class="nx">startElection</span><span class="p">()</span><span class="w"></span>
+<span class="w">      </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It begins by selecting a pseudo-random election timeout, by calling
+<tt class="docutils literal">cm.electionTimeout</tt>. The range we're using here is from 150 to 300
+milliseconds, as suggested in the paper. As most methods of <tt class="docutils literal">ConsensusModule</tt>,
+<tt class="docutils literal">runElectionTimer</tt> locks the struct while accessing fields. This is essential
+because the implementation tries to be as synchronous as possible, which is
+one of Go's strengths. This means that sequential code is... sequential, and not
+split across multiple event handlers. RPCs still happen concurrently, though, so
+we have to protect the shared data structure. We'll get to the RPC handlers
+soon.</p>
+<p>The main loop in this method runs a ticker for 10 ms. There are more efficient
+ways of waiting for events, but this idiom results in the simplest code. Each
+loop iteration happens after the next 10 ms have elapsed. Theoretically this
+could sleep for the whole election timeout, but then it would be less responsive
+and somewhat harder to debug/follow in logs. We check if the state is still as
+expected <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a> and the term hasn't changed. If anything is off, we terminate the
+election timer.</p>
+<p>If enough time has passed since the last &quot;election reset event&quot;, this peer
+starts an election and becomes a candidate. What is this election reset event?
+It's any of the things that can terminate an election - for example, a valid
+heartbeat was received, or a vote given to another candidate. We'll see this
+code shortly.</p>
+</div>
+<div class="section" id="becoming-a-candidate">
+<h2>Becoming a candidate</h2>
+<p>We've seen above that once enough time has passed without the follower hearing
+from a leader or another candidate, it starts an election. Before looking at the
+code, let's think about the things we need to run an election:</p>
+<ol class="arabic simple">
+<li>Switch the state to candidate and increment the term, because
+that's what the algorithm dictates for every election.</li>
+<li>Send RV RPCs to all peers, asking them to vote for us in this
+election.</li>
+<li>Wait for replies to these RPCs and count if we got enough votes to become
+a leader.</li>
+</ol>
+<p>In Go all of this logic can be collected into a single function:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">cm</span><span class="w"> </span><span class="o">*</span><span class="nx">ConsensusModule</span><span class="p">)</span><span class="w"> </span><span class="nx">startElection</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">Candidate</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">currentTerm</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+<span class="w">  </span><span class="nx">savedCurrentTerm</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">currentTerm</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">electionResetEvent</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Now</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">votedFor</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">id</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;becomes Candidate (currentTerm=%d); log=%v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">savedCurrentTerm</span><span class="p">,</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">log</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">votesReceived</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Send RequestVote RPCs to all other servers concurrently.</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">peerId</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">peerIds</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">go</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">peerId</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">args</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">RequestVoteArgs</span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">Term</span><span class="p">:</span><span class="w">        </span><span class="nx">savedCurrentTerm</span><span class="p">,</span><span class="w"></span>
+<span class="w">        </span><span class="nx">CandidateId</span><span class="p">:</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="kd">var</span><span class="w"> </span><span class="nx">reply</span><span class="w"> </span><span class="nx">RequestVoteReply</span><span class="w"></span>
+
+<span class="w">      </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;sending RequestVote to %d: %+v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">peerId</span><span class="p">,</span><span class="w"> </span><span class="nx">args</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">server</span><span class="p">.</span><span class="nx">Call</span><span class="p">(</span><span class="nx">peerId</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;ConsensusModule.RequestVote&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">args</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">reply</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">        </span><span class="k">defer</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="w">        </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;received RequestVoteReply %+v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">reply</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nx">Candidate</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;while waiting for reply, state = %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">state</span><span class="p">)</span><span class="w"></span>
+<span class="w">          </span><span class="k">return</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="nx">reply</span><span class="p">.</span><span class="nx">Term</span><span class="w"> </span><span class="p">&gt;</span><span class="w"> </span><span class="nx">savedCurrentTerm</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;term out of date in RequestVoteReply&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">          </span><span class="nx">cm</span><span class="p">.</span><span class="nx">becomeFollower</span><span class="p">(</span><span class="nx">reply</span><span class="p">.</span><span class="nx">Term</span><span class="p">)</span><span class="w"></span>
+<span class="w">          </span><span class="k">return</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="nx">reply</span><span class="p">.</span><span class="nx">Term</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nx">savedCurrentTerm</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="k">if</span><span class="w"> </span><span class="nx">reply</span><span class="p">.</span><span class="nx">VoteGranted</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="nx">votesReceived</span><span class="o">++</span><span class="w"></span>
+<span class="w">            </span><span class="k">if</span><span class="w"> </span><span class="nx">votesReceived</span><span class="o">*</span><span class="mi">2</span><span class="w"> </span><span class="p">&gt;</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">cm</span><span class="p">.</span><span class="nx">peerIds</span><span class="p">)</span><span class="o">+</span><span class="mi">1</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">              </span><span class="c1">// Won the election!</span><span class="w"></span>
+<span class="w">              </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;wins election with %d votes&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">votesReceived</span><span class="p">)</span><span class="w"></span>
+<span class="w">              </span><span class="nx">cm</span><span class="p">.</span><span class="nx">startLeader</span><span class="p">()</span><span class="w"></span>
+<span class="w">              </span><span class="k">return</span><span class="w"></span>
+<span class="w">            </span><span class="p">}</span><span class="w"></span>
+<span class="w">          </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}(</span><span class="nx">peerId</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Run another election timer, in case this election is not successful.</span><span class="w"></span>
+<span class="w">  </span><span class="k">go</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">runElectionTimer</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The candidate starts by voting for itself - initializing <tt class="docutils literal">votesReceived</tt> to
+1 and setting <tt class="docutils literal">cm.votedFor = cm.id</tt>.</p>
+<p>It then issues RPCs in parallel to all its peers. Each RPC is done in its own
+goroutine, because our RPC calls are synchronous - they block until a response
+is received, which can take a while.</p>
+<p>This is a good place to demonstrate how RPCs are done:</p>
+<div class="highlight"><pre><span></span><span class="nx">cm</span><span class="p">.</span><span class="nx">server</span><span class="p">.</span><span class="nx">Call</span><span class="p">(</span><span class="nx">peer</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;ConsensusModule.RequestVote&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">args</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">reply</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>We use the <tt class="docutils literal">Server</tt> pointer contained in the <tt class="docutils literal">ConsensusModule.server</tt> field
+to issue a remote call, with <tt class="docutils literal">ConsensusModule.RequestVotes</tt> as the remote
+method name. This ends up calling the <tt class="docutils literal">RequestVote</tt> method of the peer given
+in the first argument.</p>
+<p>If the RPC succeeds, some time has passed so we have to check the state to see
+what our options are. If our state is no longer candidate, bail out. When
+can this happen? For example, we might have won the election because there were
+enough votes in the other RPC calls. Or one of the other RPC calls heard from a
+server with a higher term, so we switched back to be a follower. It's important
+to remember that in case of a flaky network, the RPC can take a long while to
+arrive - when we have the reply, the rest of the code may have moved on and it's
+important to gracefully give up in such cases.</p>
+<p>If we're still a candidate when the reply is back, we check the term of the
+reply and compare it to the original term we were on when we sent the request.
+If the reply's term is higher, we revert to a follower state. This can happen if
+another candidate won an election while we were collecting votes, for example.</p>
+<p>If the term is the same as the one we sent out, check if a vote was granted. If
+this server has the majority of the votes (including the vote it granted
+itself), it becomes a leader.</p>
+<p>Note that the <tt class="docutils literal">startElection</tt> method is not blocking. It updates some state,
+launches a bunch of goroutines and returns. Therefore, it should also start
+a new election counter in a goroutine - which it does on the last line. This
+ensures that if nothing useful comes out of <em>this</em> election, a new one will
+begin after the usual timeout. This also explains the state checks in
+<tt class="docutils literal">runElectionTimer</tt>: if this election <em>does</em> turn the peer into a leader,
+the concurrent <tt class="docutils literal">runElectionTimer</tt> will just return when observing a state it
+didn't expect to be in.</p>
+</div>
+<div class="section" id="becoming-a-leader">
+<h2>Becoming a leader</h2>
+<p>We've seen the <tt class="docutils literal">startLeader</tt> call in <tt class="docutils literal">startElection</tt> when the vote tally
+shows this peer has won. Here it is:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">cm</span><span class="w"> </span><span class="o">*</span><span class="nx">ConsensusModule</span><span class="p">)</span><span class="w"> </span><span class="nx">startLeader</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">Leader</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;becomes Leader; term=%d, log=%v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">currentTerm</span><span class="p">,</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">log</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">go</span><span class="w"> </span><span class="kd">func</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">ticker</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">NewTicker</span><span class="p">(</span><span class="mi">50</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Millisecond</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="nx">ticker</span><span class="p">.</span><span class="nx">Stop</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// Send periodic heartbeats, as long as still leader.</span><span class="w"></span>
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">cm</span><span class="p">.</span><span class="nx">leaderSendHeartbeats</span><span class="p">()</span><span class="w"></span>
+<span class="w">      </span><span class="o">&lt;-</span><span class="nx">ticker</span><span class="p">.</span><span class="nx">C</span><span class="w"></span>
+
+<span class="w">      </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nx">Leader</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="w">        </span><span class="k">return</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This is actually a fairly simple method: all it does is run the <em>heartbeat</em>
+ticker - a goroutine that calls <tt class="docutils literal">leaderSendHeartbeats</tt> every 50 ms, as long
+as this CM is still the leader. This is the code for <tt class="docutils literal">leaderSendHeartbeats</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">cm</span><span class="w"> </span><span class="o">*</span><span class="nx">ConsensusModule</span><span class="p">)</span><span class="w"> </span><span class="nx">leaderSendHeartbeats</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">savedCurrentTerm</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">currentTerm</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">peerId</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">peerIds</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">args</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">AppendEntriesArgs</span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">Term</span><span class="p">:</span><span class="w">     </span><span class="nx">savedCurrentTerm</span><span class="p">,</span><span class="w"></span>
+<span class="w">      </span><span class="nx">LeaderId</span><span class="p">:</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">id</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="k">go</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">peerId</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;sending AppendEntries to %v: ni=%d, args=%+v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">peerId</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="nx">args</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="kd">var</span><span class="w"> </span><span class="nx">reply</span><span class="w"> </span><span class="nx">AppendEntriesReply</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">server</span><span class="p">.</span><span class="nx">Call</span><span class="p">(</span><span class="nx">peerId</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;ConsensusModule.AppendEntries&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">args</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">reply</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">        </span><span class="k">defer</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="nx">reply</span><span class="p">.</span><span class="nx">Term</span><span class="w"> </span><span class="p">&gt;</span><span class="w"> </span><span class="nx">savedCurrentTerm</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;term out of date in heartbeat reply&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">          </span><span class="nx">cm</span><span class="p">.</span><span class="nx">becomeFollower</span><span class="p">(</span><span class="nx">reply</span><span class="p">.</span><span class="nx">Term</span><span class="p">)</span><span class="w"></span>
+<span class="w">          </span><span class="k">return</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}(</span><span class="nx">peerId</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It's somewhat similar to <tt class="docutils literal">startElection</tt>, in the sense that it launches a
+goroutine per peer to send an RPC. This time the RPC is <tt class="docutils literal">AppendEntries</tt> (AE)
+with no log contents, which plays the role of a heartbeat in Raft.</p>
+<p>Similarly to processing a RV reply, if the RPC returns a term higher than our
+own, this peer switches to become a follower. It's time to examine the
+<tt class="docutils literal">becomeFollower</tt> method:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">cm</span><span class="w"> </span><span class="o">*</span><span class="nx">ConsensusModule</span><span class="p">)</span><span class="w"> </span><span class="nx">becomeFollower</span><span class="p">(</span><span class="nx">term</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;becomes Follower with term=%d; log=%v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">term</span><span class="p">,</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">log</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">Follower</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">currentTerm</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">term</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">votedFor</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="o">-</span><span class="mi">1</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">electionResetEvent</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Now</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">go</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">runElectionTimer</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It sets the CM's state to follower and resets its term and other
+important state fields. It also starts a new election timer, since this is
+something a follower should always have running in the background.</p>
+</div>
+<div class="section" id="answering-rpcs">
+<h2>Answering RPCs</h2>
+<p>So far we've seen the <em>active</em> parts of the implementation - the parts that
+initiate RPCs, timers and state transitions. The presentation is not complete
+before we see the server methods - procedures which other peers invoke remotely.
+Let's start with <tt class="docutils literal">RequestVote</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">cm</span><span class="w"> </span><span class="o">*</span><span class="nx">ConsensusModule</span><span class="p">)</span><span class="w"> </span><span class="nx">RequestVote</span><span class="p">(</span><span class="nx">args</span><span class="w"> </span><span class="nx">RequestVoteArgs</span><span class="p">,</span><span class="w"> </span><span class="nx">reply</span><span class="w"> </span><span class="o">*</span><span class="nx">RequestVoteReply</span><span class="p">)</span><span class="w"> </span><span class="kt">error</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nx">Dead</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;RequestVote: %+v [currentTerm=%d, votedFor=%d]&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">args</span><span class="p">,</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">currentTerm</span><span class="p">,</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">votedFor</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">args</span><span class="p">.</span><span class="nx">Term</span><span class="w"> </span><span class="p">&gt;</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">currentTerm</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;... term out of date in RequestVote&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">cm</span><span class="p">.</span><span class="nx">becomeFollower</span><span class="p">(</span><span class="nx">args</span><span class="p">.</span><span class="nx">Term</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">currentTerm</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nx">args</span><span class="p">.</span><span class="nx">Term</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nx">cm</span><span class="p">.</span><span class="nx">votedFor</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="o">-</span><span class="mi">1</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">votedFor</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nx">args</span><span class="p">.</span><span class="nx">CandidateId</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">reply</span><span class="p">.</span><span class="nx">VoteGranted</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+<span class="w">    </span><span class="nx">cm</span><span class="p">.</span><span class="nx">votedFor</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">args</span><span class="p">.</span><span class="nx">CandidateId</span><span class="w"></span>
+<span class="w">    </span><span class="nx">cm</span><span class="p">.</span><span class="nx">electionResetEvent</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Now</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">reply</span><span class="p">.</span><span class="nx">VoteGranted</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kc">false</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">reply</span><span class="p">.</span><span class="nx">Term</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">currentTerm</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;... RequestVote reply: %+v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">reply</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Note the check for a &quot;dead&quot; state. We'll talk about it later on.</p>
+<p>It starts with the familiar logic of checking if the term is out of date and
+becoming a follower. If it's already a follower, the state won't change but the
+other state fields will reset.</p>
+<p>Otherwise if the caller's term is aligned with ours and we haven't voted for
+another candidate yet, we'll grant the vote. We never grant a vote for RPCs
+from <em>older</em> terms.</p>
+<p>This is the code for <tt class="docutils literal">AppendEntries</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">cm</span><span class="w"> </span><span class="o">*</span><span class="nx">ConsensusModule</span><span class="p">)</span><span class="w"> </span><span class="nx">AppendEntries</span><span class="p">(</span><span class="nx">args</span><span class="w"> </span><span class="nx">AppendEntriesArgs</span><span class="p">,</span><span class="w"> </span><span class="nx">reply</span><span class="w"> </span><span class="o">*</span><span class="nx">AppendEntriesReply</span><span class="p">)</span><span class="w"> </span><span class="kt">error</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Lock</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">mu</span><span class="p">.</span><span class="nx">Unlock</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nx">Dead</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;AppendEntries: %+v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">args</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">args</span><span class="p">.</span><span class="nx">Term</span><span class="w"> </span><span class="p">&gt;</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">currentTerm</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;... term out of date in AppendEntries&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">cm</span><span class="p">.</span><span class="nx">becomeFollower</span><span class="p">(</span><span class="nx">args</span><span class="p">.</span><span class="nx">Term</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">reply</span><span class="p">.</span><span class="nx">Success</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kc">false</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">args</span><span class="p">.</span><span class="nx">Term</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">currentTerm</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nx">Follower</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">cm</span><span class="p">.</span><span class="nx">becomeFollower</span><span class="p">(</span><span class="nx">args</span><span class="p">.</span><span class="nx">Term</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">cm</span><span class="p">.</span><span class="nx">electionResetEvent</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Now</span><span class="p">()</span><span class="w"></span>
+<span class="w">    </span><span class="nx">reply</span><span class="p">.</span><span class="nx">Success</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="kc">true</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">reply</span><span class="p">.</span><span class="nx">Term</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">currentTerm</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">dlog</span><span class="p">(</span><span class="s">&quot;AppendEntries reply: %+v&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">reply</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This logic should also align with the election parts of Figure 2 in the paper.
+One tricky condition to understand is this:</p>
+<div class="highlight"><pre><span></span><span class="k">if</span><span class="w"> </span><span class="nx">cm</span><span class="p">.</span><span class="nx">state</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nx">Follower</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cm</span><span class="p">.</span><span class="nx">becomeFollower</span><span class="p">(</span><span class="nx">args</span><span class="p">.</span><span class="nx">Term</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p><strong>Q:</strong> What if this peer is a leader - why does it become a follower to another
+leader?</p>
+<p><strong>A:</strong> Raft guarantees that only a single leader exists in any given term. If
+you carefully follow the logic of <tt class="docutils literal">RequestVote</tt> and the code in
+<tt class="docutils literal">startElection</tt> that sends RVs, you'll see that two leaders can't exist in
+the cluster with the same term. This condition is important for <em>candidates</em>
+that find out that another peer won the election for this term.</p>
+</div>
+<div class="section" id="states-and-goroutines">
+<h2>States and goroutines</h2>
+<p>It's worth doing a recap of all the possible states a CM can be in, and the
+different goroutines running in them:</p>
+<p><strong>Follower:</strong> when the CM is initialized to be a follower, and in each
+invocation of <tt class="docutils literal">becomeFollower</tt>, a new goroutine starts running
+<tt class="docutils literal">runElectionTimer</tt>. This is the companion of followers. Note that there can
+be more than one running at once for short periods of time. Suppose a follower
+gets a RV from a leader in a higher term; this will trigger another
+<tt class="docutils literal">becomeFollower</tt> call that launches a new timer goroutine. But the old one
+will exit without doing anything, as soon as it notices a changed term.</p>
+<p><strong>Candidate:</strong> a candidate also has the election goroutine ticking in parallel,
+but in addition it has a number of goroutines to send RPCs. It has the same
+safeguards as a follower for stopping an &quot;old&quot; election goroutine if a new
+one started running. Do recall that RPC goroutines may take a very long time
+to finish, so it's essential for them to exit quietly if they notice they
+are out of date by the time the RPC call returns.</p>
+<p><strong>Leader:</strong> a leader does not have an election goroutine, but it does have
+the heartbeat goroutine ticking every 50 ms.</p>
+<p>There's an additional state making an appearance in the code - the <strong>Dead</strong>
+state. This is purely for orderly shutdown of a CM. A call to <tt class="docutils literal">Stop</tt> sets
+the state to Dead and all goroutines take care to exit as soon as they
+observe this state.</p>
+<p>Having all these goroutines running may be concerning - what if some of them
+remain, lingering in the background; or worse, they repeatedly <em>leak</em> and their
+number grows without bounds? This is what leak checking is for, and several of
+the tests have leak checking enabled. These tests run nontrivial Raft election
+sequences and ensure that no stray goroutine is found running at the end of the
+test (after <tt class="docutils literal">Stop</tt> has been called and some time was given for stragglers to
+exit).</p>
+</div>
+<div class="section" id="runaway-server-and-increasing-terms">
+<h2>Runaway server and increasing terms</h2>
+<p>To conclude this part in the series, let's study a tricky scenario that may
+occur and how Raft handles it. I find this example very interesting and
+instructive. Here I'm trying to present it as a story, but you might want to
+use a piece of paper to follow the states of the different servers. If you can't
+follow the example - please send me an email - I'll gladly fix it to make it
+clearer.</p>
+<p>Consider a cluster with three servers: A, B and C. Suppose that A is the leader,
+the starting term is 1 and the cluster is happily chugging along.
+A is sending heartbeat AE RPCs to B and C every 50 ms, and gets prompt responses
+within a few ms; each such AE resets B's and C's <tt class="docutils literal">electionResetEvent</tt>, so
+they remain as contented followers.</p>
+<p>At some point, due to a temporary hiccup in its network router, server B gets
+partitioned from A and C. A is still sending it AEs every 50 ms, but these AEs
+either error out immediately or after some long-ish timeout by the underlying
+RPC engine. There's not much A can do about it, but it's no big deal. We haven't
+talked about log replication yet, but since two of the three servers are alive,
+the cluster has a quorum to commit client commands.</p>
+<p>What about B? Let's say that when it was disconnected, its election timeout
+was set to 200 ms. Approximately 200 ms after the disconnection, B's
+<tt class="docutils literal">runElectionTimer</tt> goroutine realizes it hasn't  heard from the leader for
+the election timeout; B has no way of distinguishing who's at fault here, so
+it will become a candidate and start a new election.</p>
+<p>B's term will thus become 2 (while A's and C's are still at 1). B will dutifully
+send out RV RPCs to A and C to ask them to vote for it; but of course, these
+RPCs get lost in the jumbled wires of B's network router. No need to panic!
+B's <tt class="docutils literal">startElection</tt> launched another <tt class="docutils literal">runElectionTimer</tt> goroutine right
+at the start, and that goroutine waits for, say 250 ms (remember, our timeout
+range is random between 150-300 ms) to see if anything important happened as
+a result of the previous election. Nothing did for B, because it's still
+completely isolated. So <tt class="docutils literal">runElectionTimer</tt> starts <em>another</em> new election,
+incrementing the term to 3.</p>
+<p>And so on and so forth; B's router takes a few whole seconds to reset itself
+and go back online. In the meantime, B's rerunning elections every once in a
+while and its term has already reached 8.</p>
+<p>At this point, the network partition is fixed and B is reconnected to A and
+to C.</p>
+<p>Shortly after, an AE RPC arrives from A. Recall that A keeps sending them
+dutifully every 50 ms, even though B didn't reply for a while.</p>
+<p>B's <tt class="docutils literal">AppendEntries</tt> is called and sends back a reply with term=8.</p>
+<p>A gets this reply in <tt class="docutils literal">leaderSendHeartbeats</tt>, examines the reply's term and
+notices it's higher than its own. It updates its own term to 8 and becomes a
+follower. The cluster temporarily loses a leader.</p>
+<p>Now multiple things can happen, depending on the timing. B is a candidate, but
+it may have sent its RVs before the network revived; C is a follower, but within
+its own election timeout it will become a candidate because it stops receiving
+periodic AEs from A. A became a follower, and will also turn into a candidate
+within its election timeout.</p>
+<p>So any of the three servers can win the next election. Note that this is only
+because we don't actually replicate any logs here. As we'll see in the next
+part, in realistic scenarios A and C will likely add some new client commands
+while B is away, so their logs will be more up to date. Therefore, B cannot
+become the new leader - a new election will occur which will be won by either
+A or C; we'll revisit this scenario again in the next part.</p>
+<p>Assuming no new commands were added since B disconnected, it's absolutely fine
+for a leader change to occur as a result of the reconnection.</p>
+<p>If this may seem inefficient - it's true. The leader change is not really
+necessary here, because A was perfectly healthy throughout the scenario. But
+keeping the invariants simple at the cost of some efficiency in corner cases is
+one of the design choices made by Raft. What counts is efficiency in the common
+case (without any disruptions), because this is the state clusters spend 99.9%
+of their time in.</p>
+</div>
+<div class="section" id="what-s-next">
+<h2>What's next</h2>
+<p>To ensure that your understanding of the implementation is not only theoretical,
+I strongly encourage you to play with <a class="reference external" href="https://github.com/eliben/raft/tree/main/part1">the code</a> a bit.</p>
+<p>The repository README has some detailed instructions about interacting with
+the code, running its tests and observing results. The code comes with many
+tests that exercise specific scenarios (including the scenario described in the
+previous section) and it's <em>very</em> instructive to run a single test and watch
+the Raft logs. Notice all the <tt class="docutils literal"><span class="pre">cm.dlog(...)</span></tt> calls in the code? The repository
+comes with a special tool that helps visualize these logs alongside each other
+in a HTML file - see the README for instructions. Run some tests, watch their
+logs, and feel free to sprinkle your own <tt class="docutils literal">dlog</tt> calls to get a better
+understanding of when different parts of the code are exercised.</p>
+<p>Part 2 in the series will describe a more complete Raft implementation that
+actually handles client commands and replicates them throughout the cluster.
+Stay tuned!</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>This diagram is the same as Figure 4 in
+the <a class="reference external" href="https://raft.github.io/raft.pdf">the Raft paper</a>. This is a good
+place for a reminder that in this series of posts I assume you've already
+read that paper.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>The check for state being not follower and not candidate may seem
+strange. Can this peer become a leader suddenly, not through elections
+initiated in <tt class="docutils literal">runElectionTimer</tt>? Read on to see how an election counter
+is restarted by candidates.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

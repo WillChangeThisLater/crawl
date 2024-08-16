@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Performance of coroutine-style lexers in Go - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Performance of coroutine-style lexers in Go">
+                        Performance of coroutine-style lexers in Go
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> June 06, 2022 at 20:32</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/lexer.html">Lexer</a>
+        ,
+    <a href="../../tag/compilation.html">Compilation</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>Back in 2011, Rob Pike gave a talk on the topic of
+<a class="reference external" href="https://www.youtube.com/watch?v=HxaD_trXwRE">Lexical Scanning in Go</a>, where
+he presented an interesting approach to lexical analysis with coroutines
+(implemented via goroutines communicating over a channel). Since I've
+been pondering the <a class="reference external" href="../../2009/08/29/co-routines-as-an-alternative-to-state-machines/index.html">connection between coroutines and state machines</a>
+in the past, Rob's talk inspired me to try approximating this approach in Python
+<a class="reference external" href="../../2012/08/09/using-sub-generators-for-lexical-scanning-in-python/index.html">using sub-generators</a>.</p>
+<p>Since 2011, I've seen this talk and the technique presented in it mentioned many
+times, both in Go forums and in general programming communities. There's
+something in this approach that feels elegant - it's a problem very well suited
+for coroutines. However, there was always a small nagging voice in the back of
+my head doubting the efficiency of the approach.</p>
+<p>Since I've recently found myself <a class="reference external" href="../../tag/lexer.html">playing with lexers again</a>, this seemed like a good
+opportunity to revisit Rob Pike's lexer and compare its performance to other
+approaches, using the same problem and benchmark for fairness.</p>
+<div class="section" id="rob-pike-s-original-lexer">
+<h2>Rob Pike's original lexer</h2>
+<p>In the talk, Rob is describing a lexer he designed for Go's templating package.
+The lexer presented in the talk and <a class="reference external" href="https://talks.golang.org/2011/lex.slide#1">slides</a> is relatively simple; a much more
+featureful version of it still lives in the <tt class="docutils literal">text/template</tt> package - <a class="reference external" href="https://cs.opensource.google/go/go/+/master:src/text/template/parse/lex.go">lex.go</a>.
+As such, this lexer is heavily used in production every day.</p>
+<p>I've transcribed the original lexer from the talk into my GitHub repository;
+it's available <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2022/go-coroutine-lexer">here, with tests</a>.</p>
+<p>The main aesthetic appeal of this lexer is avoiding an explicit state machine
+by using a separate goroutine to perform the lexing. This goroutine switches
+states by returning a new &quot;state function&quot;, and emits tokens onto a channel
+which can be read by the lexer's clients.</p>
+<img alt="Diagram showing a lexing goroutine and a main goroutine" class="align-center" src="../../images/2022/lexing-channel.png" />
+<p>This approach is particularly attractive when parsing templates because it
+oscillates between two major states - lexing free-standing text and
+lexing inside actions delimited by <tt class="docutils literal">{{ }}</tt>. Using the concurrent approach
+avoids the need to have an explicit &quot;am I inside an action&quot; state flag that
+has to be checked every time a new token is requested <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>.</p>
+</div>
+<div class="section" id="lexing-tablegen">
+<h2>Lexing TableGen</h2>
+<p>To be able to have a meaningful performance comparison, I've rewritten my
+TableGen lexer <a class="reference external" href="../a-faster-lexer-in-go/index.html">once again</a>, this time using
+the coroutine approach. The full code for this lexer with tests is <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2022/go-coroutine-tablegen-lexer">available
+here</a>.</p>
+<p>The API is very similar to my <a class="reference external" href="../a-faster-lexer-in-go/index.html">previous TableGen lexers</a> - all the
+implementation details (like having a channel to read tokens from) are hidden
+from the user. The token type is the same:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">Token</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Name</span><span class="w"> </span><span class="nx">TokenName</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Val</span><span class="w">  </span><span class="kt">string</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Pos</span><span class="w">  </span><span class="kt">int</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The <tt class="docutils literal">NextToken</tt> method also has the same signature, though the implementation
+uses a channel now:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">l</span><span class="w"> </span><span class="o">*</span><span class="nx">Lexer</span><span class="p">)</span><span class="w"> </span><span class="nx">NextToken</span><span class="p">()</span><span class="w"> </span><span class="nx">Token</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="o">&lt;-</span><span class="nx">l</span><span class="p">.</span><span class="nx">tokens</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The constructor creates a new <tt class="docutils literal">Lexer</tt>, creates a channel for the emitted
+tokens to go into and launches the goroutine that does the actual lexing:</p>
+<div class="highlight"><pre><span></span><span class="c1">// Lex creates a new Lexer</span><span class="w"></span>
+<span class="kd">func</span><span class="w"> </span><span class="nx">Lex</span><span class="p">(</span><span class="nx">input</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="nx">Lexer</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">l</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">Lexer</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">input</span><span class="p">:</span><span class="w">  </span><span class="nx">input</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">tokens</span><span class="p">:</span><span class="w"> </span><span class="nb">make</span><span class="p">(</span><span class="kd">chan</span><span class="w"> </span><span class="nx">Token</span><span class="p">),</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">go</span><span class="w"> </span><span class="nx">l</span><span class="p">.</span><span class="nx">run</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">l</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The <tt class="docutils literal">run</tt> method serves as a trampoline to advance the lexer from state to
+state (while the state functions emit tokens into the channel):</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">stateFn</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="o">*</span><span class="nx">Lexer</span><span class="p">)</span><span class="w"> </span><span class="nx">stateFn</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">l</span><span class="w"> </span><span class="o">*</span><span class="nx">Lexer</span><span class="p">)</span><span class="w"> </span><span class="nx">run</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">state</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">lexText</span><span class="p">;</span><span class="w"> </span><span class="nx">state</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="p">;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">state</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">state</span><span class="p">(</span><span class="nx">l</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nb">close</span><span class="p">(</span><span class="nx">l</span><span class="p">.</span><span class="nx">tokens</span><span class="p">)</span><span class="w"> </span><span class="c1">// no more tokens will be delivered</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>And so on. The implementation follows Rob Pike's lexer very closely, with the
+same primitives. For the TableGen language, which does not have the &quot;two states&quot;
+feature of templates, I found this approach to be less of a stylistic win,
+though it still makes state management simpler.</p>
+</div>
+<div class="section" id="performance">
+<h2>Performance</h2>
+<p>In the <a class="reference external" href="../a-faster-lexer-in-go/index.html">previous post</a>, the fastest Go
+lexer achieved with Go 1.18 runs the benchmark in about 6 ms (with a
+<tt class="docutils literal">GOGC=1600</tt> setting).</p>
+<p>For a level playing field, I ran the new coroutine-style lexer on the same input
+file, with the same benchmarking invocation and the same <tt class="docutils literal">GOGC</tt> setting:</p>
+<div class="highlight"><pre><span></span>$ GOGC=1600 TDINPUT=&lt;path to input file&gt; go test -bench=Preall -benchtime=5s
+goos: linux
+goarch: amd64
+pkg: example.com
+cpu: Intel(R) Core(TM) i7-4771 CPU @ 3.50GHz
+BenchmarkLexerPrealloc-8            80          70507009 ns/op
+PASS
+ok    example.com     5.885s
+</pre></div>
+<p>It takes... 70 ms, more than 10x slower!</p>
+<p>While I'm not surprised that this approach is slower, I <em>am</em> somewhat surprised
+at the magnitude. Let's think this through. What does each lexer do in its
+hot inner loop?</p>
+<p>In my original lexer, each call to the <tt class="docutils literal">NextLexer</tt> function:</p>
+<ol class="arabic simple">
+<li>Skips whitespace: iterates over the input string rune by rune until a
+non-whitespace rune is encountered.</li>
+<li>Examines the current rune and decides which kind of token it belongs to.</li>
+<li>Finishes lexing the token and returns it as a string slice.</li>
+</ol>
+<p>Whereas in the coroutine-style lexer, each call to <tt class="docutils literal">NextLexer</tt>:</p>
+<ol class="arabic simple">
+<li>Invokes a channel receive on the token channel.</li>
+</ol>
+<p>In the meantime, the lexing goroutine:</p>
+<ol class="arabic simple">
+<li>Skips whitespace and examines the current rune, just like in the regular
+lexer.</li>
+<li>Invokes a channel send on the token channel.</li>
+</ol>
+<p>The channel send/receive is the main culprit for the large performance
+difference. Channels in Go are fully synchronized, which implies locking inside
+the inner loop. Moreover, since there are two goroutines involved that perform
+channel operations, the Go runtime has much more work to do to handle suspending
+goroutines when the channel blocks and waking them up when it unblocks. All
+these operations are highly optimized in Go, but when they appear in the inner
+loop of a fast scanning process, the relative cost is high.</p>
+<p>If we profile the new scanner with pprof, this cost is easily observed:</p>
+<img alt="Pprof diagram showing where the time goes for the channel lexer" class="align-center" src="../../images/2022/lex-channel-pprof.png" />
+<p>In the previous lexer, the &quot;fetch next rune&quot; method is very dominant. Here it
+accounts for only 5.8% of the execution time! Much more time goes on
+<tt class="docutils literal">chansend1</tt> and <tt class="docutils literal">chanrecv1</tt> which are runtime functions with names that
+should be self-describing. There is also goroutine management code in the
+runtime that accounts for a large % there.</p>
+</div>
+<div class="section" id="using-a-buffered-channel">
+<h2>Using a buffered channel</h2>
+<p>Go's <tt class="docutils literal">make</tt> primitive creates an <em>unbuffeered</em> channel by default, meaning
+that every send into it blocks until a receive takes the item out. What would
+happen if we created a buffered channel instead? Theoretically, this should
+improve the lexer's execution time as there will be less suspension and waking
+up of goroutines.</p>
+<p>Let's see what different values of the buffer give us; I re-ran the benchmark
+with buffer sizes starting from 1 to 16384 in jumps of 4x:</p>
+<img alt="Benchmark results for different sizes of channel buffer" class="align-center" src="../../images/2022/lexer-runtime-channel-size.png" />
+<p>As expected, using a buffered channel makes lexing significantly faster,
+leveling out at 1024 where it takes about 24 ms for our benchmark. This is
+a large improvement, though still much slower than the 6 ms we had with our
+non-concurrent lexer.</p>
+<p>Channels have many uses in Go; sometimes they are used as synchronization
+mechanisms, so having a large buffer is not always feasible. In cases like our
+lexer, a buffer actually makes sense because there should be no problem for the
+lexing goroutine to run ahead a little bit. Note that this doesn't work for any
+input kind, though; had we been lexing C, for instance, we'd might want to have
+a feedback mechanism back into the lexer (for handling the grammar's <a class="reference external" href="../../2007/11/24/the-context-sensitivity-of-cs-grammar/index.html">context
+sensitivity</a>).</p>
+<p>FWIW, the template lexer Rob Pike added to the standard library uses an
+unbuffered channel. Maybe it would make sense to add a modest buffer there to
+<a class="reference external" href="https://go-review.googlesource.com/c/go/+/410296">speed it up somewhat</a> :-)
+See also <a class="reference external" href="https://github.com/golang/go/issues/53261">go issue #53261</a>.</p>
+</div>
+<div class="section" id="does-performance-matter-here">
+<h2>Does performance matter here?</h2>
+<p>For the task at hand, the coroutine-style lexer is still plenty fast. Note that
+it's <em>much</em> faster than some of the Python and JS-based lexers I wrote for the
+same task <a class="reference external" href="../../2013/06/25/regex-based-lexical-analysis-in-python-and-javascript/index.html">a while ago</a>.</p>
+<p>This lexer is used by the standard library for parsing templates, but these
+are (1) rarely very big and (2) almost always OK to parse just once during the
+lifetime of a program, so the time it takes to parse them is not too important;
+in other words, it's very unlikely to dominate your application's benchmarks.</p>
+<p>That said, I can envision scenarios where this <em>could</em> matter. Suppose you're
+writing a frontend for a nontrivial programming language (or configuration
+language etc.) and a fast interpreter for this language <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>. This could lead
+to the frontend's performance being a bottleneck. In these scenarios, it just
+<em>may</em> be important to have the fastest lexer you can reasonably implement.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>I do wonder if this would work in more complicated cases though. In
+templates, the kinds of tokens that appear inside actions can never
+appear outside them. But suppose they could; suppose there would be some
+token <tt class="docutils literal">TOK</tt> which could legally appear both in &quot;text mode&quot; and in
+&quot;action mode&quot;. What would the state function representing <tt class="docutils literal">TOK</tt> return
+when it's done parsing it? How would it know which mode it has to go
+back to? It's possible that some sort of explicit state variable would
+be unavoidable in this scenario.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>I'm saying interpreter on purpose, because interpreter backends tend
+to be very simple and quick. In full compilers, backends typically run
+many expensive optimizations that dominate the compile time.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

@@ -1,0 +1,886 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Concurrent Servers: Part 3 - Event-driven - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Concurrent Servers: Part 3 - Event-driven">
+                        Concurrent Servers: Part 3 - Event-driven
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> October 06, 2017 at 05:48</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/concurrency.html">Concurrency</a>
+        ,
+    <a href="../../tag/c-c.html">C & C++</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This is part 3 of a series of posts on writing concurrent network servers. <a class="reference external" href="../concurrent-servers-part-1-introduction/index.html">Part
+1</a>
+introduced the series with some building blocks, and <a class="reference external" href="../concurrent-servers-part-2-threads/index.html">part 2 - Threads</a>
+discussed multiple threads as one viable approach for concurrency in the server.</p>
+<p>Another common approach to achieve concurrency is called
+<em>event-driven programming</em>, or alternatively <em>asynchronous</em> programming <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>.
+The range of variations on this approach is very large, so we're going to start
+by covering the basics - using some of the fundamental APIs than form the base
+of most higher-level approaches. Future posts in the series will cover
+higher-level abstractions, as well as various hybrid approaches.</p>
+<p>All posts in the series:</p>
+<ul class="simple">
+<li><a class="reference external" href="../concurrent-servers-part-1-introduction/index.html">Part 1 - Introduction</a></li>
+<li><a class="reference external" href="../concurrent-servers-part-2-threads/index.html">Part 2 - Threads</a></li>
+<li><a class="reference external" href="index.html">Part 3 - Event-driven</a></li>
+<li><a class="reference external" href="../concurrent-servers-part-4-libuv/index.html">Part 4 - libuv</a></li>
+<li><a class="reference external" href="../concurrent-servers-part-5-redis-case-study/index.html">Part 5 - Redis case study</a></li>
+<li><a class="reference external" href="../../2018/concurrent-servers-part-6-callbacks-promises-and-asyncawait/index.html">Part 6 - Callbacks, Promises and async/await</a></li>
+</ul>
+<div class="section" id="blocking-vs-nonblocking-i-o">
+<h2>Blocking vs. nonblocking I/O</h2>
+<p>As an introduction to the topic, let's talk about the difference between
+blocking and nonblocking I/O. Blocking I/O is easier to undestand, since this is
+the &quot;normal&quot; way we're used to I/O APIs working. While receiving data from a
+socket, a call to <tt class="docutils literal">recv</tt> <em>blocks</em> until some data is received from the peer
+connected to the other side of the socket. This is precisely the issue with the
+sequential server of part 1.</p>
+<p>So blocking I/O has an inherent performance problem. We saw one way to tackle
+this problem in part 2, using multiple threads. As long as one thread is blocked
+on I/O, other threads can continue using the CPU. In fact, blocking I/O is
+usually very efficient on resource usage while the thread is waiting - the
+thread is put to sleep by the OS and only wakes up when whatever it was waiting
+for is available.</p>
+<p><em>Nonblocking</em> I/O is a different approach. When a socket is set to
+nonblocking mode, a call to <tt class="docutils literal">recv</tt> (and to <tt class="docutils literal">send</tt>, but let's just focus on
+receiving here) will always return very quickly, even if there's no data to
+receive. In this case, it will return a special error status <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a> notifying the
+caller that there's no data to receive at this time. The caller can then go do
+something else, or try to call <tt class="docutils literal">recv</tt> again.</p>
+<p>The difference between blocking and nonblocking <tt class="docutils literal">recv</tt> is easiest to
+demonstrate with a simple code sample. Here's a small program that listens on
+a socket, continuously blocking on <tt class="docutils literal">recv</tt>; when <tt class="docutils literal">recv</tt> returns data, the
+program just reports how many bytes were received <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>:</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">**</span><span class="w"> </span><span class="n">argv</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">setvbuf</span><span class="p">(</span><span class="n">stdout</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="n">_IONBF</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">portnum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">9988</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">argc</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">portnum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">atoi</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Listening on port %d</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">portnum</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">sockfd</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listen_inet_socket</span><span class="p">(</span><span class="n">portnum</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr_in</span><span class="w"> </span><span class="n">peer_addr</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kt">socklen_t</span><span class="w"> </span><span class="n">peer_addr_len</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">peer_addr</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">newsockfd</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">accept</span><span class="p">(</span><span class="n">sockfd</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">peer_addr</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">peer_addr_len</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">newsockfd</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">perror_die</span><span class="p">(</span><span class="s">&quot;ERROR on accept&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="n">report_peer_connected</span><span class="p">(</span><span class="o">&amp;</span><span class="n">peer_addr</span><span class="p">,</span><span class="w"> </span><span class="n">peer_addr_len</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">buf</span><span class="p">[</span><span class="mi">1024</span><span class="p">];</span><span class="w"></span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Calling recv...</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">len</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">recv</span><span class="p">(</span><span class="n">newsockfd</span><span class="p">,</span><span class="w"> </span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="w"> </span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">len</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">perror_die</span><span class="p">(</span><span class="s">&quot;recv&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">len</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Peer disconnected; I&#39;m done.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;recv returned %d bytes</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">len</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">close</span><span class="p">(</span><span class="n">newsockfd</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">close</span><span class="p">(</span><span class="n">sockfd</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The main loop repeatedly calls <tt class="docutils literal">recv</tt> and reports what it returned (recall
+that <tt class="docutils literal">recv</tt> returns 0 when the peer has disconnected). To try it out, we'll
+run this program in one terminal, and in a separate terminal connect to it with
+<tt class="docutils literal">nc</tt>, sending a couple of short lines, separated by a delay of a couple of
+seconds:</p>
+<div class="highlight"><pre><span></span>$ nc localhost 9988
+hello                                   # wait for 2 seconds after typing this
+socket world
+^D                                      # to end the connection&gt;
+</pre></div>
+<p>The listening program will print the following:</p>
+<div class="highlight"><pre><span></span>$ ./blocking-listener 9988
+Listening on port 9988
+peer (localhost, 37284) connected
+Calling recv...
+recv returned 6 bytes
+Calling recv...
+recv returned 13 bytes
+Calling recv...
+Peer disconnected; I&#39;m done.
+</pre></div>
+<p>Now let's try a nonblocking version of the same listening program. Here it is:</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="k">const</span><span class="w"> </span><span class="kt">char</span><span class="o">**</span><span class="w"> </span><span class="n">argv</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">setvbuf</span><span class="p">(</span><span class="n">stdout</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="n">_IONBF</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">portnum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">9988</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">argc</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">portnum</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">atoi</span><span class="p">(</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">]);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Listening on port %d</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">portnum</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">sockfd</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listen_inet_socket</span><span class="p">(</span><span class="n">portnum</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr_in</span><span class="w"> </span><span class="n">peer_addr</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kt">socklen_t</span><span class="w"> </span><span class="n">peer_addr_len</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">peer_addr</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">newsockfd</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">accept</span><span class="p">(</span><span class="n">sockfd</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">peer_addr</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">peer_addr_len</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">newsockfd</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">perror_die</span><span class="p">(</span><span class="s">&quot;ERROR on accept&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="n">report_peer_connected</span><span class="p">(</span><span class="o">&amp;</span><span class="n">peer_addr</span><span class="p">,</span><span class="w"> </span><span class="n">peer_addr_len</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Set nonblocking mode on the socket.</span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">flags</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fcntl</span><span class="p">(</span><span class="n">newsockfd</span><span class="p">,</span><span class="w"> </span><span class="n">F_GETFL</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">flags</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">perror_die</span><span class="p">(</span><span class="s">&quot;fcntl F_GETFL&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">fcntl</span><span class="p">(</span><span class="n">newsockfd</span><span class="p">,</span><span class="w"> </span><span class="n">F_SETFL</span><span class="p">,</span><span class="w"> </span><span class="n">flags</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="n">O_NONBLOCK</span><span class="p">)</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">perror_die</span><span class="p">(</span><span class="s">&quot;fcntl F_SETFL O_NONBLOCK&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">buf</span><span class="p">[</span><span class="mi">1024</span><span class="p">];</span><span class="w"></span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Calling recv...</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">len</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">recv</span><span class="p">(</span><span class="n">newsockfd</span><span class="p">,</span><span class="w"> </span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="w"> </span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">len</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">errno</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">EAGAIN</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">errno</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">EWOULDBLOCK</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">usleep</span><span class="p">(</span><span class="mi">200</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">1000</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="k">continue</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="n">perror_die</span><span class="p">(</span><span class="s">&quot;recv&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">len</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;Peer disconnected; I&#39;m done.</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;recv returned %d bytes</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">len</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">close</span><span class="p">(</span><span class="n">newsockfd</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">close</span><span class="p">(</span><span class="n">sockfd</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>A couple of notable differences from the blocking version:</p>
+<ol class="arabic simple">
+<li>The <tt class="docutils literal">newsockfd</tt> socket returned by <tt class="docutils literal">accept</tt> is set to nonblocking mode
+by calling <tt class="docutils literal">fcntl</tt>.</li>
+<li>When examining the return status of <tt class="docutils literal">recv</tt>, we check whether <tt class="docutils literal">errno</tt> is
+set to a value saying that no data is available for receiving. In this case
+we just sleep for 200 milliseconds and continue to the next iteration of
+the loop.</li>
+</ol>
+<p>The same expermient with <tt class="docutils literal">nc</tt> yields the following printout from this
+nonblocking listener:</p>
+<div class="highlight"><pre><span></span>$ ./nonblocking-listener 9988
+Listening on port 9988
+peer (localhost, 37288) connected
+Calling recv...
+Calling recv...
+Calling recv...
+Calling recv...
+Calling recv...
+Calling recv...
+Calling recv...
+Calling recv...
+Calling recv...
+recv returned 6 bytes
+Calling recv...
+Calling recv...
+Calling recv...
+Calling recv...
+Calling recv...
+Calling recv...
+Calling recv...
+Calling recv...
+Calling recv...
+Calling recv...
+Calling recv...
+recv returned 13 bytes
+Calling recv...
+Calling recv...
+Calling recv...
+Peer disconnected; I&#39;m done.
+</pre></div>
+<p>As an exercise, add a timestamp to the printouts and convince yourself that the
+total time elapsed between fruitful calls to <tt class="docutils literal">recv</tt> is more or less the delay
+in typing the lines into <tt class="docutils literal">nc</tt> (rounded to the next 200 ms).</p>
+<p>So there we have it - using nonblocking <tt class="docutils literal">recv</tt> makes it possible for the
+listener the check in with the socket, and regain control if no data is
+available yet. Another word to describe this in the domain of programming is
+<em>polling</em> - the main program periodically polls the socket for its readiness.</p>
+<p>It may seem like a potential solution to the sequential serving issue.
+Nonblocking <tt class="docutils literal">recv</tt> makes it possible to work with multiple sockets
+simulatenously, polling them for data and only handling those that have new
+data. This is true - concurrent servers <em>could</em> be written this way; but in
+reality they don't, because the polling approach scales very poorly.</p>
+<p>First, the 200 ms delay I introduced in the code above is nice for the
+demonstration (the listener prints only a few lines of &quot;Calling recv...&quot; between
+my typing into <tt class="docutils literal">nc</tt> as opposed to thousands), but it also incurs a delay of up
+to 200 ms to the server's response time, which is almost certainly undesirable.
+In real programs the delay would have to be much shorter, and the shorter the
+sleep, the more CPU the process consumes. These are cycles consumed for just
+waiting, which isn't great, especially on mobile devices where power matters.</p>
+<p>But the bigger problem happens when we actually have to work with multiple
+sockets this way. Imagine this listener is handling 1000 clients concurrently.
+This means that in every loop iteration, it has to do a nonblocking <tt class="docutils literal">recv</tt> on
+<em>each and every one of those 1000 sockets</em>, looking for one which has data
+ready. This is terribly inefficient, and severely limits the number of clients
+this server can handle concurrently. There's a catch-22 here: the longer we wait
+between polls, the less responsive the server is; the shorter we wait, the more
+CPU resources we burn on useless polling.</p>
+<p>Frankly, all this polling also feels like useless work. Surely somewhere in the
+OS it is known which socket is actually ready with data, so we don't have to
+scan all of them. Indeed, it is, and the rest of this post will showcase a
+couple of APIs that let us handle multiple clients much more gracefully.</p>
+</div>
+<div class="section" id="select">
+<h2>select</h2>
+<p>The <tt class="docutils literal">select</tt> system call is a portable (POSIX), venerable part of the standard
+Unix API. It was designed precisely for the problem described towards the end
+of the previous section - to allow a single thread to &quot;watch&quot; a non-trivial
+number of file descriptors <a class="footnote-reference" href="index.html#footnote-4" id="footnote-reference-4">[4]</a> for changes, without needlessly spinning in a
+polling loop. I don't plan to include a comprehensive tutorial for <tt class="docutils literal">select</tt> in
+this post - there are many websites and book chapters for that - but I will
+describe its API in the context of the problem we're trying to solve, and will
+present a fairly complete example.</p>
+<p><tt class="docutils literal">select</tt> enables <em>I/O multiplexing</em> - monitoring multiple file descriptors to
+see if I/O is possible on any of them.</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">select</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">nfds</span><span class="p">,</span><span class="w"> </span><span class="n">fd_set</span><span class="w"> </span><span class="o">*</span><span class="n">readfds</span><span class="p">,</span><span class="w"> </span><span class="n">fd_set</span><span class="w"> </span><span class="o">*</span><span class="n">writefds</span><span class="p">,</span><span class="w"></span>
+<span class="w">           </span><span class="n">fd_set</span><span class="w"> </span><span class="o">*</span><span class="n">exceptfds</span><span class="p">,</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="nc">timeval</span><span class="w"> </span><span class="o">*</span><span class="n">timeout</span><span class="p">);</span><span class="w"></span>
+</pre></div>
+<p><tt class="docutils literal">readfds</tt> points to a buffer of file descriptors we're watching for read
+events; <tt class="docutils literal">fd_set</tt> is an opaque data structure users manipulate using <tt class="docutils literal">FD_*</tt>
+macros. <tt class="docutils literal">writefds</tt> is the same for write events. <tt class="docutils literal">nfds</tt> is the highest file
+descriptor number (file descriptors are just integers) in the watched buffers.
+<tt class="docutils literal">timeout</tt> lets the user specify how long <tt class="docutils literal">select</tt> should block waiting for
+one of the file descriptors to be ready (<tt class="docutils literal">timeout == NULL</tt> means block
+indefinitely). I'll ignore <tt class="docutils literal">exceptfds</tt> for now.</p>
+<p>The contract of calling <tt class="docutils literal">select</tt> is as follows:</p>
+<ol class="arabic simple">
+<li>Prior to the call, the user has to create <tt class="docutils literal">fd_set</tt> instances for all the
+different kinds of descriptors to watch. If we want to watch for both read
+events and write events, both <tt class="docutils literal">readfds</tt> and <tt class="docutils literal">writefds</tt> should be created
+and populated.</li>
+<li>The user uses <tt class="docutils literal">FD_SET</tt> to set specific descriptors to watch in the set. For
+example, if we want to watch descriptors 2, 7 and 10 for read events, we call
+<tt class="docutils literal">FD_SET</tt> three times on <tt class="docutils literal">readfds</tt>, once for each of 2, 7 and 10.</li>
+<li><tt class="docutils literal">select</tt> is called.</li>
+<li>When <tt class="docutils literal">select</tt> returns (let's ignore timeouts for now), it says how many
+descriptors in the sets passed to it are ready. It also modifies the
+<tt class="docutils literal">readfds</tt> and <tt class="docutils literal">writefds</tt> sets to mark only those descriptors that are
+ready. All the other descriptors are cleared.</li>
+<li>At this point the user has to iterate over <tt class="docutils literal">readfds</tt> and <tt class="docutils literal">writefds</tt> to
+find which descriptors are ready (using <tt class="docutils literal">FD_ISSET</tt>).</li>
+</ol>
+<p>As a complete example, I've reimplemented our protocol in a concurrent server
+that uses <tt class="docutils literal">select</tt>. The <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/async-socket-server/select-server.c">full code is here</a>;
+what follows is some highlights from the code, with explanations. Warning: this
+code sample is fairly substantial - so feel free to skip it on first reading if
+you're short on time.</p>
+</div>
+<div class="section" id="a-concurrent-server-using-select">
+<h2>A concurrent server using select</h2>
+<p>Using an I/O multiplexing API like <tt class="docutils literal">select</tt> imposes certain constraints on the
+design of our server; these may not be immediately obvious, but are worth
+discussing since they are key to understanding what event-driven programming is
+all about.</p>
+<p>Most importantly, always keep in mind that such an approach is, in its core,
+single-threaded <a class="footnote-reference" href="index.html#footnote-5" id="footnote-reference-5">[5]</a>. The server really is just doing <em>one thing at a time</em>.
+Since we want to handle multiple clients concurrently, we'll have to structure
+the code in an unusual way.</p>
+<p>First, let's talk about the main loop. How would that look? To answer this
+question let's imagine our server during a flurry of activity - what should it
+watch for? Two kinds of socket activities:</p>
+<ol class="arabic simple">
+<li>New clients trying to connect. These clients should be <tt class="docutils literal">accept</tt>-ed.</li>
+<li>Existing client sending data. This data has to go through the usual protocol
+described in <a class="reference external" href="../concurrent-servers-part-1-introduction/index.html">part 1</a>,
+with perhaps some data being sent back.</li>
+</ol>
+<p>Even though these two activities are somewhat different in nature, we'll have to
+mix them into the same loop, because there can only be one main loop. Our loop
+will revolve around calls to <tt class="docutils literal">select</tt>. This <tt class="docutils literal">select</tt> call will watch for the
+two kinds of events described above.</p>
+<p>Here's the part of the code that sets up the file descriptor sets and kicks off
+the main loop with a call to <tt class="docutils literal">select</tt>:</p>
+<div class="highlight"><pre><span></span><span class="c1">// The &quot;master&quot; sets are owned by the loop, tracking which FDs we want to</span>
+<span class="c1">// monitor for reading and which FDs we want to monitor for writing.</span>
+<span class="n">fd_set</span><span class="w"> </span><span class="n">readfds_master</span><span class="p">;</span><span class="w"></span>
+<span class="n">FD_ZERO</span><span class="p">(</span><span class="o">&amp;</span><span class="n">readfds_master</span><span class="p">);</span><span class="w"></span>
+<span class="n">fd_set</span><span class="w"> </span><span class="n">writefds_master</span><span class="p">;</span><span class="w"></span>
+<span class="n">FD_ZERO</span><span class="p">(</span><span class="o">&amp;</span><span class="n">writefds_master</span><span class="p">);</span><span class="w"></span>
+
+<span class="c1">// The listenting socket is always monitored for read, to detect when new</span>
+<span class="c1">// peer connections are incoming.</span>
+<span class="n">FD_SET</span><span class="p">(</span><span class="n">listener_sockfd</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">readfds_master</span><span class="p">);</span><span class="w"></span>
+
+<span class="c1">// For more efficiency, fdset_max tracks the maximal FD seen so far; this</span>
+<span class="c1">// makes it unnecessary for select to iterate all the way to FD_SETSIZE on</span>
+<span class="c1">// every call.</span>
+<span class="kt">int</span><span class="w"> </span><span class="n">fdset_max</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listener_sockfd</span><span class="p">;</span><span class="w"></span>
+
+<span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// select() modifies the fd_sets passed to it, so we have to pass in copies.</span>
+<span class="w">  </span><span class="n">fd_set</span><span class="w"> </span><span class="n">readfds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">readfds_master</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">fd_set</span><span class="w"> </span><span class="n">writefds</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">writefds_master</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">nready</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">select</span><span class="p">(</span><span class="n">fdset_max</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">readfds</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">writefds</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">nready</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">perror_die</span><span class="p">(</span><span class="s">&quot;select&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">...</span><span class="w"></span>
+</pre></div>
+<p>A couple of points of interest here:</p>
+<ol class="arabic simple">
+<li>Since every call to <tt class="docutils literal">select</tt> overwrites the sets given to the function,
+the caller has to maintain a &quot;master&quot; set to keep track of all the active
+sockets it monitors across loop iterations.</li>
+<li>Note how, initially, the only socket we care about is <tt class="docutils literal">listener_sockfd</tt>,
+which is the original socket on which the server accepts new clients.</li>
+<li>The return value of <tt class="docutils literal">select</tt> is the number of descriptors that are ready
+among those in the sets passed as arguments. The sets are modified by
+<tt class="docutils literal">select</tt> to mark ready descriptors. The next step is iterating over the
+descriptors.</li>
+</ol>
+<div class="highlight"><pre><span></span><span class="p">...</span><span class="w"></span>
+<span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">fd</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">fd</span><span class="w"> </span><span class="o">&lt;=</span><span class="w"> </span><span class="n">fdset_max</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">nready</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">fd</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Check if this fd became readable.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">FD_ISSET</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">readfds</span><span class="p">))</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">nready</span><span class="o">--</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">fd</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">listener_sockfd</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="c1">// The listening socket is ready; this means a new peer is connecting.</span>
+<span class="w">      </span><span class="p">...</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">fd_status_t</span><span class="w"> </span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">on_peer_ready_recv</span><span class="p">(</span><span class="n">fd</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">status</span><span class="p">.</span><span class="n">want_read</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">FD_SET</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">readfds_master</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">FD_CLR</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">readfds_master</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">status</span><span class="p">.</span><span class="n">want_write</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">FD_SET</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">writefds_master</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">FD_CLR</span><span class="p">(</span><span class="n">fd</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">writefds_master</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">!</span><span class="n">status</span><span class="p">.</span><span class="n">want_read</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">!</span><span class="n">status</span><span class="p">.</span><span class="n">want_write</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;socket %d closing</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">fd</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="n">close</span><span class="p">(</span><span class="n">fd</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This part of the loop checks the <em>readable</em> descriptors. Let's skip the listener
+socket (for the full scoop - <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/async-socket-server/select-server.c">read the code</a>)
+and see what happens when one of the client sockets is ready. When this happens,
+we call a <em>callback</em> function named <tt class="docutils literal">on_peer_ready_recv</tt> with the file
+descriptor for the socket. This call means the client connected to that socket
+sent some data and a call to <tt class="docutils literal">recv</tt> on the socket isn't expected to block
+<a class="footnote-reference" href="index.html#footnote-6" id="footnote-reference-6">[6]</a>. This callback returns a struct of type <tt class="docutils literal">fd_status_t</tt>:</p>
+<div class="highlight"><pre><span></span><span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">want_read</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">want_write</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"> </span><span class="n">fd_status_t</span><span class="p">;</span><span class="w"></span>
+</pre></div>
+<p>Which tells the main loop whether the socket should be watched for read events,
+write events, or both. The code above shows how <tt class="docutils literal">FD_SET</tt> and <tt class="docutils literal">FD_CLR</tt> are
+called on the appropriate descriptor sets accordingly. The code for a descriptor
+being ready for writing in the main loop is similar, except that the callback it
+invokes is called <tt class="docutils literal">on_peer_ready_send</tt>.</p>
+<p>Now it's time to look at the code for the callback itself:</p>
+<div class="highlight"><pre><span></span><span class="k">typedef</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">INITIAL_ACK</span><span class="p">,</span><span class="w"> </span><span class="n">WAIT_FOR_MSG</span><span class="p">,</span><span class="w"> </span><span class="n">IN_MSG</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="n">ProcessingState</span><span class="p">;</span><span class="w"></span>
+
+<span class="cp">#define SENDBUF_SIZE 1024</span>
+
+<span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">ProcessingState</span><span class="w"> </span><span class="n">state</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// sendbuf contains data the server has to send back to the client. The</span>
+<span class="w">  </span><span class="c1">// on_peer_ready_recv handler populates this buffer, and on_peer_ready_send</span>
+<span class="w">  </span><span class="c1">// drains it. sendbuf_end points to the last valid byte in the buffer, and</span>
+<span class="w">  </span><span class="c1">// sendptr at the next byte to send.</span>
+<span class="w">  </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">sendbuf</span><span class="p">[</span><span class="n">SENDBUF_SIZE</span><span class="p">];</span><span class="w"></span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">sendbuf_end</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">sendptr</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"> </span><span class="n">peer_state_t</span><span class="p">;</span><span class="w"></span>
+
+<span class="c1">// Each peer is globally identified by the file descriptor (fd) it&#39;s connected</span>
+<span class="c1">// on. As long as the peer is connected, the fd is uqique to it. When a peer</span>
+<span class="c1">// disconnects, a new peer may connect and get the same fd. on_peer_connected</span>
+<span class="c1">// should initialize the state properly to remove any trace of the old peer on</span>
+<span class="c1">// the same fd.</span>
+<span class="n">peer_state_t</span><span class="w"> </span><span class="n">global_state</span><span class="p">[</span><span class="n">MAXFDS</span><span class="p">];</span><span class="w"></span>
+
+<span class="n">fd_status_t</span><span class="w"> </span><span class="nf">on_peer_ready_recv</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">sockfd</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">assert</span><span class="p">(</span><span class="n">sockfd</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">MAXFDs</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">peer_state_t</span><span class="o">*</span><span class="w"> </span><span class="n">peerstate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">global_state</span><span class="p">[</span><span class="n">sockfd</span><span class="p">];</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">state</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">INITIAL_ACK</span><span class="w"> </span><span class="o">||</span><span class="w"></span>
+<span class="w">      </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendptr</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendbuf_end</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Until the initial ACK has been sent to the peer, there&#39;s nothing we</span>
+<span class="w">    </span><span class="c1">// want to receive. Also, wait until all data staged for sending is sent to</span>
+<span class="w">    </span><span class="c1">// receive more data.</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">fd_status_W</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">buf</span><span class="p">[</span><span class="mi">1024</span><span class="p">];</span><span class="w"></span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">nbytes</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">recv</span><span class="p">(</span><span class="n">sockfd</span><span class="p">,</span><span class="w"> </span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="w"> </span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">nbytes</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// The peer disconnected.</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">fd_status_NORW</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">nbytes</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">errno</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">EAGAIN</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">errno</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">EWOULDBLOCK</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="c1">// The socket is not *really* ready for recv; wait until it is.</span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">fd_status_R</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">perror_die</span><span class="p">(</span><span class="s">&quot;recv&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="kt">bool</span><span class="w"> </span><span class="n">ready_to_send</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">false</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">nbytes</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">state</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">INITIAL_ACK</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="n">assert</span><span class="p">(</span><span class="mi">0</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="s">&quot;can&#39;t reach here&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">WAIT_FOR_MSG</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">buf</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;^&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">IN_MSG</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="no">IN_MSG</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">buf</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;$&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">WAIT_FOR_MSG</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">assert</span><span class="p">(</span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendbuf_end</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">SENDBUF_SIZE</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendbuf</span><span class="p">[</span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendbuf_end</span><span class="o">++</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">buf</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="n">ready_to_send</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">true</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Report reading readiness iff there&#39;s nothing to send to the peer as a</span>
+<span class="w">  </span><span class="c1">// result of the latest recv.</span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="p">(</span><span class="n">fd_status_t</span><span class="p">){.</span><span class="n">want_read</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">!</span><span class="n">ready_to_send</span><span class="p">,</span><span class="w"></span>
+<span class="w">                       </span><span class="p">.</span><span class="n">want_write</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ready_to_send</span><span class="p">};</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>A <tt class="docutils literal">peer_state_t</tt> is the full state object used to represent a client
+connection between callback calls from the main loop. Since a callback is
+invoked on some partial data sent by the client, it cannot assume it will be
+able to communicate with the client continuously, and it has to run quickly
+without blocking. It never blocks because the socket is set to non-blocking mode
+and <tt class="docutils literal">recv</tt> will always return quickly. Other than calling <tt class="docutils literal">recv</tt>, all this
+handler does is manipulate the state - there are no additional calls that could
+potentially block.</p>
+<p>An an exercise, can you figure out why this code needs an extra state? Our
+servers so far in the series managed with just two states, but this one needs
+three.</p>
+<p>Let's also have a look at the &quot;socket ready to send&quot; callback:</p>
+<div class="highlight"><pre><span></span><span class="n">fd_status_t</span><span class="w"> </span><span class="nf">on_peer_ready_send</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">sockfd</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">assert</span><span class="p">(</span><span class="n">sockfd</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">MAXFDs</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">peer_state_t</span><span class="o">*</span><span class="w"> </span><span class="n">peerstate</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">global_state</span><span class="p">[</span><span class="n">sockfd</span><span class="p">];</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendptr</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendbuf_end</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Nothing to send.</span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">fd_status_RW</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">sendlen</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendbuf_end</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendptr</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">nsent</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">send</span><span class="p">(</span><span class="n">sockfd</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendbuf</span><span class="p">[</span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendptr</span><span class="p">],</span><span class="w"> </span><span class="n">sendlen</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">nsent</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">errno</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">EAGAIN</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">errno</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">EWOULDBLOCK</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="n">fd_status_W</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">perror_die</span><span class="p">(</span><span class="s">&quot;send&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">nsent</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">sendlen</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendptr</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">nsent</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">fd_status_W</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Everything was sent successfully; reset the send queue.</span>
+<span class="w">    </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">sendbuf_end</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// Special-case state transition in if we were in INITIAL_ACK until now.</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">state</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">INITIAL_ACK</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">peerstate</span><span class="o">-&gt;</span><span class="n">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">WAIT_FOR_MSG</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">fd_status_R</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Same here - the callback calls a non-blocking <tt class="docutils literal">send</tt> and performs state
+manipulation. In asynchronous code, it's critical for callbacks to do their work
+quickly - any delay blocks the main loop from making progress, and thus blocks
+the whole server from handling other clients.</p>
+<p>Let's once again repeat a run of the server with the script that connects 3
+clients simultaneously. In one terminal window we'll run:</p>
+<div class="highlight"><pre><span></span>$ ./select-server
+</pre></div>
+<p>In another:</p>
+<div class="highlight"><pre><span></span>$ python3.6 simple-client.py  -n 3 localhost 9090
+INFO:2017-09-26 05:29:15,864:conn1 connected...
+INFO:2017-09-26 05:29:15,864:conn2 connected...
+INFO:2017-09-26 05:29:15,864:conn0 connected...
+INFO:2017-09-26 05:29:15,865:conn1 sending b&#39;^abc$de^abte$f&#39;
+INFO:2017-09-26 05:29:15,865:conn2 sending b&#39;^abc$de^abte$f&#39;
+INFO:2017-09-26 05:29:15,865:conn0 sending b&#39;^abc$de^abte$f&#39;
+INFO:2017-09-26 05:29:15,865:conn1 received b&#39;bcdbcuf&#39;
+INFO:2017-09-26 05:29:15,865:conn2 received b&#39;bcdbcuf&#39;
+INFO:2017-09-26 05:29:15,865:conn0 received b&#39;bcdbcuf&#39;
+INFO:2017-09-26 05:29:16,866:conn1 sending b&#39;xyz^123&#39;
+INFO:2017-09-26 05:29:16,867:conn0 sending b&#39;xyz^123&#39;
+INFO:2017-09-26 05:29:16,867:conn2 sending b&#39;xyz^123&#39;
+INFO:2017-09-26 05:29:16,867:conn1 received b&#39;234&#39;
+INFO:2017-09-26 05:29:16,868:conn0 received b&#39;234&#39;
+INFO:2017-09-26 05:29:16,868:conn2 received b&#39;234&#39;
+INFO:2017-09-26 05:29:17,868:conn1 sending b&#39;25$^ab0000$abab&#39;
+INFO:2017-09-26 05:29:17,869:conn1 received b&#39;36bc1111&#39;
+INFO:2017-09-26 05:29:17,869:conn0 sending b&#39;25$^ab0000$abab&#39;
+INFO:2017-09-26 05:29:17,870:conn0 received b&#39;36bc1111&#39;
+INFO:2017-09-26 05:29:17,870:conn2 sending b&#39;25$^ab0000$abab&#39;
+INFO:2017-09-26 05:29:17,870:conn2 received b&#39;36bc1111&#39;
+INFO:2017-09-26 05:29:18,069:conn1 disconnecting
+INFO:2017-09-26 05:29:18,070:conn0 disconnecting
+INFO:2017-09-26 05:29:18,070:conn2 disconnecting
+</pre></div>
+<p>Similarly to the threaded case, there's no delay between clients - they are all
+handled concurrently. And yet, there are no threads in sight in
+<tt class="docutils literal"><span class="pre">select-server</span></tt>! The main loop <em>multiplexes</em> all the clients by efficient
+polling of multiple sockets using <tt class="docutils literal">select</tt>. Recall the sequential vs.
+multi-threaded client handling diagrams from <a class="reference external" href="../concurrent-servers-part-2-threads/index.html">part 2</a>. For
+our <tt class="docutils literal"><span class="pre">select-server</span></tt>, the time flow for three clients looks something like
+this:</p>
+<img alt="Multiplexed client-handling flow" class="align-center" src="../../images/2017/multiplexed-flow.png" />
+<p>All clients are handled concurrently within the same thread, by multiplexing -
+doing some work for a client, switching to another, then another, then going
+back to the original client, etc. Note that there's no specific round-robin
+order here - the clients are handled when they send data to the server, which
+really depends on the client.</p>
+</div>
+<div class="section" id="synchronous-asynchronous-event-driven-callback-based">
+<h2>Synchronous, asynchronous, event-driven, callback-based</h2>
+<p>The <tt class="docutils literal"><span class="pre">select-server</span></tt> code sample provides a good background for discussing just
+what is meant by &quot;asynchronous&quot; programming, and how it relates to event-driven
+and callback-based programming, because all these terms are common in the
+(rather inconsistent) discussion of concurrent servers.</p>
+<p>Let's start with a quote from <tt class="docutils literal">select</tt>'s man page:</p>
+<blockquote>
+select, pselect, FD_CLR, FD_ISSET, FD_SET, FD_ZERO - synchronous I/O multiplexing</blockquote>
+<p>So <tt class="docutils literal">select</tt> is for <em>synchronous</em> multiplexing. But I've just presented a
+substantial code sample using <tt class="docutils literal">select</tt> as an example of an <em>asynchronous</em>
+server; what gives?</p>
+<p>The answer is: it depends on your point of view. Synchronous is often used as a
+synonym for blocking, and the calls to <tt class="docutils literal">select</tt> are, indeed, blocking. So are
+the calls to <tt class="docutils literal">send</tt> and <tt class="docutils literal">recv</tt> in the sequential and threaded servers
+presented in parts 1 and 2. So it is fair to say that <tt class="docutils literal">select</tt> is a
+<em>synchronous</em> API. However, the server design emerging from the use of
+<tt class="docutils literal">select</tt> is actually <em>asynchronous</em>, or <em>callback-based</em>, or <em>event-driven</em>.
+Note that the <tt class="docutils literal">on_peer_*</tt> functions presented in this post are callbacks; they
+should never block, and they get invoked due to network events. They can get
+partial data, and are expected to retain coherent state in-between invocations.</p>
+<p>If you've done any amont of GUI programming in the past, all of this is very
+familiar. There's an &quot;event loop&quot; that's often entirely hidden in frameworks,
+and the application's &quot;business logic&quot; is built out of callbacks that get
+invoked by the event loop due to various events - user mouse clicks, menu
+selections, timers firing, data arriving on sockets, etc. The most ubiquitous
+model of programming these days is, of course, client-side Javascript, which
+is written as a bunch of callbacks invoked by user activity on a web page.</p>
+</div>
+<div class="section" id="the-limitations-of-select">
+<h2>The limitations of select</h2>
+<p>Using <tt class="docutils literal">select</tt> for our first example of an asynchronous server makes sense to
+present the concept, and also because <tt class="docutils literal">select</tt> is such an ubiquitous and
+portable API. But it also has some significant limitations that manifest when
+the number of watched file descriptors is very large:</p>
+<ol class="arabic simple">
+<li>Limited file descriptor set size.</li>
+<li>Bad performance.</li>
+</ol>
+<p>Let's start with the file descriptor size. <tt class="docutils literal">FD_SETSIZE</tt> is a compile-time
+constant that's usually equal to 1024 on modern systems. It's hard-coded deep in
+the guts of <tt class="docutils literal">glibc</tt>, and isn't easy to modify. It limits the number of file
+descriptors a <tt class="docutils literal">select</tt> call can watch to 1024. These days folks want to write
+servers that handle 10s of thousands of concurrent clients and more, so this
+problem is real. There are workarounds, but they aren't portable and aren't
+easy.</p>
+<p>The bad performance issue is a bit more subtle, but still very serious. Note
+that when <tt class="docutils literal">select</tt> returns, the information it provides to the caller is the
+number of &quot;ready&quot; descriptors, and the updated descriptor sets. The descriptor
+sets map from descriptor to &quot;ready/not ready&quot; but they don't provide a way to
+iterate over all the ready descriptors efficiently. If there's only a single
+descriptor that is ready in the set, in the worst case the caller has to iterate
+over <em>the entire set</em> to find it. This works OK when the number of descriptors
+watched is small, but if it gets to high numbers this overhead starts hurting
+<a class="footnote-reference" href="index.html#footnote-7" id="footnote-reference-7">[7]</a>.</p>
+<p>For these reasons <tt class="docutils literal">select</tt> has recently fallen out of favor for writing
+high-performance concurrent servers. Every popular OS has its own, non-portable
+APIs that permit users to write much more performant event loops; higher-level
+interfaces like frameworks and high-level languages usually wrap these APIs
+in a single portable interface.</p>
+</div>
+<div class="section" id="epoll">
+<h2>epoll</h2>
+<p>As an example, let's look at <tt class="docutils literal">epoll</tt>, Linux's solution to the high-volume
+I/O event notification problem. The key to <tt class="docutils literal">epoll</tt>'s efficiency is greater
+cooperation from the kernel. Instead of using a file descriptor set,
+<tt class="docutils literal">epoll_wait</tt> fills a buffer with events that are currently ready. Only the
+ready events are added to the buffer, so there is no need to iterate over <em>all</em>
+the currently watched file descriptors in the client. This changes the process
+of discovering which descriptors are ready from O(N) in <tt class="docutils literal">select</tt>'s case  to
+O(1).</p>
+<p>A full presentation of the <tt class="docutils literal">epoll</tt> API is not the goal here - there are plenty
+of online resources for that. As you may have guessed, though, I am going to
+write yet another version of our concurrent server - this time using <tt class="docutils literal">epoll</tt>
+instead of <tt class="docutils literal">select</tt>. The full code sample <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/async-socket-server/epoll-server.c">is here</a>.
+In fact, since the vast majority of the code is the same as <tt class="docutils literal"><span class="pre">select-server</span></tt>,
+I'll only focus on the novelty - the use of <tt class="docutils literal">epoll</tt> in the main loop:</p>
+<div class="highlight"><pre><span></span><span class="k">struct</span><span class="w"> </span><span class="nc">epoll_event</span><span class="w"> </span><span class="n">accept_event</span><span class="p">;</span><span class="w"></span>
+<span class="n">accept_event</span><span class="p">.</span><span class="n">data</span><span class="p">.</span><span class="n">fd</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">listener_sockfd</span><span class="p">;</span><span class="w"></span>
+<span class="n">accept_event</span><span class="p">.</span><span class="n">events</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">EPOLLIN</span><span class="p">;</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">epoll_ctl</span><span class="p">(</span><span class="n">epollfd</span><span class="p">,</span><span class="w"> </span><span class="n">EPOLL_CTL_ADD</span><span class="p">,</span><span class="w"> </span><span class="n">listener_sockfd</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">accept_event</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">perror_die</span><span class="p">(</span><span class="s">&quot;epoll_ctl EPOLL_CTL_ADD&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">struct</span><span class="w"> </span><span class="nc">epoll_event</span><span class="o">*</span><span class="w"> </span><span class="n">events</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">calloc</span><span class="p">(</span><span class="n">MAXFDS</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">epoll_event</span><span class="p">));</span><span class="w"></span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">events</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nb">NULL</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">die</span><span class="p">(</span><span class="s">&quot;Unable to allocate memory for epoll_events&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">nready</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">epoll_wait</span><span class="p">(</span><span class="n">epollfd</span><span class="p">,</span><span class="w"> </span><span class="n">events</span><span class="p">,</span><span class="w"> </span><span class="n">MAXFDS</span><span class="p">,</span><span class="w"> </span><span class="mi">-1</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">nready</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="o">++</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">events</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">events</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">EPOLLERR</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">perror_die</span><span class="p">(</span><span class="s">&quot;epoll_wait returned EPOLLERR&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">events</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">data</span><span class="p">.</span><span class="n">fd</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">listener_sockfd</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="c1">// The listening socket is ready; this means a new peer is connecting.</span>
+<span class="w">      </span><span class="p">...</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="c1">// A peer socket is ready.</span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">events</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">events</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">EPOLLIN</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// Ready for reading.</span>
+<span class="w">        </span><span class="p">...</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">events</span><span class="p">[</span><span class="n">i</span><span class="p">].</span><span class="n">events</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="n">EPOLLOUT</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// Ready for writing.</span>
+<span class="w">        </span><span class="p">...</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>We start by configuring <tt class="docutils literal">epoll</tt> with a call to <tt class="docutils literal">epoll_ctl</tt>. In this case,
+the configuration amounts to adding the listening socket to the descriptors
+<tt class="docutils literal">epoll</tt> is watching for us. We then allocate a buffer of ready events to pass
+to <tt class="docutils literal">epoll</tt> for modification. The call to <tt class="docutils literal">epoll_wait</tt> in the main loop is
+where the magic's at. It blocks until one of the watched descriptors is ready
+(or until a timeout expires), and returns the number of ready descriptors. This
+time, however, instead of blindly iterating over all the watched sets, we know
+that <tt class="docutils literal">epoll_write</tt> populated the <tt class="docutils literal">events</tt> buffer passed to it with the ready
+events, from 0 to <tt class="docutils literal"><span class="pre">nready-1</span></tt>, so we iterate only the strictly necessary number
+of times.</p>
+<p>To reiterate this critical difference from <tt class="docutils literal">select</tt>: if we're watching 1000
+descriptors and two become ready, <tt class="docutils literal">epoll_waits</tt> returns <tt class="docutils literal">nready=2</tt> and
+populates the first two elements of the <tt class="docutils literal">events</tt> buffer - so we only &quot;iterate&quot;
+over two descriptors. With <tt class="docutils literal">select</tt> we'd still have to iterate over 1000
+descriptors to find out which ones are ready. For this reason <tt class="docutils literal">epoll</tt> scales
+much better than <tt class="docutils literal">select</tt> for busy servers with many active sockets.</p>
+<p>The rest of the code is straightforward, since we're already familiar with
+<tt class="docutils literal"><span class="pre">select-server</span></tt>. In fact, all the &quot;business logic&quot; of <tt class="docutils literal"><span class="pre">epoll-server</span></tt> is
+exactly the same as for <tt class="docutils literal"><span class="pre">select-server</span></tt> - the callbacks consist of the same
+code.</p>
+<p>This similarity is tempting to exploit by abstracting away the event loop into a
+library/framework. I'm going to resist this itch, because so many great
+programmers succumbed to it in the past. Instead, in the next post we're going
+to look at <tt class="docutils literal">libuv</tt> - one of the more popular event loop abstractions emerging
+recently. Libraries like <tt class="docutils literal">libuv</tt> allow us to write concurrent asynchronous
+servers without worrying about the greasy details of the underlying system
+calls.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>I tried enlightening myself on the actual semantic difference between the
+two by doing some web browsing and reading, but got a headache fairly
+quickly. There are many different opinions ranging from &quot;they're the same
+thing&quot;, to &quot;one is a subset of another&quot; to &quot;they're completely different
+things&quot;. When faced with such divergent views on the semantics, it's best
+to abandon the issue entirely, focusing instead on specific examples and
+use cases.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>POSIX mandates that this can be either <tt class="docutils literal">EAGAIN</tt> or <tt class="docutils literal">EWOULDBLOCK</tt>, and
+portable applications should check for both.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>Similarly to all C samples in this series, this code uses some helper
+utilities to set up listening sockets. The full code for these utilities
+lives in the <tt class="docutils literal">utils</tt> module <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/async-socket-server/utils.h">in the repository</a>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-4">[4]</a></td><td><tt class="docutils literal">select</tt> is not a network/socket-specific function; it watches
+arbitrary file descriptors, which could be disk files, pipes, terminals,
+sockets or anything else Unix systems represent with file descriptors. In
+this post we're focusing on its uses for sockets, of course.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-5">[5]</a></td><td>There are ways to intermix event-driven programming with multiple
+threads, but I'll defer this discussion to later in the series.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-6" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-6">[6]</a></td><td>Due to various non-trivial reasons it could <em>still</em> block, even after
+<tt class="docutils literal">select</tt> says it's ready. Therefore, all sockets opened by this server
+are set to nonblocking mode, and if the call to <tt class="docutils literal">recv</tt> or <tt class="docutils literal">send</tt>
+returns <tt class="docutils literal">EAGAIN</tt> or <tt class="docutils literal">EWOULDBLOCK</tt>, the callbacks just assumed no
+event really happened. Read the code sample comments for more details.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-7" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-7">[7]</a></td><td>Note that this still isn't as bad as the asynchronous polling example
+presented earlier in the post. The polling has to happen <em>all the time</em>,
+while <tt class="docutils literal">select</tt> actually blocks until one or more sockets are ready for
+reading/writing; far less CPU time is wasted with <tt class="docutils literal">select</tt> than with
+repeated polling.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Python - paralellizing CPU-bound tasks with concurrent.futures - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="python-paralellizing-cpu-bound-tasks-with-concurrent-futures.html"
+                       rel="bookmark"
+                       title="Permalink to Python - paralellizing CPU-bound tasks with concurrent.futures">
+                        Python - paralellizing CPU-bound tasks with concurrent.futures
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> January 16, 2013 at 05:50</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/python.html">Python</a>
+        ,
+    <a href="../../../tag/concurrency.html">Concurrency</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>A year ago, I wrote a series of posts about using the Python <tt class="docutils literal">multiprocessing</tt> module. <a class="reference external" href="../../../2012/01/16/python-parallelizing-cpu-bound-tasks-with-multiprocessing/index.html">One of the posts</a> contrasted compute-intensive task parallelization using threads vs. processes. Today I want to revisit that topic, this time employing the <tt class="docutils literal">concurrent.futures</tt> module which is part of the standard library since Python 3.2</p>
+<p>First of all, what are &quot;futures&quot;? The <a class="reference external" href="http://en.wikipedia.org/wiki/Future_%28programming%29">Wikipedia page</a> says:</p>
+<blockquote>
+In computer science, <strong>future</strong>, promise, and delay refer to constructs used for synchronizing in some concurrent programming languages. They describe an <strong>object that acts as a proxy for a result</strong> that is initially unknown, usually because the computation of its value is yet incomplete.</blockquote>
+<p>I wouldn't say &quot;futures&quot; is the best name choice, but this is what we're stuck with, so let's move on. Futures are actually a very nice tool that helps bridge an annoying gap that always exists in concurrent execution - the gap between launching some computation concurrently and obtaining the result of that computation. As <a class="reference external" href="../../../2012/01/16/python-parallelizing-cpu-bound-tasks-with-multiprocessing/index.html">my previous post</a> showed, one of the common ways to deal with this gap is to pass a synchronized <tt class="docutils literal">Queue</tt> object into every worker process (or thread) and then collect the results once the workers are done. Futures make this much easier and more elegant, as we'll see.</p>
+<p>For completeness, here is the computation we're going to apply in parallel over a large amount of inputs:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">factorize_naive</span>(n):
+    <span style="color: #7f007f">&quot;&quot;&quot; A naive factorization method. Take integer &#39;n&#39;, return list of</span>
+<span style="color: #7f007f">        factors.</span>
+<span style="color: #7f007f">    &quot;&quot;&quot;</span>
+    <span style="color: #00007f; font-weight: bold">if</span> n &lt; <span style="color: #007f7f">2</span>:
+        <span style="color: #00007f; font-weight: bold">return</span> []
+    factors = []
+    p = <span style="color: #007f7f">2</span>
+
+    <span style="color: #00007f; font-weight: bold">while</span> <span style="color: #00007f">True</span>:
+        <span style="color: #00007f; font-weight: bold">if</span> n == <span style="color: #007f7f">1</span>:
+            <span style="color: #00007f; font-weight: bold">return</span> factors
+
+        r = n % p
+        <span style="color: #00007f; font-weight: bold">if</span> r == <span style="color: #007f7f">0</span>:
+            factors.append(p)
+            n = n // p
+        <span style="color: #00007f; font-weight: bold">elif</span> p * p &gt;= n:
+            factors.append(n)
+            <span style="color: #00007f; font-weight: bold">return</span> factors
+        <span style="color: #00007f; font-weight: bold">elif</span> p &gt; <span style="color: #007f7f">2</span>:
+            <span style="color: #007f00"># Advance in steps of 2 over odd numbers</span>
+            p += <span style="color: #007f7f">2</span>
+        <span style="color: #00007f; font-weight: bold">else</span>:
+            <span style="color: #007f00"># If p == 2, get to 3</span>
+            p += <span style="color: #007f7f">1</span>
+    <span style="color: #00007f; font-weight: bold">assert</span> <span style="color: #00007f">False</span>, <span style="color: #7f007f">&quot;unreachable&quot;</span>
+</pre></div>
+<p>And here's the first attempt at doing that with <tt class="docutils literal">concurrent.futures</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">from</span> <span style="color: #00007f">concurrent.futures</span> <span style="color: #00007f; font-weight: bold">import</span> ProcessPoolExecutor, as_completed
+
+<span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">chunked_worker</span>(nums):
+    <span style="color: #7f007f">&quot;&quot;&quot; Factorize a list of numbers, returning a num:factors mapping.</span>
+<span style="color: #7f007f">    &quot;&quot;&quot;</span>
+    <span style="color: #00007f; font-weight: bold">return</span> {n: factorize_naive(n) <span style="color: #00007f; font-weight: bold">for</span> n <span style="color: #0000aa">in</span> nums}
+
+
+<span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">pool_factorizer_chunked</span>(nums, nprocs):
+    <span style="color: #007f00"># Manually divide the task to chunks of equal length, submitting each</span>
+    <span style="color: #007f00"># chunk to the pool.</span>
+    chunksize = <span style="color: #00007f">int</span>(math.ceil(<span style="color: #00007f">len</span>(nums) / <span style="color: #00007f">float</span>(nprocs)))
+    futures = []
+
+    <span style="color: #00007f; font-weight: bold">with</span> ProcessPoolExecutor() <span style="color: #00007f; font-weight: bold">as</span> executor:
+        <span style="color: #00007f; font-weight: bold">for</span> i <span style="color: #0000aa">in</span> <span style="color: #00007f">range</span>(nprocs):
+            chunk = nums[(chunksize * i) : (chunksize * (i + <span style="color: #007f7f">1</span>))]
+            futures.append(executor.submit(chunked_worker, chunk))
+
+    resultdict = {}
+    <span style="color: #00007f; font-weight: bold">for</span> f <span style="color: #0000aa">in</span> as_completed(futures):
+        resultdict.update(f.result())
+    <span style="color: #00007f; font-weight: bold">return</span> resultdict
+</pre></div>
+<p>The end result of <tt class="docutils literal">pool_factorizer_chunked</tt> is a dictionary mapping numbers to lists of their factors. The most interesting thing to note here is this: the function run in a worker process (<tt class="docutils literal">chunked_worker</tt> in this case) can simply return a value. For each such &quot;call&quot; (submission to the executor), a future is returned. This future encapsulates the result of the execution, which is probably not ready immediately but will be at some point. The <tt class="docutils literal">concurrent.futures.as_completed</tt> helper allows to simply wait on all futures and yield the results of those that are done, whenever they're done.</p>
+<p>It's easy to see that this code is conceptually simpler than manually launching the processes, passing some sort of synchronization queues to workers and collecting results. This, IMHO, is the main goal of futures. <strong>Futures aren't there to make your code faster, they're there to make it simpler</strong>. And any simplification is a blessing when parallel programming is concerned.</p>
+<p>Note also that <tt class="docutils literal">ProcessPoolExecutor</tt> is used as a context manager - this makes process cleanup automatic and reliable. For more fine grained control, it has a <tt class="docutils literal">shutdown</tt> method that can be called manually.</p>
+<p>There's more. Since the <tt class="docutils literal">concurrent.futures</tt> module allows to simply return a value from a concurrent call, it has another tool to make computations like the above even simpler - <tt class="docutils literal">Executor.map</tt>. Here's the same task rewritten with <tt class="docutils literal">map</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">pool_factorizer_map</span>(nums, nprocs):
+    <span style="color: #007f00"># Let the executor divide the work among processes by using &#39;map&#39;.</span>
+    <span style="color: #00007f; font-weight: bold">with</span> ProcessPoolExecutor(max_workers=nprocs) <span style="color: #00007f; font-weight: bold">as</span> executor:
+        <span style="color: #00007f; font-weight: bold">return</span> {num:factors <span style="color: #00007f; font-weight: bold">for</span> num, factors <span style="color: #0000aa">in</span>
+                                <span style="color: #00007f">zip</span>(nums,
+                                    executor.map(factorize_naive, nums))}
+</pre></div>
+<p>Amazingly, this is it. This small function (a potential 2-liner, if not the wrapping for readability) creates a process pool, submits a bunch of tasks to it, collects all the results when they're ready, puts them into a single dictionary and returns it.</p>
+<p>As for performance, the second method is also a bit faster in my benchmarks. I think this makes sense because the manual division to chunks doesn't take into account which chunks will take longer and the division of work between workers may be unbalanced. The <tt class="docutils literal">map</tt> method keeps a pool of workers to which it submits new computations when they're ready, which means that the workers are all kept busy until everything is done.</p>
+<p>To conclude, I strongly recommend using <tt class="docutils literal">concurrent.futures</tt> whenever the possibility presents itself. They're much simpler conceptually, and hence less error prone, than the manual method of creating processes and keeping track of their results. In practice, a future is a nice way to convey the result of a computation from a process producing it to a process consuming it. It's like creating a result queue manually, but with a lot of useful semantics implemented. Futures can be polled, cancelled, provide useful access to exceptions and have callbacks attached to them. My examples here are simplistic and don't show how to use the cooler features, but if you need them - <a class="reference external" href="http://docs.python.org/dev/library/concurrent.futures.html">the documentation</a> is pretty good.</p>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="python-paralellizing-cpu-bound-tasks-with-concurrent-futures.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

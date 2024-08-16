@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Basics of Futexes - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Basics of Futexes">
+                        Basics of Futexes
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> July 13, 2018 at 05:53</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/concurrency.html">Concurrency</a>
+        ,
+    <a href="../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../tag/linux.html">Linux</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>The futex (short for &quot;Fast userspace mutex&quot;) mechanism was proposed by Linux
+contributors from IBM in 2002 <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>; it was integrated into the kernel in late 2003.
+The main idea is to enable a more efficient way for userspace code to
+synchronize multiple threads, with minimal kernel involvement.</p>
+<p>In this post I want to provide a basic overview of futexes, how they work, and
+how they're used to implement the more familiar synchronization primitives in
+higher-level APIs and languages.</p>
+<p>An important disclaimer: futexes are a very low-level feature of the Linux
+kernel, suitable for use in foundational runtime components like the C/C++
+standard libraries. It is extremely unlikely that you will ever need to
+use them in application code.</p>
+<div class="section" id="motivation">
+<h2>Motivation</h2>
+<p>Before the introduction of futexes, system calls were required for locking and
+unlocking shared resources (for example <tt class="docutils literal">semop</tt>). System calls are relatively
+expensive, however, requiring a context switch from userspace to kernel space;
+as programs became increasingly concurrent, locks started showing up on
+profiles as a significant percentage of the run time. This is very unfortunate,
+given that locks accomplish no real work (&quot;business logic&quot;) but are only there
+to guarantee that access to shared resources is safe.</p>
+<p>The futex proposal is based on a clever observation: in most cases, locks are
+actually not contended. If a thread comes upon a free lock, locking it
+can be cheap because most likely no other thread is trying to lock it <em>at the
+exact same time</em>. So we can get by without a system call, attemping much cheaper
+atomic operations first <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>. There's a very high chance that the atomic
+instruction will succeed.</p>
+<p>However, in the unlikely event that another thread <em>did</em> try to take the lock at
+the same time, the atomic approach may fail. In this case there are two options.
+We can busy-loop using the atomic until the lock is cleared; while this is 100%
+userspace, it can also be extremely wasteful since looping can significantly
+occupy a core, and the lock can be held for a long time. The alternative is to
+&quot;sleep&quot; until the lock is free (or at least there's a high chance that it's
+free); we need the kernel to help with that, and this is where futexes come in.</p>
+</div>
+<div class="section" id="simple-futex-use-waiting-and-waking">
+<h2>Simple futex use - waiting and waking</h2>
+<p>The <a class="reference external" href="http://man7.org/linux/man-pages/man2/futex.2.html">futex(2) system call</a>
+multiplexes a lot of functionality on top of a single interface. I will not
+discuss any of the advanced options here (some of them are so esoteric they're
+not even officially documented) but will focus on just <tt class="docutils literal">FUTEX_WAIT</tt> and
+<tt class="docutils literal">FUTEX_WAKE</tt>. The man page description starts with a good introduction:</p>
+<blockquote>
+The <tt class="docutils literal">futex()</tt> system call provides a method for waiting until a certain
+condition becomes true.  It is typically used as a blocking construct
+in the context of shared-memory synchronization.  When using futexes,
+the majority of the synchronization operations are performed in user
+space.  A user-space program employs the <tt class="docutils literal">futex()</tt> system call only
+when it is likely that the program has to block for a longer time
+until the condition becomes true.  Other <tt class="docutils literal">futex()</tt> operations can be
+used to wake any processes or threads waiting for a particular
+condition.</blockquote>
+<p>Simply stated, a futex is a kernel construct that helps userspace code
+synchronize on shared events. Some userspace processes (or threads) can wait on
+an event (<tt class="docutils literal">FUTEX_WAIT</tt>), while another userspace process can signal the event
+(<tt class="docutils literal">FUTEX_WAKE</tt>) to notify waiters. The waiting is efficient - the waiters are
+suspended by the kernel and are only scheduled anew when there's a wake-up
+signal.</p>
+<p>Be sure to read the <tt class="docutils literal">futex</tt> man page beyond the introduction; blog posts
+are not a substitute for documentation! At the very least read about the
+<tt class="docutils literal">FUTEX_WAIT</tt> and <tt class="docutils literal">FUTEX_WAKE</tt> calls, the arguments they take, their return
+values and possible errors.</p>
+<p>Let's study a <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2018/futex-basics/futex-basic-process.c">simple example</a>
+demonstrating basic usage of futexes to coordinate two processes. The <tt class="docutils literal">main</tt>
+function sets up the machinery and launches a child process that:</p>
+<ol class="arabic simple">
+<li>Waits for <tt class="docutils literal">0xA</tt> to be written into a shared memory slot.</li>
+<li>Writes <tt class="docutils literal">0xB</tt> into the same memory slot.</li>
+</ol>
+<p>Meanwhile, the parent:</p>
+<ol class="arabic simple">
+<li>Writes <tt class="docutils literal">0xA</tt> into the shared memory slot.</li>
+<li>Waits for <tt class="docutils literal">0xB</tt> to be written into the slot.</li>
+</ol>
+<p>This is a simple handshake between two processes. Here's the code:</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">argc</span><span class="p">,</span><span class="w"> </span><span class="kt">char</span><span class="o">**</span><span class="w"> </span><span class="n">argv</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">shm_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">shmget</span><span class="p">(</span><span class="n">IPC_PRIVATE</span><span class="p">,</span><span class="w"> </span><span class="mi">4096</span><span class="p">,</span><span class="w"> </span><span class="n">IPC_CREAT</span><span class="w"> </span><span class="o">|</span><span class="w"> </span><span class="mo">0666</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">shm_id</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">perror</span><span class="p">(</span><span class="s">&quot;shmget&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">exit</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="kt">int</span><span class="o">*</span><span class="w"> </span><span class="n">shared_data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">shmat</span><span class="p">(</span><span class="n">shm_id</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="o">*</span><span class="n">shared_data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">forkstatus</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">fork</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">forkstatus</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">perror</span><span class="p">(</span><span class="s">&quot;fork&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">exit</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">forkstatus</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Child process</span>
+
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;child waiting for A</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">wait_on_futex_value</span><span class="p">(</span><span class="n">shared_data</span><span class="p">,</span><span class="w"> </span><span class="mh">0xA</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;child writing B</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Write 0xB to the shared data and wake up parent.</span>
+<span class="w">    </span><span class="o">*</span><span class="n">shared_data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mh">0xB</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">wake_futex_blocking</span><span class="p">(</span><span class="n">shared_data</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Parent process.</span>
+
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;parent writing A</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Write 0xA to the shared data and wake up child.</span>
+<span class="w">    </span><span class="o">*</span><span class="n">shared_data</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mh">0xA</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="n">wake_futex_blocking</span><span class="p">(</span><span class="n">shared_data</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;parent waiting for B</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">wait_on_futex_value</span><span class="p">(</span><span class="n">shared_data</span><span class="p">,</span><span class="w"> </span><span class="mh">0xB</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// Wait for the child to terminate.</span>
+<span class="w">    </span><span class="n">wait</span><span class="p">(</span><span class="nb">NULL</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="n">shmdt</span><span class="p">(</span><span class="n">shared_data</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Note that we use POSIX shared memory APIs to create a memory location mapped
+into both processes. We can't just use a regular pointer here, because the
+address spaces of the two processes will be different <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>.</p>
+<p>Note that this is not a canonical usage of <tt class="docutils literal">futex</tt>, which would be better
+employed to wait until a value changes <em>from</em> something rather than <em>to</em>
+something. It's just here to show the various possibilities in return values
+from <tt class="docutils literal">futex</tt>. Later in the post a more canonical usage is demonstrated when we
+implement a mutex.</p>
+<p>Here is <tt class="docutils literal">wait_on_futex_value</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">wait_on_futex_value</span><span class="p">(</span><span class="kt">int</span><span class="o">*</span><span class="w"> </span><span class="n">futex_addr</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">val</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">futex_rc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">futex</span><span class="p">(</span><span class="n">futex_addr</span><span class="p">,</span><span class="w"> </span><span class="n">FUTEX_WAIT</span><span class="p">,</span><span class="w"> </span><span class="n">val</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">futex_rc</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">errno</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">EAGAIN</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="n">perror</span><span class="p">(</span><span class="s">&quot;futex&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="n">exit</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">futex_rc</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">futex_addr</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">val</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// This is a real wakeup.</span>
+<span class="w">        </span><span class="k">return</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">abort</span><span class="p">();</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This function's main added value on top of the <tt class="docutils literal">futex</tt> system call is looping
+around when the wakeup is spurious. This can happen when <tt class="docutils literal">val</tt> is not the
+expected value (yet) and also when another process was woken up before this one
+(can't really happen in this code sample, but is a real possibility in other
+scenarios).</p>
+<p>Futex semantics are tricky <a class="footnote-reference" href="index.html#footnote-4" id="footnote-reference-4">[4]</a>! <tt class="docutils literal">FUTEX_WAIT</tt> will immediately return if the
+value at the futex address is not equal to <tt class="docutils literal">val</tt>. In our case this can happen
+if the child issued a wait before the parent wrote <tt class="docutils literal">0xA</tt>, for example. The
+<tt class="docutils literal">futex</tt> call will return an error with <tt class="docutils literal">EAGAIN</tt> in this case.</p>
+<p>Here is <tt class="docutils literal">wake_futex_blocking</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">wake_futex_blocking</span><span class="p">(</span><span class="kt">int</span><span class="o">*</span><span class="w"> </span><span class="n">futex_addr</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">futex_rc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">futex</span><span class="p">(</span><span class="n">futex_addr</span><span class="p">,</span><span class="w"> </span><span class="n">FUTEX_WAKE</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">futex_rc</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">-1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">perror</span><span class="p">(</span><span class="s">&quot;futex wake&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="n">exit</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">futex_rc</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It's a blocking wrapper around <tt class="docutils literal">FUTEX_WAKE</tt>, which will normally return
+quickly regardless of how many waiters it has woken up. In our sample, this
+waiting is part of the handshake, but in many cases you won't see it.</p>
+</div>
+<div class="section" id="futexes-are-kernel-queues-for-userspace-code">
+<h2>Futexes are kernel queues for userspace code</h2>
+<p>Simply stated, a futex is a queue the kernel manages for userspace convenience.
+It lets userspace code ask the kernel to suspend until a certain condition is
+satisfied, and lets other userspace code signal that condition and wake up
+waiting processes. Earlier we've menioned busy-looping as one approach to wait
+on success of atomic operations; a kernel-managed queue is the much more
+efficient alternative, absolving userspace code from the need to burn billions
+of CPU cycles on pointless spinning.</p>
+<p>Here's a diagram from LWN's <a class="reference external" href="https://lwn.net/Articles/360699/">&quot;A futex overview and update&quot;</a>:</p>
+<img alt="Futex implementation diagram from LWN" class="align-center" src="../../images/2018/futex-lwn-diagram.png" />
+<p>In the Linux kernel, futexes are implemented in <tt class="docutils literal">kernel/futex.c</tt>. The kernel
+keeps a hash table keyed by the address to quickly find the proper queue data
+structure and adds the calling process to the wait queue. There's quite a bit of
+complication, of course, due to using fine-grained locking within the kernel
+itself and the various advanced options of futexes.</p>
+</div>
+<div class="section" id="timed-blocking-with-futex-wait">
+<h2>Timed blocking with FUTEX_WAIT</h2>
+<p>The <tt class="docutils literal">futex</tt> system call has a <tt class="docutils literal">timeout</tt> parameter which lets user code
+implement waiting with a time-out.</p>
+<p>The <tt class="docutils literal"><span class="pre">futex-wait-timeout</span></tt> <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2018/futex-basics/futex-wait-timeout.c">sample</a>
+shows this in action. Here is the relevant part of the child process which waits
+on a futex:</p>
+<div class="highlight"><pre><span></span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;child waiting for A</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="k">struct</span><span class="w"> </span><span class="nc">timespec</span><span class="w"> </span><span class="n">timeout</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{.</span><span class="n">tv_sec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="p">.</span><span class="n">tv_nsec</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">500000000</span><span class="p">};</span><span class="w"></span>
+<span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kt">unsigned</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="kt">long</span><span class="w"> </span><span class="n">t1</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">time_ns</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">futex_rc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">futex</span><span class="p">(</span><span class="n">shared_data</span><span class="p">,</span><span class="w"> </span><span class="n">FUTEX_WAIT</span><span class="p">,</span><span class="w"> </span><span class="mh">0xA</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">timeout</span><span class="p">,</span><span class="w"> </span><span class="nb">NULL</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;child woken up rc=%d errno=%s, elapsed=%llu</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">futex_rc</span><span class="p">,</span><span class="w"></span>
+<span class="w">         </span><span class="n">futex_rc</span><span class="w"> </span><span class="o">?</span><span class="w"> </span><span class="n">strerror</span><span class="p">(</span><span class="n">errno</span><span class="p">)</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">time_ns</span><span class="p">()</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="n">t1</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">futex_rc</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="o">*</span><span class="n">shared_data</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mh">0xA</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>If the wait takes longer than 500 ms, the process will loop and wait again. The
+sample lets you configure the length of time the parent process keeps the child
+waiting and observe the effects.</p>
+</div>
+<div class="section" id="using-a-futex-to-implement-a-simple-mutex">
+<h2>Using a futex to implement a simple mutex</h2>
+<p>In the motivation section that started this post, I explained how futexes help
+implement efficient locking in the common low-contention case. It's time to show
+a realistic implementation of a mutex using futexes and atomics. This is based
+on the second implementation in Ulrich Drepper's &quot;<em>Futexes are Tricky</em>&quot; paper.</p>
+<p>For this sample I'm switching to C++, to use its standardized atomics (available
+since C++11). The full code <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2018/futex-basics/mutex-using-futex.cpp">is here</a>;
+here is the important part:</p>
+<div class="highlight"><pre><span></span><span class="k">class</span><span class="w"> </span><span class="nc">Mutex</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="k">public</span><span class="o">:</span><span class="w"></span>
+<span class="w">  </span><span class="n">Mutex</span><span class="p">()</span><span class="w"> </span><span class="o">:</span><span class="w"> </span><span class="n">atom_</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{}</span><span class="w"></span>
+
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="n">lock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">c</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cmpxchg</span><span class="p">(</span><span class="o">&amp;</span><span class="n">atom_</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// If the lock was previously unlocked, there&#39;s nothing else for us to do.</span>
+<span class="w">    </span><span class="c1">// Otherwise, we&#39;ll probably have to wait.</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">c</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">do</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// If the mutex is locked, we signal that we&#39;re waiting by setting the</span>
+<span class="w">        </span><span class="c1">// atom to 2. A shortcut checks is it&#39;s 2 already and avoids the atomic</span>
+<span class="w">        </span><span class="c1">// operation in this case.</span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">c</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">2</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="n">cmpxchg</span><span class="p">(</span><span class="o">&amp;</span><span class="n">atom_</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="c1">// Here we have to actually sleep, because the mutex is actually</span>
+<span class="w">          </span><span class="c1">// locked. Note that it&#39;s not necessary to loop around this syscall;</span>
+<span class="w">          </span><span class="c1">// a spurious wakeup will do no harm since we only exit the do...while</span>
+<span class="w">          </span><span class="c1">// loop when atom_ is indeed 0.</span>
+<span class="w">          </span><span class="n">syscall</span><span class="p">(</span><span class="n">SYS_futex</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">atom_</span><span class="p">,</span><span class="w"> </span><span class="n">FUTEX_WAIT</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="c1">// We&#39;re here when either:</span>
+<span class="w">        </span><span class="c1">// (a) the mutex was in fact unlocked (by an intervening thread).</span>
+<span class="w">        </span><span class="c1">// (b) we slept waiting for the atom and were awoken.</span>
+<span class="w">        </span><span class="c1">//</span>
+<span class="w">        </span><span class="c1">// So we try to lock the atom again. We set teh state to 2 because we</span>
+<span class="w">        </span><span class="c1">// can&#39;t be certain there&#39;s no other thread at this exact point. So we</span>
+<span class="w">        </span><span class="c1">// prefer to err on the safe side.</span>
+<span class="w">      </span><span class="p">}</span><span class="w"> </span><span class="k">while</span><span class="w"> </span><span class="p">((</span><span class="n">c</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">cmpxchg</span><span class="p">(</span><span class="o">&amp;</span><span class="n">atom_</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">))</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="kt">void</span><span class="w"> </span><span class="n">unlock</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">atom_</span><span class="p">.</span><span class="n">fetch_sub</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">atom_</span><span class="p">.</span><span class="n">store</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">      </span><span class="n">syscall</span><span class="p">(</span><span class="n">SYS_futex</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">atom_</span><span class="p">,</span><span class="w"> </span><span class="n">FUTEX_WAKE</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="k">private</span><span class="o">:</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// 0 means unlocked</span>
+<span class="w">  </span><span class="c1">// 1 means locked, no waiters</span>
+<span class="w">  </span><span class="c1">// 2 means locked, there are waiters in lock()</span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">atomic</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span><span class="w"> </span><span class="n">atom_</span><span class="p">;</span><span class="w"></span>
+<span class="p">};</span><span class="w"></span>
+</pre></div>
+<p>Where <tt class="docutils literal">cmpxhg</tt> is a simple wrapper to subdue C++'s atomic primitive to the
+expected interface:</p>
+<div class="highlight"><pre><span></span><span class="c1">// An atomic_compare_exchange wrapper with semantics expected by the paper&#39;s</span>
+<span class="c1">// mutex - return the old value stored in the atom.</span>
+<span class="kt">int</span><span class="w"> </span><span class="nf">cmpxchg</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">atomic</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;*</span><span class="w"> </span><span class="n">atom</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">expected</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">desired</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kt">int</span><span class="o">*</span><span class="w"> </span><span class="n">ep</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="o">&amp;</span><span class="n">expected</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">std</span><span class="o">::</span><span class="n">atomic_compare_exchange_strong</span><span class="p">(</span><span class="n">atom</span><span class="p">,</span><span class="w"> </span><span class="n">ep</span><span class="p">,</span><span class="w"> </span><span class="n">desired</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="o">*</span><span class="n">ep</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The code snippet is heavily commented to explain how it works; reading Drepper's
+paper is recommended in any case, as it builds up to this implementation by
+first examining a simpler one which is subtly incorrect. One slightly non-kosher
+thing this code does is access the internal representation of <tt class="docutils literal"><span class="pre">std::atomic</span></tt> by
+casting the address of <tt class="docutils literal">atom_</tt> to <tt class="docutils literal">int*</tt> when passing it to the <tt class="docutils literal">futex</tt>
+syscall. This is because <tt class="docutils literal">futex</tt> expects a simple address, while C++ atomics
+wrap their actual data in opaque types. This works on Linux on x64, but isn't
+generally portable. To make <tt class="docutils literal"><span class="pre">std::atomic</span></tt> play well with <tt class="docutils literal">futex</tt> in a
+portable we'd have to add a portability layer. But it's not a need that comes up
+in practice - mixing <tt class="docutils literal">futex</tt> with C++11 is not something anyone should do -
+these snippets are just demonstrational!</p>
+<p>An interesting observation is about the meaning of the value sitting in the
+<tt class="docutils literal">atom_</tt> member. Recall that the <tt class="docutils literal">futex</tt> syscall doesn't assign any
+meaning to the value - it's up to the user to do that. The 0,1,2 convention is
+useful for mutexes, and also the one used by the <em>glibc</em> implementation for
+low-level locks.</p>
+</div>
+<div class="section" id="glibc-mutex-and-low-level-lock">
+<h2>glibc mutex and low-level lock</h2>
+<p>This brings us to the <em>glibc</em> implementation of POSIX threads, which have the
+<tt class="docutils literal">pthread_mutex_t</tt> type. As I've mentioned in the beginning of the post,
+futexes are not really for regular user code; rather, they are used by low-level
+runtimes and libraries to implement other, higher-level primitives. In this
+context, it's interesting to see how a mutex is implemented for <a class="reference external" href="https://en.wikipedia.org/wiki/Native_POSIX_Thread_Library">NPTL</a>. In the <em>glibc</em>
+source tree, this code is in <tt class="docutils literal">nptl/pthread_mutex_lock.c</tt></p>
+<p>The code is significantly complicated by all the different types of mutexes it
+has to support, but we can discover some familiar building blocks if we dig
+deep enough. In addition to the file mentioned above, other files to look at
+(for x86) are <tt class="docutils literal">sysdeps/unix/sysv/linux/x86_64/lowlevellock.h</tt> and
+<tt class="docutils literal">nptl/lowlevellock.c</tt>. The code is dense, but the combination of atomic
+compare-and-exchange operations and <tt class="docutils literal">futex</tt> invocations is apparent.
+The low-level lock machinery (<tt class="docutils literal">lll_</tt> or <tt class="docutils literal">LLL_</tt> prefixes) is used throughout
+the <em>glibc</em> code-base, not just in the implementation of POSIX threads.</p>
+<p>The beginning of the comment at the top of <tt class="docutils literal">sysdeps/nptl/lowlevellock.h</tt>
+should be familiar by now:</p>
+<div class="highlight"><pre><span></span><span class="cm">/* Low-level locks use a combination of atomic operations (to acquire and</span>
+<span class="cm">   release lock ownership) and futex operations (to block until the state</span>
+<span class="cm">   of a lock changes).  A lock can be in one of three states:</span>
+<span class="cm">   0:  not acquired,</span>
+<span class="cm">   1:  acquired with no waiters; no other threads are blocked or about to block</span>
+<span class="cm">       for changes to the lock state,</span>
+<span class="cm">   &gt;1: acquired, possibly with waiters; there may be other threads blocked or</span>
+<span class="cm">       about to block for changes to the lock state.</span>
+
+<span class="cm">   We expect that the common case is an uncontended lock, so we just need</span>
+<span class="cm">   to transition the lock between states 0 and 1; releasing the lock does</span>
+<span class="cm">   not need to wake any other blocked threads.  If the lock is contended</span>
+<span class="cm">   and a thread decides to block using a futex operation, then this thread</span>
+<span class="cm">   needs to first change the state to &gt;1; if this state is observed during</span>
+<span class="cm">   lock release, the releasing thread will wake one of the potentially</span>
+<span class="cm">   blocked threads.</span>
+<span class="cm"> ..</span>
+<span class="cm"> */</span><span class="w"></span>
+</pre></div>
+</div>
+<div class="section" id="futexes-in-the-go-runtime">
+<h2>Futexes in the Go runtime</h2>
+<p>The Go runtime does not use libc, in most cases. Therefore, it cannot rely on
+the POSIX thread implementation in its own code. It invokes the underlying OS's
+system calls directly instead.</p>
+<p>That makes it a good alternative candidate to study for its use of futexes.
+Since it can't just use a <tt class="docutils literal">pthread_mutex_t</tt> for its locking, it has to roll
+its own lock. Let's see how this is done, by starting with the user-visible
+<tt class="docutils literal">sync.Mutex</tt> type (in <tt class="docutils literal">src/sync/mutex.go</tt>).</p>
+<p>The <tt class="docutils literal">Lock</tt> method of <tt class="docutils literal">sync.Mutex</tt> is quite involved, as you might imagine.
+It first tries to use an atomic swap to quickly acquire a lock. If it turns out
+it has to wait, it defers to <tt class="docutils literal">runtime_SemacquireMutex</tt>, which in turn calls
+<tt class="docutils literal">runtime.lock</tt>. That function is defined in <tt class="docutils literal">src/runtime/lock_futex.go</tt> <a class="footnote-reference" href="index.html#footnote-5" id="footnote-reference-5">[5]</a>,
+and defines some constants that will appear familiar:</p>
+<div class="highlight"><pre><span></span><span class="kd">const</span><span class="w"> </span><span class="p">(</span><span class="w"></span>
+<span class="w">  </span><span class="nx">mutex_unlocked</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">0</span><span class="w"></span>
+<span class="w">  </span><span class="nx">mutex_locked</span><span class="w">   </span><span class="p">=</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+<span class="w">  </span><span class="nx">mutex_sleeping</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">2</span><span class="w"></span>
+
+<span class="o">...</span><span class="w"></span>
+<span class="p">)</span><span class="w"></span>
+
+<span class="c1">// Possible lock states are mutex_unlocked, mutex_locked and mutex_sleeping.</span><span class="w"></span>
+<span class="c1">// mutex_sleeping means that there is presumably at least one sleeping thread.</span><span class="w"></span>
+</pre></div>
+<p><tt class="docutils literal">runtime.lock</tt> also tries to speculatively grab a lock with an atomic; this
+function is used in a bunch of places in the Go runtime, so that makes sense,
+but I wonder if they couldn't have optimized the two consecutive atomics that
+occur when it's called by <tt class="docutils literal">Mutex.lock</tt>, somehow.</p>
+<p>If it discovers it has to sleep, it defers to <tt class="docutils literal">futexsleep</tt>, which is
+OS-specific and lives in <tt class="docutils literal">src/runtime/os_linux.go</tt>. This function calls
+invokes the <tt class="docutils literal">futex</tt> system call directly with <tt class="docutils literal">FUTEX_WAIT_PRIVATE</tt>
+(recall that this is sufficient for a single process, which the Go runtime
+fulfills).</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>See &quot;Fuss, Futexes and Furwocks: Fast Userlevel Locking in Linux&quot; by
+Franke, Russell, Kirkwood. Published in 2002 for the Ottawa Linux
+Symposium.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>Most modern processors have built-in atomic instructions implemented in
+HW. For example on Intel architectures <tt class="docutils literal">cmpxhg</tt> is an instruction.
+While it's not as cheap as non-atomic instructions (especially in
+multi-core systems), it's significantly cheaper than system calls.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td><a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2018/futex-basics">The code repository for this post</a>
+also contains an equivalent sample using threads instead of processes.
+There we don't need to use shared memory but can instead use the address
+of a stack variable.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-4">[4]</a></td><td>There's a paper written by Ulrich Drepper named <em>&quot;Futexes are Tricky&quot;</em>
+that explores some of the nuances. I'll be using it later on for the
+mutex discussion. It's a very good paper - please read it if you're
+interested in the topic.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-5">[5]</a></td><td>For OSes that expose the <tt class="docutils literal">futex(2)</tt> system call. The Go runtime has
+a fallback onto the semaphore system calls if <tt class="docutils literal">futex</tt> is not
+supported.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

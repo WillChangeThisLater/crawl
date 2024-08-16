@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Concurrent Servers: Part 1 - Introduction - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Concurrent Servers: Part 1 - Introduction">
+                        Concurrent Servers: Part 1 - Introduction
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> October 02, 2017 at 05:30</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/concurrency.html">Concurrency</a>
+        ,
+    <a href="../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../tag/network-programming.html">Network Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This is the first post in a series about concurrent network servers. My plan is
+to examine several popular concurrency models for network servers that handle
+multiple clients simultaneously, and judge those models on scalability and ease
+of implementation. All servers will listen for socket connections and implement
+a simple protocol to interact with clients.</p>
+<p>All posts in the series:</p>
+<ul class="simple">
+<li><a class="reference external" href="index.html">Part 1 - Introduction</a></li>
+<li><a class="reference external" href="../concurrent-servers-part-2-threads/index.html">Part 2 - Threads</a></li>
+<li><a class="reference external" href="../concurrent-servers-part-3-event-driven/index.html">Part 3 - Event-driven</a></li>
+<li><a class="reference external" href="../concurrent-servers-part-4-libuv/index.html">Part 4 - libuv</a></li>
+<li><a class="reference external" href="../concurrent-servers-part-5-redis-case-study/index.html">Part 5 - Redis case study</a></li>
+<li><a class="reference external" href="../../2018/concurrent-servers-part-6-callbacks-promises-and-asyncawait/index.html">Part 6 - Callbacks, Promises and async/await</a></li>
+</ul>
+<div class="section" id="the-protocol">
+<h2>The protocol</h2>
+<p>The protocol used throughout this series is very simple, but should be
+sufficient to demonstrate many interesting aspects of concurrent server design.
+Notably, the protocol is <em>stateful</em> - the server changes internal state based on
+the data clients send, and its behavior depends on that internal state.
+Not all protocols all stateful - in fact, many protocols over HTTP these days
+are stateless - but stateful protocols are sufficiently common to warrant a
+serious discussion.</p>
+<p>Here's the protocol, from the server's point of view:</p>
+<object class="align-center" data="../../images/2017/concurrent-server-protocol.svg" type="image/svg+xml">Concurrent server protocol, state machine</object>
+<p>In words: the server waits for a new client to connect; when a client connects,
+the server sends it a <tt class="docutils literal">*</tt> character and enters a &quot;wait for message state&quot;. In
+this state, the server ignores everything the client sends until it sees a <tt class="docutils literal">^</tt>
+character that signals that a new message begins. At this point it moves to the
+&quot;in message&quot; state, where it echoes back everything the client sends,
+incrementing each byte <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>. When the client sends a <tt class="docutils literal">$</tt>, the server goes back
+to waiting for a new message. The <tt class="docutils literal">^</tt> and <tt class="docutils literal">$</tt> characters are only used to
+delimit messages - they are not echoed back.</p>
+<p>An implicit arrow exists from each state back to the &quot;wait for client&quot; state, in
+case the client disconnects. By corollary, the only way for a client to signal
+&quot;I'm done&quot; is to simply close its side of the connection.</p>
+<p>Obviously, this protocol is a simplification of more realistic protocols that
+have complicated headers, escape sequences (to support <tt class="docutils literal">$</tt> inside a message
+body, for example) and additional state transitions, but for our goals this will
+do just fine.</p>
+<p>Another note: this series is introductory, and assumes clients are generally
+well behaved (albeit potentially slow); therefore there are no timeouts and no
+special provisions made to ensure that the server doesn't end up being blocked
+indefinitely by rogue (or buggy) clients.</p>
+</div>
+<div class="section" id="a-sequential-server">
+<h2>A sequential server</h2>
+<p>Our first server in this series is a simple &quot;sequential&quot; server, written in C
+without using any libraries beyond standard POSIX fare for sockets. The server
+is sequential because it can only handle a single client at any given time; when
+a client connects, the server enters the state machine shown above and won't
+even listen on the socket for new clients until the current client is done.
+Obviously this isn't concurrent and doesn't scale beyond very light loads, but
+it's helpful to discuss since we need a simple-to-understand baseline.</p>
+<p>The full code for this server <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/async-socket-server/sequential-server.c">is here</a>;
+in what follows, I'll focus on some highlights. The outer loop in <tt class="docutils literal">main</tt>
+listens on the socket for new clients to connect. Once a client connects, it
+calls <tt class="docutils literal">serve_connection</tt> which runs through the protocol until the client
+disconnects.</p>
+<p>To accept new connections, the sequential server calls <tt class="docutils literal">accept</tt> on a listening
+socket in a loop:</p>
+<div class="highlight"><pre><span></span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr_in</span><span class="w"> </span><span class="n">peer_addr</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kt">socklen_t</span><span class="w"> </span><span class="n">peer_addr_len</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">sizeof</span><span class="p">(</span><span class="n">peer_addr</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="kt">int</span><span class="w"> </span><span class="n">newsockfd</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">      </span><span class="n">accept</span><span class="p">(</span><span class="n">sockfd</span><span class="p">,</span><span class="w"> </span><span class="p">(</span><span class="k">struct</span><span class="w"> </span><span class="nc">sockaddr</span><span class="o">*</span><span class="p">)</span><span class="o">&amp;</span><span class="n">peer_addr</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">peer_addr_len</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">newsockfd</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">perror_die</span><span class="p">(</span><span class="s">&quot;ERROR on accept&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">report_peer_connected</span><span class="p">(</span><span class="o">&amp;</span><span class="n">peer_addr</span><span class="p">,</span><span class="w"> </span><span class="n">peer_addr_len</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">serve_connection</span><span class="p">(</span><span class="n">newsockfd</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">printf</span><span class="p">(</span><span class="s">&quot;peer done</span><span class="se">\n</span><span class="s">&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Each time <tt class="docutils literal">accept</tt> returns a new connected socket, the server calls
+<tt class="docutils literal">serve_connection</tt>; note that this is a <em>blocking</em> call - until
+<tt class="docutils literal">serve_connection</tt> returns, <tt class="docutils literal">accept</tt> is not called again; the server blocks
+until one client is done before accepting a new client. In other words, clients
+are serviced <em>sequentially</em>.</p>
+<p>Here's <tt class="docutils literal">serve_connection</tt>:</p>
+<div class="highlight"><pre><span></span><span class="k">typedef</span><span class="w"> </span><span class="k">enum</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">WAIT_FOR_MSG</span><span class="p">,</span><span class="w"> </span><span class="n">IN_MSG</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="n">ProcessingState</span><span class="p">;</span><span class="w"></span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">serve_connection</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">sockfd</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">send</span><span class="p">(</span><span class="n">sockfd</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;*&quot;</span><span class="p">,</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">perror_die</span><span class="p">(</span><span class="s">&quot;send&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">ProcessingState</span><span class="w"> </span><span class="n">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">WAIT_FOR_MSG</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">while</span><span class="w"> </span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">buf</span><span class="p">[</span><span class="mi">1024</span><span class="p">];</span><span class="w"></span>
+<span class="w">    </span><span class="kt">int</span><span class="w"> </span><span class="n">len</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">recv</span><span class="p">(</span><span class="n">sockfd</span><span class="p">,</span><span class="w"> </span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="k">sizeof</span><span class="w"> </span><span class="n">buf</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">len</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="n">perror_die</span><span class="p">(</span><span class="s">&quot;recv&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">len</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">len</span><span class="p">;</span><span class="w"> </span><span class="o">++</span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">state</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="no">WAIT_FOR_MSG</span><span class="p">:</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">buf</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;^&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="n">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">IN_MSG</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="k">case</span><span class="w"> </span><span class="no">IN_MSG</span><span class="p">:</span><span class="w"></span>
+<span class="w">        </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">buf</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="sc">&#39;$&#39;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="n">state</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">WAIT_FOR_MSG</span><span class="p">;</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="n">buf</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span><span class="w"></span>
+<span class="w">          </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">send</span><span class="p">(</span><span class="n">sockfd</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">buf</span><span class="p">[</span><span class="n">i</span><span class="p">],</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">            </span><span class="n">perror</span><span class="p">(</span><span class="s">&quot;send error&quot;</span><span class="p">);</span><span class="w"></span>
+<span class="w">            </span><span class="n">close</span><span class="p">(</span><span class="n">sockfd</span><span class="p">);</span><span class="w"></span>
+<span class="w">            </span><span class="k">return</span><span class="p">;</span><span class="w"></span>
+<span class="w">          </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">        </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">close</span><span class="p">(</span><span class="n">sockfd</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It pretty much follows the protocol state machine. Each time around the loop,
+the server attempts to receive data from the client. Receiving 0 bytes means the
+client disconnected, and the loop exits. Otherwise, the received buffer is
+examined byte by byte, and each byte can potentially trigger a state change.</p>
+<p>The number of bytes <tt class="docutils literal">recv</tt> returns is completely independent of the number of
+messages (<tt class="docutils literal"><span class="pre">^...$</span></tt> enclosed sequences of bytes) the client sends. Therefore,
+it's important to go through the whole buffer in a state-keeping loop.
+Critically, each received buffer may contain multiple messages, but also the
+start of a new message without its actual ending; the ending can arrive in the
+next buffer, which is why the processing state is maintained across loop
+iterations.</p>
+<p>For example, suppose the <tt class="docutils literal">recv</tt> function in the main loop returned non-empty
+buffers three times for some connection:</p>
+<ol class="arabic simple">
+<li><tt class="docutils literal">^abc$de^abte$f</tt></li>
+<li><tt class="docutils literal">xyz^123</tt></li>
+<li><tt class="docutils literal"><span class="pre">25$^ab$abab</span></tt></li>
+</ol>
+<p>What data is the server sending back? Tracing the code manually is very useful
+to understand the state transitions (for the answer see <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>).</p>
+</div>
+<div class="section" id="multiple-concurrent-clients">
+<h2>Multiple concurrent clients</h2>
+<p>What happens when multiple clients attempt to connect to the sequential server
+at roughly the same time?</p>
+<p>The server's code (and its name - <tt class="docutils literal"><span class="pre">sequential-server</span></tt>) make it clear that
+clients are only handled <em>one at a time</em>. As long as the server is busy dealing
+with a client in <tt class="docutils literal">serve_connection</tt>, it doesn't accept new client connections.
+Only when the current client disconnects does <tt class="docutils literal">serve_connection</tt> return and
+the outer-most loop may accept new client connections.</p>
+<p>To show this in action, <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2017/async-socket-server">the sample code for this series</a>
+includes a Python script that simulates several clients trying to connect at the
+same time. Each client sends the three buffers shown above <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>, with some
+delays between them.</p>
+<p>The client script runs the clients concurrently in separate threads. Here's a
+transcript of the client's interaction with our sequential server:</p>
+<div class="highlight"><pre><span></span>$ python3.6 simple-client.py  -n 3 localhost 9090
+INFO:2017-09-16 14:14:17,763:conn1 connected...
+INFO:2017-09-16 14:14:17,763:conn1 sending b&#39;^abc$de^abte$f&#39;
+INFO:2017-09-16 14:14:17,763:conn1 received b&#39;b&#39;
+INFO:2017-09-16 14:14:17,802:conn1 received b&#39;cdbcuf&#39;
+INFO:2017-09-16 14:14:18,764:conn1 sending b&#39;xyz^123&#39;
+INFO:2017-09-16 14:14:18,764:conn1 received b&#39;234&#39;
+INFO:2017-09-16 14:14:19,764:conn1 sending b&#39;25$^ab0000$abab&#39;
+INFO:2017-09-16 14:14:19,765:conn1 received b&#39;36bc1111&#39;
+INFO:2017-09-16 14:14:19,965:conn1 disconnecting
+INFO:2017-09-16 14:14:19,966:conn2 connected...
+INFO:2017-09-16 14:14:19,967:conn2 sending b&#39;^abc$de^abte$f&#39;
+INFO:2017-09-16 14:14:19,967:conn2 received b&#39;b&#39;
+INFO:2017-09-16 14:14:20,006:conn2 received b&#39;cdbcuf&#39;
+INFO:2017-09-16 14:14:20,968:conn2 sending b&#39;xyz^123&#39;
+INFO:2017-09-16 14:14:20,969:conn2 received b&#39;234&#39;
+INFO:2017-09-16 14:14:21,970:conn2 sending b&#39;25$^ab0000$abab&#39;
+INFO:2017-09-16 14:14:21,970:conn2 received b&#39;36bc1111&#39;
+INFO:2017-09-16 14:14:22,171:conn2 disconnecting
+INFO:2017-09-16 14:14:22,171:conn0 connected...
+INFO:2017-09-16 14:14:22,172:conn0 sending b&#39;^abc$de^abte$f&#39;
+INFO:2017-09-16 14:14:22,172:conn0 received b&#39;b&#39;
+INFO:2017-09-16 14:14:22,210:conn0 received b&#39;cdbcuf&#39;
+INFO:2017-09-16 14:14:23,173:conn0 sending b&#39;xyz^123&#39;
+INFO:2017-09-16 14:14:23,174:conn0 received b&#39;234&#39;
+INFO:2017-09-16 14:14:24,175:conn0 sending b&#39;25$^ab0000$abab&#39;
+INFO:2017-09-16 14:14:24,176:conn0 received b&#39;36bc1111&#39;
+INFO:2017-09-16 14:14:24,376:conn0 disconnecting
+</pre></div>
+<p>The thing to note here is the connection name: <tt class="docutils literal">conn1</tt> managed to get through
+to the server first, and interacted with it for a while. The next connection -
+<tt class="docutils literal">conn2</tt> - only got through after the first one disconnected, and so on for the
+third connection. As the logs show, each connection is keeping the server busy
+for ~2.2 seconds (which is exactly what the artificial delays in the client code
+add up to), and during this time no other client can connect.</p>
+<p>Clearly, this is not a scalable strategy. In our case, the client incurs the
+delay leaving the server completely idle for most of the interaction. A smarter
+server could handle dozens of other clients while the original one is busy on
+its end (and we'll see how to achieve that later in the series). Even if the
+delay is on the server side, this delay is often something that doesn't really
+keep the CPU too busy; for example, looking up information in a database (which
+is mostly network waiting time for a database server, or disk lookup time for
+local databases).</p>
+</div>
+<div class="section" id="summary-and-next-steps">
+<h2>Summary and next steps</h2>
+<p>The goal of presenting this simple sequential server is twofold:</p>
+<ol class="arabic simple">
+<li>Introduce the problem domain and some basics of socket programming used
+throughout the series.</li>
+<li>Provide motivation for concurrent serving - as the previous section
+demonstrates, the sequential server doesn't scale beyond very trivial loads
+and is not an efficient way of using resources, in general.</li>
+</ol>
+<p>Before reading the next posts in the series, make sure you understand the
+server/client protocol described here and the code for the sequential server.
+I've written about such simple protocols before; for example,
+<a class="reference external" href="../../2009/08/12/framing-in-serial-communications/index.html">framing in serial communications</a>
+and <a class="reference external" href="../../2009/08/29/co-routines-as-an-alternative-to-state-machines.html">co-routines as alternatives to state machines</a>.
+For basics of network programming with sockets,
+<a class="reference external" href="http://beej.us/guide/bgnet/">Beej's guide</a> is not a bad starting point, but
+for a deeper understanding I'd recommend a book.</p>
+<p>If anything remains unclear, please let me know in comments or by email. On to
+concurrent servers!</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>The In/Out notation on state transitions denotes a <a class="reference external" href="https://en.wikipedia.org/wiki/Mealy_machine">Mealy machine</a>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>The answer is <tt class="docutils literal">bcdbcuf23436bc</tt>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>With a small difference of an added string of <tt class="docutils literal">0000</tt> at the end -
+the server's answer to this sequence is a signal for the client to
+disconnect; it's a simplistic handshake that ensures the client had time
+to receive all of the server's reply.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

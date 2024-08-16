@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>On parsing the C standard library headers - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../../index.html" class="navbar-brand">
+                <img src="../../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="../on-parsing-the-c-standard-library-headers.html"
+                       rel="bookmark"
+                       title="Permalink to On parsing the C standard library headers">
+                        On parsing the C standard library headers
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> October 10, 2008 at 15:13</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../../tag/compilation.html">Compilation</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <div class="section" id="introduction">
+<h3>Introduction</h3>
+<p>I'm now in the process of writing a parser for ANSI C in Python. It's almost done, but isn't yet in a really usable form and changes frequently <a class="footnote-reference" href="index.html#id3" id="id1">[1]</a>. When it's finished, I'll write extensively about it. This post is just a rant of what one has to go through to write a complete parser for C. Since this is a complex task that takes me a long time to implement, I've decided it's a good idea to dump my thoughts on the subject once in a while, to keep my future self updated of the design decisions I took.</p>
+<p>To parse C code, one inevitably has to deal with the runtime C library (libc). Each compiler comes with one, configured for its own special needs. The problem is, when you're just writing a general parser for the language, which library to use ?</p>
+<p>Not using any is, unfortunately, not an option. The code will probably use <tt class="docutils literal"><span class="pre">stdio.h</span></tt> and other headers, which contain macro and type declarations without which the code just <a class="reference external" href="../../../../2007/11/24/the-context-sensitivity-of-cs-grammar/index.html">can't be parsed</a>.</p>
+</div>
+<div class="section" id="newlib">
+<h3>newlib</h3>
+<p>I ended up using the headers of <a class="reference external" href="http://sourceware.org/newlib/">newlib</a> - a generic GCC-compliant library for embedded systems. They alone were not enough, and I had to add a couple from Mingw (the Windows port of GCC) - <tt class="docutils literal"><span class="pre">stdarg.h</span></tt> and <tt class="docutils literal"><span class="pre">stddef.h</span></tt>, because these headers are not being distributed with <tt class="docutils literal"><span class="pre">newlib</span></tt>, but rather it relies on finding them with the GCC compiler.</p>
+<p>To make everything compile I also had to define the symbol <tt class="docutils literal"><span class="pre">__extension__</span></tt> to be empty (to disable various GCC extensions, as my parser doesn't support them anyway) and <tt class="docutils literal"><span class="pre">__i386__</span></tt> to let <tt class="docutils literal"><span class="pre">newlib</span></tt> know which architecture I'm targeting.</p>
+</div>
+<div class="section" id="extending-line">
+<h3>Extending #line</h3>
+<p>This wasn't all, unfortunately, and I also had to modify my grammar to support unforseen uses of the <tt class="docutils literal"><span class="pre">#line</span></tt> directive. For now, it supported the canonical definition from K&amp;R:</p>
+<div class="highlight"><pre>#line constant &quot;filename&quot;
+#line constant
+</pre></div>
+<p>For the <tt class="docutils literal"><span class="pre">&quot;filename&quot;</span></tt> part I used the standard &quot;string literal&quot; token in my lexer. Unfortunately, it didn't work out as the filename may contain Windows paths, that look like this: <tt class="docutils literal"><span class="pre">d:\stuff\include\file.h</span></tt>, and this isn't a valid string literal since <tt class="docutils literal"><span class="pre">\i</span></tt> is an invalid escape sequence. So, to support this I had to change the definition of the char and string constant. Not too bad, because it can be easily caught at a later stage.</p>
+<p>The problems haven't ended here, however. In one of the header files indirectly included from <tt class="docutils literal"><span class="pre">stdio.h</span></tt>, the following <tt class="docutils literal"><span class="pre">struct</span></tt> is defined (in the output of <tt class="docutils literal"><span class="pre">cpp</span></tt>, of course):</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">struct</span> _on_exit_args {
+    <span style="color: #00007f; font-weight: bold">void</span> *  _fnargs[<span style="color: #007f7f">32</span>];
+    <span style="color: #00007f; font-weight: bold">void</span> *  _dso_handle[<span style="color: #007f7f">32</span>];
+
+    <span style="color: #00007f; font-weight: bold">long</span> _fntypes;
+<span style="color: #007f00">    #line 77 &quot;D:\eli\cpp_stuff\libc_include/sys/reent.h&quot;</span>
+
+    <span style="color: #00007f; font-weight: bold">long</span> _is_cxa;
+};
+</pre></div>
+<p>A <tt class="docutils literal"><span class="pre">#line</span></tt> directive inside a struct ? Give me a break. This definitely isn't part of the formal C grammar, and I'm not sure about the validity of this construct, because <tt class="docutils literal"><span class="pre">#line</span></tt> directives belong to the subtle no-man's land between the preprocessor and the compiler. To make this work, I was forced to make <tt class="docutils literal"><span class="pre">#line</span></tt> a valid <em>struct_declaration</em> in my parser.</p>
+</div>
+<div class="section" id="finally">
+<h3>Finally</h3>
+<p>After all these changes, the parser successfully parsed a simple C file that includes <tt class="docutils literal"><span class="pre">stdio.h</span></tt>. The resulting preprocessed C file is about 5000 lines long (most of which are empty space left by <tt class="docutils literal"><span class="pre">cpp</span></tt> from macro declarations), and the parser took 0.25 seconds to parse it, which isn't too bad, I guess, but can surely be further improved.</p>
+<p>Now I can finally manage complete C programs with the parser, and I can also see that it successfully grinds through <tt class="docutils literal"><span class="pre">stdio.h</span></tt>, which is encouraging.</p>
+<p>More on this saga later.</p>
+<div align="center" class="align-center"><img class="align-center" src="../../../../images/hline.jpg" style="width: 320px; height: 5px;" /></div>
+<table class="docutils footnote" frame="void" id="id3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id1">[1]</a></td><td>But if you insist, the code is <a class="reference external" href="https://github.com/eliben/pycparser">here</a></td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../../theme/js/count.js"></script>
+</body>
+</html>

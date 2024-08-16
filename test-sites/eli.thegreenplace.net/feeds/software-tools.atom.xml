@@ -1,0 +1,1205 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"><title>Eli Bendersky's website - Software &amp; Tools</title><link href="https://eli.thegreenplace.net/" rel="alternate"></link><link href="https://eli.thegreenplace.net/feeds/software-tools.atom.xml" rel="self"></link><id>https://eli.thegreenplace.net/</id><updated>2024-05-04T19:46:23-07:00</updated><entry><title>gemini-cli: Access Gemini models from the command-line</title><link href="https://eli.thegreenplace.net/2024/gemini-cli-access-gemini-models-from-the-command-line/" rel="alternate"></link><published>2024-02-21T06:04:00-08:00</published><updated>2024-02-21T14:06:19-08:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2024-02-21:/2024/gemini-cli-access-gemini-models-from-the-command-line/</id><summary type="html">&lt;p&gt;This post is about a new command-line tool I've recently built in Go -
+&lt;a class="reference external" href="https://github.com/eliben/gemini-cli"&gt;gemini-cli&lt;/a&gt;, and how to use it for
+LLM-based data analysis with Google's Gemini models.&lt;/p&gt;
+&lt;p&gt;Background: I've been reading &lt;a class="reference external" href="https://simonwillison.net/"&gt;Simon Willison's&lt;/a&gt; posts about LLMs with interest, especially his
+work on tools that leverage LLMs and SQLite to create …&lt;/p&gt;</summary><content type="html">&lt;p&gt;This post is about a new command-line tool I've recently built in Go -
+&lt;a class="reference external" href="https://github.com/eliben/gemini-cli"&gt;gemini-cli&lt;/a&gt;, and how to use it for
+LLM-based data analysis with Google's Gemini models.&lt;/p&gt;
+&lt;p&gt;Background: I've been reading &lt;a class="reference external" href="https://simonwillison.net/"&gt;Simon Willison's&lt;/a&gt; posts about LLMs with interest, especially his
+work on tools that leverage LLMs and SQLite to create &lt;a class="reference external" href="https://til.simonwillison.net/llms/openai-embeddings-related-content"&gt;fun little
+analysis pipelines for local documents&lt;/a&gt;.
+Since I've recently done some Go work on &lt;a class="reference external" href="https://github.com/google/generative-ai-go"&gt;Google's Gemini SDKs&lt;/a&gt; (also in &lt;a class="reference external" href="https://github.com/tmc/langchaingo"&gt;langchaingo&lt;/a&gt;)
+and wrote a &lt;a class="reference external" href="https://eli.thegreenplace.net/2023/using-gemini-models-from-go/"&gt;couple of&lt;/a&gt;
+&lt;a class="reference external" href="https://eli.thegreenplace.net/2024/using-gemini-models-in-go-with-langchaingo/"&gt;blog posts&lt;/a&gt;
+about it, I was interested in creating a similar pipeline for myself using
+Go and Gemini models. This is how the idea for &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;gemini-cli&lt;/span&gt;&lt;/tt&gt; was born.&lt;/p&gt;
+&lt;div class="section" id="the-tool"&gt;
+&lt;h2&gt;The tool&lt;/h2&gt;
+&lt;p&gt;Like any Go command-line tool, &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;gemini-cli&lt;/span&gt;&lt;/tt&gt; is very easy to install:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ go install github.com/eliben/gemini-cli@latest
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;And you're good to go! It will want a Gemini API key set in the
+&lt;tt class="docutils literal"&gt;GEMINI_API_KEY&lt;/tt&gt; env var or passed with the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;--key&lt;/span&gt;&lt;/tt&gt; flag. If you don't have
+an API key yet, you can get one quickly and for free from &lt;a class="reference external" href="https://ai.google.dev/"&gt;https://ai.google.dev/&lt;/a&gt;&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="the-motivating-task"&gt;
+&lt;h2&gt;The motivating task&lt;/h2&gt;
+&lt;p&gt;For a while I've been interested in adding a &amp;quot;related posts&amp;quot; feature to my blog.
+It was clear that I'll want to use &lt;a class="reference external" href="https://en.wikipedia.org/wiki/Sentence_embedding"&gt;embeddings&lt;/a&gt; to convert my posts to
+vector space and then use vector similarity to find related posts. Check
+out my earlier &lt;a class="reference external" href="https://eli.thegreenplace.net/2023/retrieval-augmented-generation-in-go/"&gt;post on RAG&lt;/a&gt;
+for additional information on these techniques.&lt;/p&gt;
+&lt;p&gt;Before starting to write the code, however, I wanted to experiment with
+a command-line tool so I could rapidly prototype. Think of it as crafting
+some text processing pipeline from classical Unix command-line tools before
+trying to implement it in a programming language. &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;gemini-cli&lt;/span&gt;&lt;/tt&gt; excels for
+precisely such prototyping.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="finding-related-posts"&gt;
+&lt;h2&gt;Finding related posts&lt;/h2&gt;
+&lt;p&gt;Let's see how to use &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;gemini-cli&lt;/span&gt;&lt;/tt&gt; for my task. I have access to the contents
+of my blog posts on the file system as a large bunch of
+&lt;a class="reference external" href="https://en.wikipedia.org/wiki/ReStructuredText"&gt;reStructuredText&lt;/a&gt; and HTML
+files. These are private, but you're free to replicate this experiment for
+any collection of textual documents you have handy. It will even work on
+programming language source code!&lt;/p&gt;
+&lt;p&gt;Let's first get the lay of the land - how many files are there &lt;a class="footnote-reference" href="#footnote-1" id="footnote-reference-1"&gt;[1]&lt;/a&gt;?&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ pss -f --rst content/|wc -l
+279
+$ pss -f --html content/|wc -l
+1064
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;OK, so a bit over 1300 overall. Let's start by computing the embeddings for
+the reST files. We'll ask &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;gemini-cli&lt;/span&gt;&lt;/tt&gt; to write it into a new SQLite
+DB called &lt;tt class="docutils literal"&gt;blogemb.db&lt;/tt&gt;, using its &lt;tt class="docutils literal"&gt;embed db&lt;/tt&gt; subcommand:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ export GEMINI_API_KEY=...
+$ gemini-cli embed db blogemb.db --files content/,&amp;quot;*.rst&amp;quot;
+Found 279 values to embed
+Splitting to 9 batches
+Embedding batch #1 / 9, size=32
+Embedding batch #2 / 9, size=32
+Embedding batch #3 / 9, size=32
+Embedding batch #4 / 9, size=32
+Embedding batch #5 / 9, size=32
+Embedding batch #6 / 9, size=32
+Embedding batch #7 / 9, size=32
+Embedding batch #8 / 9, size=32
+Embedding batch #9 / 9, size=23
+Collected 279 embeddings; inserting into table embeddings
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Let's look at the DB file using the &lt;tt class="docutils literal"&gt;sqlite3&lt;/tt&gt; command-line tool:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ sqlite3 blogemb.db
+SQLite version 3.37.2 2022-01-06 13:25:41
+Enter &amp;quot;.help&amp;quot; for usage hints.
+
+sqlite&amp;gt; .tables
+embeddings
+
+sqlite&amp;gt; .schema
+CREATE TABLE embeddings (
+id TEXT PRIMARY KEY,
+embedding BLOB
+);
+
+sqlite&amp;gt; select count(*) from embeddings;
+279
+
+sqlite&amp;gt; select id, length(embedding) from embeddings limit 10;
+content/2014/blogging-setup-with-pelican.rst|3072
+content/2014/c++-perfect-forwarding-and-universal-references.rst|3072
+content/2014/derivation-normal-equation-linear-regression.rst|3072
+content/2014/goodbye-wordpress.rst|3072
+content/2014/highlight-tab-gnome-terminal.rst|3072
+content/2014/meshgrids-and-disambiguating-rows-and-columns-from-cartesian-coordinates.rst|3072
+content/2014/samples-for-llvm-clang-library.rst|3072
+content/2014/sfinae-and-enable-if.rst|3072
+content/2014/summary-of-reading-july-september-2014.rst|3072
+content/2014/summary-of-reading-october-december-2014.rst|3072
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;As expected, we see 279 entries in the table; for each row the &lt;tt class="docutils literal"&gt;id&lt;/tt&gt; column
+value is the path of the file and &lt;tt class="docutils literal"&gt;embedding&lt;/tt&gt; contains the embedding as a
+blob. Embeddings are returned by the model as arrays of 32-bit floats, and
+&lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;gemini-cli&lt;/span&gt;&lt;/tt&gt; encodes them into a blob as follows:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="c1"&gt;// encodeEmbedding encodes an embedding into a byte buffer, e.g. for DB&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="c1"&gt;// storage as a blob.&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="kd"&gt;func&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;encodeEmbedding&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;emb&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt;&lt;span class="kt"&gt;float32&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;[]&lt;/span&gt;&lt;span class="kt"&gt;byte&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;buf&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nb"&gt;new&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;bytes&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Buffer&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="k"&gt;for&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;_&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;f&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;range&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;emb&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;binary&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Write&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;buf&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;binary&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;LittleEndian&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;f&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;!=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kc"&gt;nil&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="nb"&gt;panic&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;err&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;buf&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Bytes&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Each &lt;tt class="docutils literal"&gt;float32&lt;/tt&gt; thus occupies 4 bytes; since our DB blobs are 3072 bytes long,
+we can infer that each embedding vector has 768 elements; the embedding model
+projects our text into 768-dimensional space &lt;a class="footnote-reference" href="#footnote-2" id="footnote-reference-2"&gt;[2]&lt;/a&gt;!&lt;/p&gt;
+&lt;p&gt;Back to our task, though. Note that &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;gemini-cli&lt;/span&gt;&lt;/tt&gt; uses the batch-embedding
+API of Gemini under the hood, so it's efficient for large input corpora. We
+can control the batch size with a flag; just for fun, let's do this when
+embedding the HTML files since there are so many of them:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ gemini-cli embed db blogemb.db --batch-size=64 --files content/,&amp;quot;*.html&amp;quot;
+Found 1064 values to embed
+Splitting to 17 batches
+Embedding batch #1 / 17, size=64
+Embedding batch #2 / 17, size=64
+Embedding batch #3 / 17, size=64
+Embedding batch #4 / 17, size=64
+Embedding batch #5 / 17, size=64
+Embedding batch #6 / 17, size=64
+Embedding batch #7 / 17, size=64
+Embedding batch #8 / 17, size=64
+Embedding batch #9 / 17, size=64
+Embedding batch #10 / 17, size=64
+Embedding batch #11 / 17, size=64
+Embedding batch #12 / 17, size=64
+Embedding batch #13 / 17, size=64
+Embedding batch #14 / 17, size=64
+Embedding batch #15 / 17, size=64
+Embedding batch #16 / 17, size=64
+Embedding batch #17 / 17, size=40
+Collected 1064 embeddings; inserting into table embeddings
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;A brief note on performance: with a batch size of 64, this process took only
+17 seconds - not bad for over a thousand documents. In the future I plan to
+improve this time further with more concurrency and smarter batch size selection
+&lt;a class="footnote-reference" href="#footnote-3" id="footnote-reference-3"&gt;[3]&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Let's examine the resulting SQLite DB with all the embeddings:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ stat -c %s blogemb.db
+5627904
+$ echo &amp;quot;select count(*) from embeddings&amp;quot; | sqlite3 blogemb.db
+1343
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;All 1343 entries have made it into the &lt;tt class="docutils literal"&gt;embeddings&lt;/tt&gt; table, and the total
+size of the DB is just over 5 MiB.&lt;/p&gt;
+&lt;p&gt;Now we're ready to look for related posts. The &lt;tt class="docutils literal"&gt;embed similar&lt;/tt&gt; subcommand
+takes the name of a SQLite DB that holds all embeddings (like the one we've just
+created) and a string of content to compare; it also accepts &lt;tt class="docutils literal"&gt;-&lt;/tt&gt; as an
+indication that the input content will be piped through standard input, so
+let's use that:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ gemini-cli embed similar blogemb.db - &amp;lt; content/2023/better-http-server-routing-in-go-122.rst
+{&amp;quot;id&amp;quot;:&amp;quot;content/2023/better-http-server-routing-in-go-122.rst&amp;quot;,&amp;quot;score&amp;quot;:&amp;quot;1.0000001&amp;quot;}
+{&amp;quot;id&amp;quot;:&amp;quot;content/2021/rest-servers-in-go-part-2-using-a-router-package.rst&amp;quot;,&amp;quot;score&amp;quot;:&amp;quot;0.8904768&amp;quot;}
+{&amp;quot;id&amp;quot;:&amp;quot;content/2021/life-of-an-http-request-in-a-go-server.rst&amp;quot;,&amp;quot;score&amp;quot;:&amp;quot;0.83037585&amp;quot;}
+{&amp;quot;id&amp;quot;:&amp;quot;content/2021/rest-servers-in-go-part-5-middleware.rst&amp;quot;,&amp;quot;score&amp;quot;:&amp;quot;0.8136583&amp;quot;}
+{&amp;quot;id&amp;quot;:&amp;quot;content/2022/serving-static-files-and-web-apps-in-go.rst&amp;quot;,&amp;quot;score&amp;quot;:&amp;quot;0.7732284&amp;quot;}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The output is in &lt;a class="reference external" href="https://jsonlines.org/examples/"&gt;the JSON Lines format&lt;/a&gt;,
+and by default prints the ID and the similarity score (using cosine
+similarity), sorted by decreasing similarity. Unsurprisingly, the most similar
+post is... itself, with a perfect similarity score of 1.0&lt;/p&gt;
+&lt;p&gt;The results look pretty good! The most similar posts found indeed are very
+relevant to the one we were asking about. For fun, let's try a book review and
+now with a larger list of output candidates (by using the &lt;tt class="docutils literal"&gt;topk&lt;/tt&gt; flag):&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ gemini-cli embed similar blogemb.db --topk=10 - &amp;lt; content/2011/book-review-the-voyage-of-the-beagle-by-charles-darwin.html
+{&amp;quot;id&amp;quot;:&amp;quot;content/2011/book-review-the-voyage-of-the-beagle-by-charles-darwin.html&amp;quot;,&amp;quot;score&amp;quot;:&amp;quot;1&amp;quot;}
+{&amp;quot;id&amp;quot;:&amp;quot;content/2008/book-review-the-origin-of-species-by-charles-darwin.html&amp;quot;,&amp;quot;score&amp;quot;:&amp;quot;0.80570847&amp;quot;}
+{&amp;quot;id&amp;quot;:&amp;quot;content/2006/book-review-the-selfish-gene-by-richard-dawkins.html&amp;quot;,&amp;quot;score&amp;quot;:&amp;quot;0.7845073&amp;quot;}
+{&amp;quot;id&amp;quot;:&amp;quot;content/2011/summary-of-reading-april-june-2011.html&amp;quot;,&amp;quot;score&amp;quot;:&amp;quot;0.7939675&amp;quot;}
+{&amp;quot;id&amp;quot;:&amp;quot;content/2004/book-review-a-short-history-of-nearly-by-bill-bryson.html&amp;quot;,&amp;quot;score&amp;quot;:&amp;quot;0.7784306&amp;quot;}
+{&amp;quot;id&amp;quot;:&amp;quot;content/2005/book-review-around-the-world-in-80-days-by-jules-verne.html&amp;quot;,&amp;quot;score&amp;quot;:&amp;quot;0.7792236&amp;quot;}
+{&amp;quot;id&amp;quot;:&amp;quot;content/2005/book-review-the-double-helix-by-james-watson.html&amp;quot;,&amp;quot;score&amp;quot;:&amp;quot;0.7658307&amp;quot;}
+{&amp;quot;id&amp;quot;:&amp;quot;content/2008/book-review-after-tamerlane-by-john-darwin.html&amp;quot;,&amp;quot;score&amp;quot;:&amp;quot;0.7641713&amp;quot;}
+{&amp;quot;id&amp;quot;:&amp;quot;content/2005/book-review-mysterious-island-by-jules-verne.html&amp;quot;,&amp;quot;score&amp;quot;:&amp;quot;0.7605505&amp;quot;}
+{&amp;quot;id&amp;quot;:&amp;quot;content/2008/book-review-the-adventures-of-tom-sawyer-by-mark-twain.html&amp;quot;,&amp;quot;score&amp;quot;:&amp;quot;0.75610566&amp;quot;}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class="section" id="what-s-next"&gt;
+&lt;h2&gt;What's next&lt;/h2&gt;
+&lt;p&gt;For my task, I now have the basic information available to implement it, and
+all the infrastructure for running experiments; with &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;gemini-cli&lt;/span&gt;&lt;/tt&gt; in hand,
+this took less than 5 minutes. All I needed to do is
+&lt;a class="reference external" href="https://xkcd.com/1205/"&gt;write the tool&lt;/a&gt; :-)&lt;/p&gt;
+&lt;p&gt;I really enjoyed building &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;gemini-cli&lt;/span&gt;&lt;/tt&gt;; it's true to the spirit of simple,
+textual Unix CLIs that can be easily combined together through pipes. Using
+SQLite as the storage and retrieval format is also quite pleasant, and provides
+interoperability for free.&lt;/p&gt;
+&lt;p&gt;For you - if you're a Go developer interested in building stuff with LLMs and
+getting started for free - I hope you find &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;gemini-cli&lt;/span&gt;&lt;/tt&gt; useful. I've only
+shown its &lt;tt class="docutils literal"&gt;embed *&lt;/tt&gt; subcommands, but the CLI also lets you chat with an LLM
+through the terminal, query the API for various model details, and everything
+is configurable with extra flags.&lt;/p&gt;
+&lt;p&gt;It's &lt;a class="reference external" href="https://github.com/eliben/gemini-cli"&gt;open-source&lt;/a&gt;, of course; the
+README file rendered on GitHub has extensive documentation, and more is
+available by running &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;gemini-cli&lt;/span&gt; help&lt;/tt&gt;. Try it, ask questions, open issues!&lt;/p&gt;
+&lt;hr class="docutils" /&gt;
+&lt;table class="docutils footnote" frame="void" id="footnote-1" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#footnote-reference-1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;I like using &lt;a class="reference external" href="https://github.com/eliben/pss/"&gt;pss&lt;/a&gt;, but feel free
+to use your favorite tools - &lt;tt class="docutils literal"&gt;git grep&lt;/tt&gt;, &lt;tt class="docutils literal"&gt;ag&lt;/tt&gt; or just a concoction
+of &lt;tt class="docutils literal"&gt;find&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;grep&lt;/tt&gt;.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="footnote-2" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#footnote-reference-2"&gt;[2]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;&lt;p class="first"&gt;A word of caution: LLMs have limited context window sizes; for embeddings,
+if the input is larger than the model's context window it may get
+truncated - so it's the user's responsibility to ensure that input
+documents are properly sized.&lt;/p&gt;
+&lt;p class="last"&gt;&lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;gemini-cli&lt;/span&gt;&lt;/tt&gt; will report the maximal number of input tokens for
+supported models when you invoke the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;gemini-cli&lt;/span&gt; models&lt;/tt&gt; command.&lt;/p&gt;
+&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="footnote-3" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#footnote-reference-3"&gt;[3]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;We have to be careful with too much parallelism, because at the free
+tier the Gemini SDK may be rate-limited.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;/div&gt;
+</content><category term="misc"></category><category term="Go"></category><category term="Machine Learning"></category><category term="Software &amp; Tools"></category></entry><entry><title>static-server: an HTTP server in Go for static content</title><link href="https://eli.thegreenplace.net/2023/static-server-an-http-server-in-go-for-static-content/" rel="alternate"></link><published>2023-09-16T06:20:00-07:00</published><updated>2024-02-25T14:36:58-08:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2023-09-16:/2023/static-server-an-http-server-in-go-for-static-content/</id><summary type="html">&lt;p&gt;I put together a simple static file server in Go - useful for local testing
+of web applications. Check it out at &lt;a class="reference external" href="https://github.com/eliben/static-server"&gt;https://github.com/eliben/static-server&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;If you have Go installed on your machine, you don't have to download anything
+else; you can run:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ go run github.com/eliben/static-server …&lt;/pre&gt;&lt;/div&gt;</summary><content type="html">&lt;p&gt;I put together a simple static file server in Go - useful for local testing
+of web applications. Check it out at &lt;a class="reference external" href="https://github.com/eliben/static-server"&gt;https://github.com/eliben/static-server&lt;/a&gt;&lt;/p&gt;
+&lt;p&gt;If you have Go installed on your machine, you don't have to download anything
+else; you can run:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ go run github.com/eliben/static-server@latest
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;And it will start serving the current directory! Run it with &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;-help&lt;/span&gt;&lt;/tt&gt; for
+usage information. No configuration files needed - the default is useful
+and you can adjust it to your needs using command-line flags.&lt;/p&gt;
+&lt;p&gt;Obviously, you can also install it once with:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ go install github.com/eliben/static-server@latest
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;And then just invoke &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;static-server&lt;/span&gt;&lt;/tt&gt; if your &lt;tt class="docutils literal"&gt;PATH&lt;/tt&gt; is properly set up.&lt;/p&gt;
+&lt;div class="section" id="why"&gt;
+&lt;h2&gt;Why&lt;/h2&gt;
+&lt;p&gt;When developing web applications locally, for basic test cases we can
+open an HTML file directly in the browser (using the &lt;a class="reference external" href="https://en.wikipedia.org/wiki/File_URI_scheme"&gt;file:/// scheme&lt;/a&gt;). However, this is sometimes
+insufficient, and in several scenarios it's necessary to properly &lt;em&gt;serve&lt;/em&gt; the
+HTML (along with its JS and CSS). Some cases where I encountered this are web
+applications that use at least one of:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;Web workers&lt;/li&gt;
+&lt;li&gt;Web sockets&lt;/li&gt;
+&lt;li&gt;WASM&lt;/li&gt;
+&lt;li&gt;Separate API servers, requiring &lt;a class="reference external" href="https://eli.thegreenplace.net/2023/introduction-to-cors-for-go-programmers/"&gt;CORS&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;Loading ES modules from separate files&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;In the past, when I was more active in the Python ecosystem, I used
+&lt;tt class="docutils literal"&gt;python &lt;span class="pre"&gt;-m&lt;/span&gt; SimpleHTTPServer &amp;lt;port&amp;gt;&lt;/tt&gt; quite a bit. While it's nice, it has some
+issues too: it's not very configurable, and it requires Python to be installed.&lt;/p&gt;
+&lt;p&gt;Another option I've used is &lt;a class="reference external" href="https://www.npmjs.com/package/http-server"&gt;http-server&lt;/a&gt; from the Node.js ecosystem; in
+fact, it has served as the inspiration for &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;static-server&lt;/span&gt;&lt;/tt&gt;. You can run it
+with &lt;tt class="docutils literal"&gt;npx&lt;/tt&gt; without installing, and it's also configurable through command-line
+flags, without requiring configuration files.&lt;/p&gt;
+&lt;p&gt;But we can't expect all Go developers to have &lt;tt class="docutils literal"&gt;npm&lt;/tt&gt; or &lt;tt class="docutils literal"&gt;npx&lt;/tt&gt; installed.
+Moreover, sometimes you want to tweak the server a bit and digging in JavaScript
+is not any Go programmer's idea of a good time. Like many tools in that
+ecosystem, this Node.js-based HTTP server is all in on dependencies - with 13
+of them, it's not easy to understand or modify its code; much of it is split
+across multiple helper packages, and making changes can be tricky.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="how"&gt;
+&lt;h2&gt;How&lt;/h2&gt;
+&lt;p&gt;Spinning up a static file server in Go is very easy - I wrote a
+&lt;a class="reference external" href="https://eli.thegreenplace.net/2022/serving-static-files-and-web-apps-in-go/"&gt;whole blog post&lt;/a&gt; about the
+possibilities at some point. The simplest static server to serve the current
+working directory is just:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="kn"&gt;package&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;main&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="kn"&gt;import&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;quot;net/http&amp;quot;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="kd"&gt;func&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;main&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;port&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="s"&gt;&amp;quot;:8080&amp;quot;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;handler&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;:=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;http&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;FileServer&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;http&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;Dir&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;.&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="nx"&gt;http&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="nx"&gt;ListenAndServe&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nx"&gt;port&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nx"&gt;handler&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Having found myself plopping a small &lt;tt class="docutils literal"&gt;server.go&lt;/tt&gt; with these contents in too
+many web projects, I decided enough was enough.
+Thus &lt;a class="reference external" href="https://github.com/eliben/static-server"&gt;static-server&lt;/a&gt; was born.&lt;/p&gt;
+&lt;p&gt;&lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;static-server&lt;/span&gt;&lt;/tt&gt; is simple, yet versatile. It will do the right thing
+by default, with no flags whatsoever. But you can also use flags to configure
+a few aspects, e.g.: the port it serves on, CORS support, serving via TLS,
+control how logging is done.&lt;/p&gt;
+&lt;p&gt;&lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;static-server&lt;/span&gt;&lt;/tt&gt; is hackable and easy to understand. All the code is in a
+single file (with fewer than 200 lines of code, including comments and handling
+flags) and there are &lt;em&gt;no dependencies&lt;/em&gt; (except one package that is only used
+for testing).&lt;/p&gt;
+&lt;p&gt;I find &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;static-server&lt;/span&gt;&lt;/tt&gt; very useful, and I hope others will too. If you run
+into any problems or have questions, open a GitHub issue or send me an email.&lt;/p&gt;
+&lt;/div&gt;
+</content><category term="misc"></category><category term="Go"></category><category term="Network Programming"></category><category term="Software &amp; Tools"></category></entry><entry><title>Reverse proxying a sub-domain via Apache</title><link href="https://eli.thegreenplace.net/2023/reverse-proxying-a-sub-domain-via-apache/" rel="alternate"></link><published>2023-01-21T06:26:00-08:00</published><updated>2024-05-04T19:46:23-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2023-01-21:/2023/reverse-proxying-a-sub-domain-via-apache/</id><summary type="html">&lt;p&gt;Suppose you have a domain that hosts your website: &lt;tt class="docutils literal"&gt;domain.com&lt;/tt&gt;, and the
+website is served with the venerable &lt;a class="reference external" href="https://en.wikipedia.org/wiki/Apache_HTTP_Server"&gt;Apache HTTP server&lt;/a&gt;. Suppose, also, that you
+want to run some backend application on the same domain, perhaps using a
+sub-domain like &lt;tt class="docutils literal"&gt;sub.domain.com&lt;/tt&gt;. Running an application on a non-standard …&lt;/p&gt;</summary><content type="html">&lt;p&gt;Suppose you have a domain that hosts your website: &lt;tt class="docutils literal"&gt;domain.com&lt;/tt&gt;, and the
+website is served with the venerable &lt;a class="reference external" href="https://en.wikipedia.org/wiki/Apache_HTTP_Server"&gt;Apache HTTP server&lt;/a&gt;. Suppose, also, that you
+want to run some backend application on the same domain, perhaps using a
+sub-domain like &lt;tt class="docutils literal"&gt;sub.domain.com&lt;/tt&gt;. Running an application on a non-standard
+port (not 80 or 443) is not a problem, but what it you need it to run on port
+80? Apache occupies port 80 in order to serve &lt;tt class="docutils literal"&gt;domain.com&lt;/tt&gt;, so at least on
+the surface this seems like a problem.&lt;/p&gt;
+&lt;img alt="Logo of the Apache HTTP server project" class="align-center" src="https://eli.thegreenplace.net/images/2023/apache-logo.png" style="width: 500px;" /&gt;
+&lt;p&gt;This post talks about how to make it work using the reverse-proxying
+capabilities of Apache. It assumes you control a virtual machine that has
+a top-level domain like &lt;tt class="docutils literal"&gt;domain.com&lt;/tt&gt; mapped to it, and that the machine runs
+Linux.&lt;/p&gt;
+&lt;div class="section" id="setting-up-apache-as-a-proxy-with-mod-proxy"&gt;
+&lt;h2&gt;Setting up Apache as a proxy with mod_proxy&lt;/h2&gt;
+&lt;p&gt;If you need to brush up on proxy concepts, consider reading &lt;a class="reference external" href="https://eli.thegreenplace.net/2022/go-and-proxy-servers-part-1-http-proxies/"&gt;this series of
+posts&lt;/a&gt;
+first.&lt;/p&gt;
+&lt;p&gt;Assuming Apache is already installed and running on the server, you'll first
+have to enable the &lt;a class="reference external" href="https://httpd.apache.org/docs/2.4/mod/mod_proxy.html"&gt;proxy module&lt;/a&gt; and restart the
+service:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ sudo a2enmod proxy proxy_http
+$ sudo systemctl restart apache2
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Sub-domains typically have their own configuration file in
+&lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;/etc/apache2/sites-available&lt;/span&gt;&lt;/tt&gt;. Create a new configuration file in
+that directory, named &lt;tt class="docutils literal"&gt;sub.domain.com.conf&lt;/tt&gt; or some such; here's what should
+be in it (adjust as needed):&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&amp;lt;VirtualHost *:80&amp;gt;
+        ProxyPreserveHost On
+        ProxyPass / http://127.0.0.1:5000/
+        ProxyPassReverse / http://127.0.0.1:5000/
+
+        ServerName sub.domain.com
+        ServerAdmin your@email.com
+
+        ErrorLog ${APACHE_LOG_DIR}/error.log
+        CustomLog ${APACHE_LOG_DIR}/access.log combined
+&amp;lt;/VirtualHost&amp;gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;This tells Apache that the &lt;tt class="docutils literal"&gt;sub.domain.com&lt;/tt&gt; route should be proxied to a
+service running locally on port 5000; naturally, the service address can have a
+different port or run on a different domain altogether.&lt;/p&gt;
+&lt;p&gt;Next you'll want to register that configuration with Apache and restart it
+again:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ sudo a2ensite sub.domain.com.conf
+$ sudo systemctl restart apache2
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class="section" id="running-the-backend-service"&gt;
+&lt;h2&gt;Running the backend service&lt;/h2&gt;
+&lt;p&gt;Now that Apache is all set up, it's time to run the actual backend service at
+port 5000. As an example, you can run
+&lt;a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2022/go-and-proxies/http-server-debug-request-headers.go"&gt;this simple header debugging server&lt;/a&gt;:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ go run http-server-debug-request-headers.go -addr 127.0.0.1:5000
+2023/01/17 01:01:20 Starting server on 127.0.0.1:5000
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;To test that it runs properly, in a separate terminal (on the same machine!)
+let's run &lt;tt class="docutils literal"&gt;curl&lt;/tt&gt;:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ curl 127.0.0.1:5000/headers
+hello /headers
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;And looking at the terminal where the server is running, you should see some
+useful logging:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;2023/01/17 01:02:50 127.0.0.1:42406   GET     /headers        Host: 127.0.0.1:5000
+User-Agent: curl/7.81.0
+Accept: */*
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;If you've followed all the steps in this and the previous session, it should
+work via the sub-domain now (from any machine):&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ curl http://sub.domain.com/headers
+hello /headers
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Apache listens on port 80 for &lt;tt class="docutils literal"&gt;domain.com&lt;/tt&gt;, and when it sees requests to
+&lt;tt class="docutils literal"&gt;sub.domain.com&lt;/tt&gt;, it proxies them to the server running on port &lt;tt class="docutils literal"&gt;5000&lt;/tt&gt; on
+the same machine.&lt;/p&gt;
+&lt;p&gt;If this doesn't work for you, take a careful look at the Apache logs - both
+the error log and the access log may be useful.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="bonus-tls-with-let-s-encrypt"&gt;
+&lt;h2&gt;Bonus: TLS with Let's Encrypt&lt;/h2&gt;
+&lt;p&gt;If your server is set up to serve &lt;tt class="docutils literal"&gt;domain.com&lt;/tt&gt; via TLS using Let's Encrypt,
+I have good news for you -- it will &lt;em&gt;just work&lt;/em&gt; for &lt;tt class="docutils literal"&gt;sub.domain.com&lt;/tt&gt; as well!&lt;/p&gt;
+&lt;p&gt;Presumably you've set up Let's Encrypt certificates using &lt;tt class="docutils literal"&gt;certbot&lt;/tt&gt;. Since
+we've now added an additional Apache configuration (&lt;tt class="docutils literal"&gt;sub.domain.com.conf&lt;/tt&gt;), we
+should run &lt;tt class="docutils literal"&gt;certbot&lt;/tt&gt; again:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ sudo certbot --apache
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;And carefully follow the on-screen instructions. &lt;tt class="docutils literal"&gt;certbot&lt;/tt&gt; should detect
+there's a new sub-domain to get a certificate for; if everything goes as
+expected, it succeeds and from that point on you should be able to access the
+backend server via HTTPS:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ curl https://sub.domain.com/headers
+hello /headers
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Note that the backend Go server serves HTTP; the reverse proxy (Apache)
+terminates the TLS connection and passes HTTP to the backend server. This is
+a fairly common way to structure backends. While the backend server
+serves unencrypted traffic, it's not actually accessible from outside the
+machine (port 5000 is unlikely to be exposed). The only way to access it is
+via the reverse-proxy on &lt;tt class="docutils literal"&gt;sub.domain.com&lt;/tt&gt;, which can use TLS if needed.&lt;/p&gt;
+&lt;p&gt;I was wondering how this works. &lt;tt class="docutils literal"&gt;certbot&lt;/tt&gt; uses the HTTP challenge with Let's
+Encrypt, wherein it's asked to serve a special file on a special path
+(typically something like &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;.well-known/acme-challenge&lt;/span&gt;&lt;/tt&gt;) to prove to Let's
+Encrypt that it controls the domain. But here all requests get forwarded to
+the backend server...&lt;/p&gt;
+&lt;p&gt;After scratching my head for a minute I found the answer in &lt;tt class="docutils literal"&gt;certbot&lt;/tt&gt;'s logs,
+where it honestly explains its tricky ways. It turns out it adds a
+&lt;tt class="docutils literal"&gt;RewriteRule&lt;/tt&gt; to our &lt;tt class="docutils literal"&gt;sub.domain.com.conf&lt;/tt&gt; file for the duration of the
+Let's Encrypt handshake, sending any requests starting with
+&lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;.well-known/acme-challenge&lt;/span&gt;&lt;/tt&gt; to a known disk location it controls. After all
+is done, it quietly removes these rules from the configuration file.&lt;/p&gt;
+&lt;/div&gt;
+</content><category term="misc"></category><category term="Network Programming"></category><category term="Internet"></category><category term="Software &amp; Tools"></category></entry><entry><title>Rust extension traits, greppability and IDEs</title><link href="https://eli.thegreenplace.net/2022/rust-extension-traits-greppability-and-ides/" rel="alternate"></link><published>2022-01-29T06:16:00-08:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2022-01-29:/2022/rust-extension-traits-greppability-and-ides/</id><summary type="html">&lt;p&gt;Traits are a central feature of Rust, critical for its implementation of
+polymorphism; traits are used for both static (by serving as bounds for generic
+parameters) and dynamic (by having trait objects to serve as interfaces)
+polymorphism.&lt;/p&gt;
+&lt;p&gt;This post assumes some familiarity with traits and discusses only a specific
+aspect …&lt;/p&gt;</summary><content type="html">&lt;p&gt;Traits are a central feature of Rust, critical for its implementation of
+polymorphism; traits are used for both static (by serving as bounds for generic
+parameters) and dynamic (by having trait objects to serve as interfaces)
+polymorphism.&lt;/p&gt;
+&lt;p&gt;This post assumes some familiarity with traits and discusses only a specific
+aspect of them - how &lt;em&gt;extension traits&lt;/em&gt; affect code readability. To learn the
+basics of traits in Rust, the &lt;a class="reference external" href="https://doc.rust-lang.org/book/ch10-02-traits.html"&gt;official book&lt;/a&gt; is a good starting point.&lt;/p&gt;
+&lt;div class="section" id="extension-traits"&gt;
+&lt;h2&gt;Extension traits&lt;/h2&gt;
+&lt;p&gt;&lt;a class="reference external" href="https://rust-lang.github.io/rfcs/0445-extension-trait-conventions.html"&gt;This Rust RFC&lt;/a&gt;
+provides a good, short definition of extension traits:&lt;/p&gt;
+&lt;blockquote&gt;
+Extension traits are a programming pattern that makes it possible to add
+methods to an existing type outside of the crate defining that type.&lt;/blockquote&gt;
+&lt;p&gt;For example, here's a trait with a single method:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="k"&gt;trait&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Magic&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;magic_num&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;-&amp;gt; &lt;span class="kt"&gt;usize&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;We can now implement the &lt;tt class="docutils literal"&gt;Magic&lt;/tt&gt; trait for our types:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="k"&gt;struct&lt;/span&gt; &lt;span class="nc"&gt;Foobar&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;name&lt;/span&gt;: &lt;span class="nb"&gt;String&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="k"&gt;impl&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Magic&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;for&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Foobar&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;magic_num&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;-&amp;gt; &lt;span class="kt"&gt;usize&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;name&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;is_empty&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;else&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="mi"&gt;33&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Now a &lt;tt class="docutils literal"&gt;FooBar&lt;/tt&gt; can be passed wherever a &lt;tt class="docutils literal"&gt;Magic&lt;/tt&gt; is expected. &lt;tt class="docutils literal"&gt;FooBar&lt;/tt&gt; is a
+custom type, but what's really interesting is that we can also implement
+&lt;tt class="docutils literal"&gt;Magic&lt;/tt&gt; for any other type, including types that we did not define. Let's
+implement it for &lt;tt class="docutils literal"&gt;bool&lt;/tt&gt;:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="k"&gt;impl&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Magic&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;for&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kt"&gt;bool&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;magic_num&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;-&amp;gt; &lt;span class="kt"&gt;usize&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="mi"&gt;3&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;else&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="mi"&gt;54&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;We can now write code like &lt;tt class="docutils literal"&gt;true.magic_num()&lt;/tt&gt; and it will work! We've added
+a method to a built-in Rust type. Obviously, we can also implement this trait
+for types in the standard library; e.g.:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="k"&gt;impl&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;T&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;Magic&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;for&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nb"&gt;Vec&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;T&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;fn&lt;/span&gt; &lt;span class="nf"&gt;magic_num&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;-&amp;gt; &lt;span class="kt"&gt;usize&lt;/span&gt; &lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;is_empty&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="mi"&gt;10&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;else&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;            &lt;/span&gt;&lt;span class="mi"&gt;5&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class="section" id="extension-traits-in-the-wild"&gt;
+&lt;h2&gt;Extension traits in the wild&lt;/h2&gt;
+&lt;p&gt;Extension traits aren't just a fringe feature; they are widely used in the Rust
+ecosystem.&lt;/p&gt;
+&lt;p&gt;One example is the popular &lt;tt class="docutils literal"&gt;serde&lt;/tt&gt; crate, which includes code that serializes
+and deserializes data structures in multiple formats. One of the traits
+&lt;tt class="docutils literal"&gt;serde&lt;/tt&gt; provides is &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;serde::Serialize&lt;/span&gt;&lt;/tt&gt;; once we import this trait and one of
+the concrete serializers &lt;tt class="docutils literal"&gt;serde&lt;/tt&gt; provides, we can do stuff like &lt;a class="footnote-reference" href="#footnote-1" id="footnote-reference-1"&gt;[1]&lt;/a&gt;:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="kd"&gt;let&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;mut&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;serializer&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;serde_json&lt;/span&gt;::&lt;span class="n"&gt;Serializer&lt;/span&gt;::&lt;span class="n"&gt;new&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;std&lt;/span&gt;::&lt;span class="n"&gt;io&lt;/span&gt;::&lt;span class="n"&gt;stdout&lt;/span&gt;&lt;span class="p"&gt;());&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="mf"&gt;185.&lt;/span&gt;&lt;span class="n"&gt;serialize&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="k"&gt;mut&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;serializer&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="n"&gt;unwrap&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Importing &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;serde::Serialize&lt;/span&gt;&lt;/tt&gt; is critical for this code to work, even though we
+don't refer to &lt;tt class="docutils literal"&gt;Serialize&lt;/tt&gt; anywhere in our code explicitly. Rust requires
+traits to be explicitly imported to imbue their methods onto existing types;
+otherwise it's hard to avoid naming collisions in case multiple traits from
+different crates provide the same methods.&lt;/p&gt;
+&lt;p&gt;Another example is the  &lt;tt class="docutils literal"&gt;byteorder&lt;/tt&gt; crate, which helps encode numbers into
+buffers with explicit length and endianness. To write some numbers into a vector
+byte-by-byte, we have to import the relevant trait and enum first, and then
+we can call the newly-added methods directly on a vector:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="k"&gt;use&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;byteorder&lt;/span&gt;::&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="n"&gt;LittleEndian&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;WriteBytesExt&lt;/span&gt;&lt;span class="p"&gt;};&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="c1"&gt;// ...&lt;/span&gt;
+
+&lt;span class="kd"&gt;let&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;mut&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;wv&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="fm"&gt;vec!&lt;/span&gt;&lt;span class="p"&gt;[];&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="n"&gt;wv&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;write_u16&lt;/span&gt;::&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;LittleEndian&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;259&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="n"&gt;unwrap&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="n"&gt;wv&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;write_u16&lt;/span&gt;::&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;LittleEndian&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;517&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="n"&gt;unwrap&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The &lt;tt class="docutils literal"&gt;write_u16&lt;/tt&gt; method is part of the &lt;tt class="docutils literal"&gt;WriteBytesExt&lt;/tt&gt; trait, and it's
+implemented on a &lt;tt class="docutils literal"&gt;Vec&lt;/tt&gt; by the &lt;tt class="docutils literal"&gt;byteorder&lt;/tt&gt; crate. To be more precise, it's
+automatically implemented on any type that implements the &lt;tt class="docutils literal"&gt;Write&lt;/tt&gt; trait.&lt;/p&gt;
+&lt;p&gt;Finally, let's look at &lt;tt class="docutils literal"&gt;rayon&lt;/tt&gt; - a library for simplified data-parallelism. It
+provides magical iterators that have the same functionality as &lt;tt class="docutils literal"&gt;iter&lt;/tt&gt; but
+compute their results in parallel, leveraging multiple CPU cores. The &lt;tt class="docutils literal"&gt;rayon&lt;/tt&gt;
+documentation recommends to import the traits the crate injects as follows:&lt;/p&gt;
+&lt;blockquote&gt;
+It is recommended that you import all of these traits at once by adding
+&lt;tt class="docutils literal"&gt;use &lt;span class="pre"&gt;rayon::prelude::*&lt;/span&gt;&lt;/tt&gt; at the top of each module that uses Rayon methods.&lt;/blockquote&gt;
+&lt;p&gt;Having imported it thus, we can proceed to use Rayon as follows:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="kd"&gt;let&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;exps&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="fm"&gt;vec!&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;2&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;4&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;6&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;12&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;24&lt;/span&gt;&lt;span class="p"&gt;];&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="kd"&gt;let&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;pows_of_two&lt;/span&gt;: &lt;span class="nb"&gt;Vec&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;_&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;exps&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;par_iter&lt;/span&gt;&lt;span class="p"&gt;().&lt;/span&gt;&lt;span class="n"&gt;map&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;|&lt;/span&gt;&lt;span class="n"&gt;n&lt;/span&gt;&lt;span class="o"&gt;|&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;2_&lt;/span&gt;&lt;span class="k"&gt;u64&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;pow&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="n"&gt;n&lt;/span&gt;&lt;span class="p"&gt;)).&lt;/span&gt;&lt;span class="n"&gt;collect&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Note the &lt;tt class="docutils literal"&gt;par_iter&lt;/tt&gt;, which replaces a regular &lt;tt class="docutils literal"&gt;iter&lt;/tt&gt;. It's been magically
+implemented on a vector, as well as a bunch of other types that support
+iteration.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="on-greppability-and-code-readability"&gt;
+&lt;h2&gt;On greppability and code readability&lt;/h2&gt;
+&lt;p&gt;All these uses of extension traits are pretty cool and useful, no doubt. But
+that's not the main point of my post. What I really want to discuss is how the
+general approach relates to &lt;em&gt;code readability&lt;/em&gt;, which is in my mind one of the
+most important aspects of programming we should all be thinking about.&lt;/p&gt;
+&lt;p&gt;This Rust technique fails the &lt;em&gt;greppability&lt;/em&gt; test; it's not a word I made up -
+google it! If it's not immediately apparent, greppability means the ability to
+explore a code base using textual search tools like &lt;tt class="docutils literal"&gt;grep&lt;/tt&gt;, &lt;tt class="docutils literal"&gt;git grep&lt;/tt&gt;,
+&lt;tt class="docutils literal"&gt;ripgrep&lt;/tt&gt;, &lt;a class="reference external" href="https://github.com/eliben/pss/"&gt;pss&lt;/a&gt; or what have you.&lt;/p&gt;
+&lt;p&gt;Suppose you encounter this piece of code in a project you're exploring:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="kd"&gt;let&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;mut&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;wv&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="fm"&gt;vec!&lt;/span&gt;&lt;span class="p"&gt;[];&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="n"&gt;wv&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;write_u16&lt;/span&gt;::&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="n"&gt;LittleEndian&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="mi"&gt;259&lt;/span&gt;&lt;span class="p"&gt;).&lt;/span&gt;&lt;span class="n"&gt;unwrap&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&amp;quot;Interesting&amp;quot;, you think, &amp;quot;I didn't know that &lt;tt class="docutils literal"&gt;Vec&lt;/tt&gt; has a &lt;tt class="docutils literal"&gt;write_u16&lt;/tt&gt;
+method&amp;quot;. You quickly check the documentation - indeed, it doesn't! So where is
+it coming from? You &lt;tt class="docutils literal"&gt;grep&lt;/tt&gt; the project... nothing. It's nowhere in the
+imports. You examine the imports one by one, and notice the:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="k"&gt;use&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;byteorder&lt;/span&gt;::&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="n"&gt;LittleEndian&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;WriteBytesExt&lt;/span&gt;&lt;span class="p"&gt;};&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&amp;quot;Aha!&amp;quot;, you say, &amp;quot;this imports &lt;tt class="docutils literal"&gt;LittleEndian&lt;/tt&gt;, so maybe this has to do with
+the &lt;tt class="docutils literal"&gt;byteorder&lt;/tt&gt; crate&amp;quot;. You check the documentation of that crate and indeed,
+you find the &lt;tt class="docutils literal"&gt;write_u16&lt;/tt&gt; method there; phew.&lt;/p&gt;
+&lt;p&gt;With &lt;tt class="docutils literal"&gt;par_iter&lt;/tt&gt; you're less lucky. Nothing in imports will catch your eye,
+unless you're already familiar with the &lt;tt class="docutils literal"&gt;rayon&lt;/tt&gt; crate. If you're not, then
+&lt;tt class="docutils literal"&gt;use &lt;span class="pre"&gt;rayon::prelude::*&lt;/span&gt;&lt;/tt&gt; won't ring much of a bell in relation to &lt;tt class="docutils literal"&gt;par_iter&lt;/tt&gt;.&lt;/p&gt;
+&lt;p&gt;Of course, you can just google this symbol &lt;a class="reference external" href="https://www.google.com/search?q=rust+par_iter"&gt;like this&lt;/a&gt; and you'll find it. Or maybe
+you don't even understand what the problem is, because your IDE is perfectly
+familiar with these symbols and will gladly pop up their documentation when you
+hover over them.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="ides-and-language-servers"&gt;
+&lt;h2&gt;IDEs and language servers&lt;/h2&gt;
+&lt;p&gt;These days we have free, powerful and fast IDEs that make all of this a
+non-issue (looking at Visual Studio Code, of course). Coupled with smart
+&lt;em&gt;language servers&lt;/em&gt;, these IDEs are as familiar with your code as the compiler;
+the language servers typically run a full front-end sequence on the code, ending
+up with type-checked ASTs cross-referenced with symbol tables that let them
+understand where each symbol is coming from, its type and so on. For Rust the
+language server is RLS, for Go its gopls; all popular languages have them these
+days &lt;a class="footnote-reference" href="#footnote-2" id="footnote-reference-2"&gt;[2]&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;It's entirely possible that using a language like Rust without a sophisticated
+IDE is madness, and I'm somewhat stuck in the past. But I have to say, I do
+lament the loss of greppability. There's something very universal about being
+able to understand a project using only &lt;tt class="docutils literal"&gt;grep&lt;/tt&gt; and the official documentation.&lt;/p&gt;
+&lt;p&gt;In fact, for some languages it's likely that this has been the case for a long
+while already. Who in their right mind has the courage to tackle a Java project
+without an IDE? It's just that this wasn't always the case for systems
+programming languages, and Rust going this way makes me slightly sad. Or maybe
+I'm just too indoctrinated in Go at this point, where all symbol access happens
+as &lt;tt class="docutils literal"&gt;package.Symbol&lt;/tt&gt;, packages are imported explicitly and there is no magic
+name injection anywhere (almost certainly by design).&lt;/p&gt;
+&lt;p&gt;I can't exactly put my finger on why this is bothering me; perhaps I'm just
+&lt;a class="reference external" href="https://knowyourmeme.com/memes/old-man-yells-at-cloud"&gt;yelling at clouds&lt;/a&gt;
+here. While I'm at it, I should finally write that post about &lt;tt class="docutils literal"&gt;printf&lt;/tt&gt;-based
+debugging...&lt;/p&gt;
+&lt;hr class="docutils" /&gt;
+&lt;table class="docutils footnote" frame="void" id="footnote-1" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#footnote-reference-1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;Note that it could be simpler to use &lt;tt class="docutils literal"&gt;serde&lt;/tt&gt;'s &lt;tt class="docutils literal"&gt;to_json&lt;/tt&gt; function
+here, but I opted for the explicit serializer because I wanted to show
+how we invoke a new method on an integer literal.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="footnote-2" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#footnote-reference-2"&gt;[2]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;Apparently, not all tooling has access to sophisticated language servers;
+for example, as far as I can tell GitHub source analysis won't be able to
+find where &lt;tt class="docutils literal"&gt;write_u16&lt;/tt&gt; is coming from, and the same is true of
+&lt;a class="reference external" href="https://sourcegraph.com/"&gt;Sourcegraph&lt;/a&gt;'s default configuration (though
+I've been told this is in the works).&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;/div&gt;
+</content><category term="misc"></category><category term="Rust"></category><category term="Software &amp; Tools"></category></entry><entry><title>GitHub Actions: first impressions</title><link href="https://eli.thegreenplace.net/2020/github-actions-first-impressions/" rel="alternate"></link><published>2020-09-25T20:13:00-07:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2020-09-25:/2020/github-actions-first-impressions/</id><summary type="html">&lt;p&gt;I've been using &lt;a class="reference external" href="https://travis-ci.com/"&gt;Travis CI&lt;/a&gt; fairly extensively since
+2013, when I moved my personal OSS projects &lt;a class="reference external" href="https://eli.thegreenplace.net/2013/06/09/switching-my-open-source-projects-from-bitbucket-to-github"&gt;from Bitbucket to GitHub&lt;/a&gt;.
+It's a great service and a much-appreciated boon to the open-source community.&lt;/p&gt;
+&lt;p&gt;However, since Travis &lt;a class="reference external" href="https://blog.travis-ci.com/2018-05-02-open-source-projects-on-travis-ci-com-with-github-apps"&gt;announced that their .org variant is shutting down soon&lt;/a&gt;,
+I wanted to check out some …&lt;/p&gt;</summary><content type="html">&lt;p&gt;I've been using &lt;a class="reference external" href="https://travis-ci.com/"&gt;Travis CI&lt;/a&gt; fairly extensively since
+2013, when I moved my personal OSS projects &lt;a class="reference external" href="https://eli.thegreenplace.net/2013/06/09/switching-my-open-source-projects-from-bitbucket-to-github"&gt;from Bitbucket to GitHub&lt;/a&gt;.
+It's a great service and a much-appreciated boon to the open-source community.&lt;/p&gt;
+&lt;p&gt;However, since Travis &lt;a class="reference external" href="https://blog.travis-ci.com/2018-05-02-open-source-projects-on-travis-ci-com-with-github-apps"&gt;announced that their .org variant is shutting down soon&lt;/a&gt;,
+I wanted to check out some of the alternatives, and GitHub actions (GHA) seemed
+very interesting.&lt;/p&gt;
+&lt;p&gt;So this week I've migrated &lt;a class="reference external" href="https://github.com/eliben/pycparser"&gt;pycparser&lt;/a&gt;
+and a few of my other OSS projects over to GHA. This turned out to be very easy!
+Here's a brief recap.&lt;/p&gt;
+&lt;img alt="GitHub actions icon" class="align-center" src="https://eli.thegreenplace.net/images/2020/gha-icon.png" /&gt;
+&lt;div class="section" id="workflow-configuration"&gt;
+&lt;h2&gt;Workflow configuration&lt;/h2&gt;
+&lt;p&gt;To activate GHA for pycparser, all I had to do is create the following YAML
+file as &lt;tt class="docutils literal"&gt;.github/workflows/ci.yml&lt;/tt&gt; in the repository:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;name: pycparser-tests
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  build:
+
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        python-version: [2.7, 3.6, 3.7, 3.8]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+
+    - uses: actions/checkout@v2
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v2
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Test
+      run: |
+        python tests/all_tests.py
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Some notes:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;This workflow fires on two kinds of events: pushes to the master branch and
+PRs to the master branch. Each PR will have an automatic CI run for each
+change (every new commit pushed).&lt;/li&gt;
+&lt;li&gt;It runs in multiple configurations: the cross-product of Python versions and
+OSes, as specified.&lt;/li&gt;
+&lt;li&gt;The &lt;tt class="docutils literal"&gt;run:&lt;/tt&gt; entry is the command the runs the tests.&lt;/li&gt;
+&lt;li&gt;While &lt;tt class="docutils literal"&gt;pycparser&lt;/tt&gt; doesn't have any dependencies, it's easy to have those too
+by adding &lt;tt class="docutils literal"&gt;pip install $whatever&lt;/tt&gt; lines to &lt;tt class="docutils literal"&gt;run:&lt;/tt&gt; before the actual test
+execution line.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;object class="align-center" data="https://eli.thegreenplace.net/images/2020/gha-badge.svg" type="image/svg+xml"&gt;GitHub tests passed badge&lt;/object&gt;
+&lt;/div&gt;
+&lt;div class="section" id="first-impressions"&gt;
+&lt;h2&gt;First impressions&lt;/h2&gt;
+&lt;p&gt;My first impressions of GHA compared to Travis:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;Actions run &lt;em&gt;much faster&lt;/em&gt;; the CI jobs schedule pretty much immediately. On
+Travis you might have to wait for multiple minutes.&lt;/li&gt;
+&lt;li&gt;Out-of-the-box Windows and Mac OS option! I couldn't get these with the free
+Travis variant and had to augment my CI solution for pycparser by running on
+Windows through &lt;a class="reference external" href="https://www.appveyor.com/"&gt;AppVeyor&lt;/a&gt;. Now I only need
+to maintain a single CI workflow.&lt;/li&gt;
+&lt;li&gt;Travis seems to have better documentation and configurability at this point;
+while the GHA documentation is comprehensive, it's a bit scattered and harder
+to follow. This is something I hope will improve over time.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;I like what I'm seeing from GHA so far; the ability to set up a CI workflow
+very easily without bouncing between multiple Web UIs is a blessing, and GHA
+appears to be a capable, performant platform with a convenient selection of
+OSes.&lt;/p&gt;
+&lt;p&gt;I'm still using Travis for some projects and will continue comparing the two
+over the coming months.&lt;/p&gt;
+&lt;/div&gt;
+</content><category term="misc"></category><category term="Software &amp; Tools"></category><category term="Version control"></category><category term="Python"></category></entry><entry><title>How to send good pull requests on GitHub</title><link href="https://eli.thegreenplace.net/2019/how-to-send-good-pull-requests-on-github/" rel="alternate"></link><published>2019-11-06T06:15:00-08:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2019-11-06:/2019/how-to-send-good-pull-requests-on-github/</id><summary type="html">&lt;p&gt;Over the past few years I authored or reviewed thousands of GitHub pull
+requests (PRs), both for work and for personal projects. I've come to believe
+there's a small set of useful rules of thumb for what makes a good PR, what
+makes a bad PR, and why getting the …&lt;/p&gt;</summary><content type="html">&lt;p&gt;Over the past few years I authored or reviewed thousands of GitHub pull
+requests (PRs), both for work and for personal projects. I've come to believe
+there's a small set of useful rules of thumb for what makes a good PR, what
+makes a bad PR, and why getting the good ones merged is much easier - both for
+the PR author and the reviewer.&lt;/p&gt;
+&lt;p&gt;Here's a quick checklist for a good PR. Each item is described in more detail
+below.&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;Make sure the PR is needed&lt;/li&gt;
+&lt;li&gt;Have an open issue linked in (optional)&lt;/li&gt;
+&lt;li&gt;Write a useful PR title&lt;/li&gt;
+&lt;li&gt;Write a detailed PR description&lt;/li&gt;
+&lt;li&gt;Adhere to the project's coding standards&lt;/li&gt;
+&lt;li&gt;Add tests&lt;/li&gt;
+&lt;li&gt;Make sure all tests pass&lt;/li&gt;
+&lt;li&gt;Be patient and friendly during code review&lt;/li&gt;
+&lt;/ol&gt;
+&lt;div class="section" id="make-sure-the-pr-is-needed"&gt;
+&lt;h2&gt;Make sure the PR is needed&lt;/h2&gt;
+&lt;p&gt;This is especially important if you're contributing to a repository you haven't
+worked with much before. Do some research in the existing issues and PRs in the
+repository - including closed ones. Is this change already being discussed
+somewhere? Was it proposed before and rejected? The code you want to change - is
+it there for a good reason?&lt;/p&gt;
+&lt;p&gt;GitHub offers reasonably good search capabilities in case the project has a
+large log of issues in PRs. It's not perfect, but by running a few searches with
+probable keywords there's a good chance to find something. Another thing I often
+do is search the commit history of a project for relevant information (&lt;tt class="docutils literal"&gt;git log
+&lt;span class="pre"&gt;--grep&lt;/span&gt;&lt;/tt&gt;).&lt;/p&gt;
+&lt;p&gt;Demonstrating some due diligence goes a long way in showing the repository owner
+that you're a serious contributor.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="have-an-open-issue-linked-in-optional"&gt;
+&lt;h2&gt;Have an open issue linked in (optional)&lt;/h2&gt;
+&lt;p&gt;An important tool of modern software development discipline is having an
+open &lt;em&gt;issue&lt;/em&gt; (or &lt;em&gt;bug&lt;/em&gt;, or &lt;em&gt;ticket&lt;/em&gt;, or however else it's called in other
+systems) to discuss some problem or some missing feature we
+want to address.&lt;/p&gt;
+&lt;p&gt;An issue is more general than a PR description. An issue describes a problem; a
+PR describes a solution to that problem. Some issues require multiple PRs to be
+solved, and interlinking all these PRs through the issue is critical for later
+attempts at archaeology.&lt;/p&gt;
+&lt;p&gt;If in doubt - open an issue. Add all the context there. The PR will then
+reference the issue with a &lt;tt class="docutils literal"&gt;#&amp;lt;issue number&amp;gt;&lt;/tt&gt; tag - this is something GitHub
+understands and will add a link between the two. A PR can also say &lt;tt class="docutils literal"&gt;Fixes
+#&amp;lt;issue number&amp;gt;&lt;/tt&gt; if merging this PR means the issue is fully solved.&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;One of the most frustrating experiences for a repository maintainer is getting
+a PR without sufficient context of what it attempts to solve and why&lt;/strong&gt;. Having
+an open issue with all the details is the best way to establish this context;
+the next sections address some additional ways.&lt;/p&gt;
+&lt;p&gt;I marked this section as &lt;em&gt;(optional)&lt;/em&gt; because an issue isn't necessary in some
+cases. For example, typos in comments typically don't require an issue and a PR
+carries sufficient context. Minor changes in documentation also don't require
+issues in most cases.&lt;/p&gt;
+&lt;p&gt;If in doubt, create an issue. Linking this to the previous section - if an issue
+describing the problem already exists, make sure to link your PR to it -
+maintainers &lt;em&gt;love&lt;/em&gt; PRs that solve open issues.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="write-a-useful-pr-title"&gt;
+&lt;h2&gt;Write a useful PR title&lt;/h2&gt;
+&lt;p&gt;This advice will read a bit like &amp;quot;what makes a good git commit message&amp;quot;.&lt;/p&gt;
+&lt;p&gt;The PR title is extremely important. It's what people see when listing all open
+PRs. It's also commonly translated to be the first line of the merged commit,
+and shows up prominently in &lt;tt class="docutils literal"&gt;git log&lt;/tt&gt;, etc. Take special care in crafting the
+PR title to be descriptive and useful, but not too long.&lt;/p&gt;
+&lt;p&gt;Some large repositories have special guidelines for writing PRs. For example,
+the PR title would start with the component name - &lt;em&gt;&amp;quot;storage/remote:
+increase widget timeout&amp;quot;&lt;/em&gt;. Look around - how do other PRs (that were
+successfully merged) look? Is there any contribution guide in the repository
+that details these conventions?&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="write-a-detailed-pr-description"&gt;
+&lt;h2&gt;Write a detailed PR description&lt;/h2&gt;
+&lt;p&gt;This ties strongly to the &amp;quot;Have an open issue linked in&amp;quot; advice. If the PR
+requires a long background description, it's better to do this in an issue and
+have a link in the PR. If there is no issue for some reason, the burden is on
+the PR description to explain the motivation for the change, and the approach
+taken in it.&lt;/p&gt;
+&lt;p&gt;But PRs and issues are also for diferent purposes. Sometimes, a PR description
+will have information that doesn't belong in an issue, such as details of the
+specific approach taken in the PR, benchmark numbers for this PR, etc.&lt;/p&gt;
+&lt;p&gt;The PR description will make it into the git commit log - add as much detail as
+you can. The repository mainainer can later tweak the commit log so they will
+remove things they don't need; if in doubt, add more details.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="adhere-to-the-project-s-coding-standards"&gt;
+&lt;h2&gt;Adhere to the project's coding standards&lt;/h2&gt;
+&lt;p&gt;Does the project have a contributors guide? Spend a couple of minutes looking
+for it.&lt;/p&gt;
+&lt;p&gt;Look at other PRs that were merged - what did their authors do?&lt;/p&gt;
+&lt;p&gt;Look at some of the existing code in the repository - try to match the style of
+your PR to the prevailing style in the existing code. Doing this shows the
+maintainer that you're a serious contributor who cares about the long term
+health of the project.&lt;/p&gt;
+&lt;p&gt;Be attentive to the smallest details: how much whitespace does the code have,
+including in comments? Is there a specific writing style - Oxford commas, one or
+two spaces after a period, and so on?&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="add-tests"&gt;
+&lt;h2&gt;Add tests&lt;/h2&gt;
+&lt;p&gt;If you're adding new code - make sure it's tested. Either add new tests, or
+point out in the PR description which existing tests cover it. If a test is
+too hard to add for some reason, explain why.&lt;/p&gt;
+&lt;p&gt;For changing existing code the situation is a bit more nuanced. Is the change
+addressing a current test failure? Which one? Which tests are affected by the
+change? Should new tests be added?&lt;/p&gt;
+&lt;p&gt;Spend a few minutes thinking about this and documenting your conclusions in the
+PR description. Again, this shows the maintainer that you're a serious
+contributor and your PR is more likely to get attention.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="make-sure-all-tests-pass"&gt;
+&lt;h2&gt;Make sure all tests pass&lt;/h2&gt;
+&lt;p&gt;Many GitHub repositories have integration with CI tools, whereupon each PR gets
+automatically tested and the CI system adds notes to the PR about its passing
+or failing.&lt;/p&gt;
+&lt;p&gt;After sending a PR, watch out for this and address any failures. Maintainers are
+unlikely to pay attention to PRs that break the build or tests.&lt;/p&gt;
+&lt;p&gt;If the repository has no such tool, make sure to run all the tests you find in
+the project and ensure that your change doesn't affect them negatively. If some
+test breaks because it's bad, make sure to fix it. If some tests fail with or
+without your change, make sure to call this out in the PR description.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="be-patient-and-friendly-during-code-review"&gt;
+&lt;h2&gt;Be patient and friendly during code review&lt;/h2&gt;
+&lt;p&gt;Once the PR is finally out, the contributor's task isn't done yet. In fact, most
+of the work may yet be ahead. The code review process is an important tenet of
+modern software development, and knowing how to behave is critical for success.&lt;/p&gt;
+&lt;p&gt;Whole book chapters have been written on code reviews, so I'll keep it short and
+simple here, focusing on open-source contributions. When sending a PR for a work
+project, it's obvious we should be extra friendly and kind with colleagues,
+right? &lt;em&gt;Right&lt;/em&gt;?&lt;/p&gt;
+&lt;p&gt;But what about open source? You found an issue in some OSS project you use, and
+are sending a PR. Good for you! Do you expect the maintainer will be delighted
+about the contribution? Well, not necessarily, and it really depends on your
+demeanor.&lt;/p&gt;
+&lt;p&gt;OSS maintainers are notoriously overworked and underpaid. Sometimes they just
+want stability - as few changes as possible. Clearly if you report a critical
+bug they will likely be happy to fix it; but 99% of PRs are not for critical
+bugs - they are for minor bugs and new features. Here the PR presents a
+dilemma for the maintainer - someone is sending code, and this someone is very
+likely going to completely disappear after the PR lands, so the responsibility
+for the code moves to the maintainer. It's not surprising that in many cases,
+maintainers are cautions and even suspicious of every change.&lt;/p&gt;
+&lt;p&gt;When answering review comments be patient and friendly. Assume good
+intentions - the maintainer is taking extra burden to maintain additional code
+(especially with feature PRs) and it's their right to scrutinize it and take
+their time. Multiple rounds of reviews may be required. Be sure to be responsive
+and attentive to detail - acknowledge all comments, either by doing what the
+reviewer suggests, or (kindly) explaining your point of view. Add more tests if
+they ask you to (and you can't point to existing tests covering the same thing),
+add more comments if they ask you to.&lt;/p&gt;
+&lt;/div&gt;
+</content><category term="misc"></category><category term="Software &amp; Tools"></category><category term="Version control"></category></entry><entry><title>Command-line autocomplete for Go documentation</title><link href="https://eli.thegreenplace.net/2018/command-line-autocomplete-for-go-documentation/" rel="alternate"></link><published>2018-03-02T05:51:00-08:00</published><updated>2024-05-04T19:46:23-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2018-03-02:/2018/command-line-autocomplete-for-go-documentation/</id><summary type="html">&lt;p&gt;&lt;strong&gt;Updated (2023-03-06)&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;Go has a great, well documented standard library. You may find yourself spending
+a fairly significant chunk of your Go programming time digging in stdlib docs,
+which is reasonable to expect at least for novice Go coders.&lt;/p&gt;
+&lt;p&gt;How do folks look for stuff in the docs? There are …&lt;/p&gt;</summary><content type="html">&lt;p&gt;&lt;strong&gt;Updated (2023-03-06)&lt;/strong&gt;&lt;/p&gt;
+&lt;p&gt;Go has a great, well documented standard library. You may find yourself spending
+a fairly significant chunk of your Go programming time digging in stdlib docs,
+which is reasonable to expect at least for novice Go coders.&lt;/p&gt;
+&lt;p&gt;How do folks look for stuff in the docs? There are several ways:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;Just use &lt;a class="reference external" href="https://pkg.go.dev/"&gt;https://pkg.go.dev/&lt;/a&gt; -- since its release this site has been improving
+quite a bit, with symbol search, in-page quick auto-completing search (when
+pressing &lt;tt class="docutils literal"&gt;'f'&lt;/tt&gt;), etc.&lt;/li&gt;
+&lt;li&gt;Use Google, which indexes the docs very well.&lt;/li&gt;
+&lt;li&gt;&lt;a class="reference external" href="https://devdocs.io/"&gt;https://devdocs.io/&lt;/a&gt; -- I really like this one for many languages / frameworks,
+and its Go support is great.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;But what if you want to stay within the terminal when searching documentation?&lt;/p&gt;
+&lt;p&gt;Luckily, Go comes with its own private take on &lt;tt class="docutils literal"&gt;man&lt;/tt&gt; - &lt;tt class="docutils literal"&gt;go doc&lt;/tt&gt;. So you
+can just type:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ go doc regexp.Split
+func (re *Regexp) Split(s string, n int) []string
+    Split slices s into substrings separated by the expression and returns a
+    slice of the substrings between those expression matches.
+    [...]
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Which is pretty good, with one significant problem. You have to provide the
+function/type name exactly, including its package. If you don't remember it
+exactly, that's a problem. Even if you do, it may be fairly long to type in;
+consider &lt;tt class="docutils literal"&gt;go doc encoding/csv.Reader.ReadAll&lt;/tt&gt; - that's quite a handful!&lt;/p&gt;
+&lt;p&gt;I wouldn't be a programmer at heart if I wasn't willing to spend a few hours
+automating a task that takes 3 extra seconds to perform. So I hacked together
+an &amp;quot;autocompletion engine&amp;quot; for &lt;tt class="docutils literal"&gt;go doc&lt;/tt&gt;. Here's an animated GIF showing it in
+action:&lt;/p&gt;
+&lt;img alt="Animated GIF showing autocomplete for go doc" class="align-center" src="https://eli.thegreenplace.net/images/2018/gdocpeek.gif" /&gt;
+&lt;p&gt;&lt;a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2018/gdoc"&gt;The full code is here&lt;/a&gt;. Here's an
+overview of what's going on.&lt;/p&gt;
+&lt;p&gt;The main tool is &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;index-doc.go&lt;/span&gt;&lt;/tt&gt;; it takes a path to the Go source directory
+(which is installed with Go), then goes over all the files found there,
+extracting the full symbol path of every function, type and variable. Don't
+panic - Go has a bunch of Go-processing tools built into the standard library,
+so there's no need to manually parse Go code here. The packages &lt;tt class="docutils literal"&gt;go/parser&lt;/tt&gt;,
+&lt;tt class="docutils literal"&gt;go/build&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;go/doc&lt;/tt&gt; are doing all the heavy lifting &lt;a class="footnote-reference" href="#footnote-1" id="footnote-reference-1"&gt;[1]&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;It then emits a list of these symbols to &lt;tt class="docutils literal"&gt;stdout&lt;/tt&gt;, which can be piped into
+a file.&lt;/p&gt;
+&lt;p&gt;Next, comes one of my favoring Linux command-line tools - &lt;a class="reference external" href="https://github.com/junegunn/fzf/"&gt;fzf&lt;/a&gt;. The file with the symbols is piped into
+it using a Bash function:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;gdoc() {
+    go doc `fzf &amp;lt; $HOME/.gosyms`
+}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;tt class="docutils literal"&gt;fzf&lt;/tt&gt; handles the fuzzy search and autocompletion, and passes the selected
+result into &lt;tt class="docutils literal"&gt;go doc&lt;/tt&gt; that displays the documentation. That's it!&lt;/p&gt;
+&lt;p&gt;Now I can conveniently find all I need in Go's docs without even leaving the
+terminal, and without remembering package paths and symbol names exactly.
+Auto-completion works really well for tasks like &amp;quot;wait, what was that function
+that creates temporary files?&amp;quot; -- just start typing &lt;tt class="docutils literal"&gt;tempf&lt;/tt&gt; into the menu
+&lt;tt class="docutils literal"&gt;gdoc&lt;/tt&gt; pops up and immediately find &lt;tt class="docutils literal"&gt;io/ioutil.TempFile&lt;/tt&gt;. The tool can be
+easily adjusted to index my own packages and installed 3rd party packages, as
+long as they're accessible from &lt;tt class="docutils literal"&gt;go doc&lt;/tt&gt;.&lt;/p&gt;
+&lt;hr class="docutils" /&gt;
+&lt;table class="docutils footnote" frame="void" id="footnote-1" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#footnote-reference-1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;In fact, &lt;tt class="docutils literal"&gt;go doc&lt;/tt&gt; itself uses the same packages.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+</content><category term="misc"></category><category term="Go"></category><category term="Software &amp; Tools"></category><category term="Go tooling"></category></entry><entry><title>reStructuredText vs. Markdown for technical documentation</title><link href="https://eli.thegreenplace.net/2017/restructuredtext-vs-markdown-for-technical-documentation/" rel="alternate"></link><published>2017-02-24T05:21:00-08:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2017-02-24:/2017/restructuredtext-vs-markdown-for-technical-documentation/</id><summary type="html">&lt;p&gt;&lt;a class="reference external" href="https://en.wikipedia.org/wiki/Markdown"&gt;Markdown&lt;/a&gt; and &lt;a class="reference external" href="https://en.wikipedia.org/wiki/ReStructuredText"&gt;reStructuredText&lt;/a&gt; are two markup languages with
+plain text formatting syntax designed for easy input with any text editor. Each
+has a whole host of tools that can convert marked up text to publishing formats
+like HTML or PDF.&lt;/p&gt;
+&lt;p&gt;Software developers these days have to be familiar with such …&lt;/p&gt;</summary><content type="html">&lt;p&gt;&lt;a class="reference external" href="https://en.wikipedia.org/wiki/Markdown"&gt;Markdown&lt;/a&gt; and &lt;a class="reference external" href="https://en.wikipedia.org/wiki/ReStructuredText"&gt;reStructuredText&lt;/a&gt; are two markup languages with
+plain text formatting syntax designed for easy input with any text editor. Each
+has a whole host of tools that can convert marked up text to publishing formats
+like HTML or PDF.&lt;/p&gt;
+&lt;p&gt;Software developers these days have to be familiar with such markup languages
+because they serve as the basis for many documentation systems. In this post I
+want to examine the tradeoffs between Markdown and reStructuredText from the
+point of view of a programmer.&lt;/p&gt;
+&lt;div class="section" id="where-markdown-shines"&gt;
+&lt;h2&gt;Where Markdown shines&lt;/h2&gt;
+&lt;p&gt;The history of markup languages for describing complex document structure with
+rich formatting through textual input is long and illustrious, dating back at
+least to the early 1970s with &lt;em&gt;troff&lt;/em&gt; and later on TeX. In the 1990s these
+formats escaped the specialized dominion of mathematicians and programmers, as a
+multitude of people went online and wanted to interact through mediums like
+forums. This led to the birth of markup languages like &lt;a class="reference external" href="https://en.wikipedia.org/wiki/BBCode"&gt;BBCode&lt;/a&gt; in 1998.&lt;/p&gt;
+&lt;p&gt;Markdown came a bit later, in 2004, and really pushed the concept over the brink
+of ubiquitousness. Was it because of the relative fame of its inventors (John
+Gruber and Aaron Swartz)? Or maybe it was just a good idea in the right place
+at the right time, coupled with a catchy name? It's hard to say now, but one
+thing is certain - these days Markdown the big gorilla in any discussion of
+textual markup languages. It's likely to be the first thing on one's mind when
+thinking of a technology to use for, say, documentation or textual entry into
+some program.&lt;/p&gt;
+&lt;img alt="Markdown logo" class="align-center" src="https://eli.thegreenplace.net/images/2017/markdown-logo-crop.png" /&gt;
+&lt;p&gt;So the best thing about Markdown is, IMHO, its popularity. It's a natural choice
+since it's so familiar, and one can find tools in almost any conceivable
+programming language and environment for parsing and munging it. Just by virtue
+of being the default markup language for StackOverflow, Reddit and GitHub,
+Markdown is probably well familiar to most developers these days.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="where-rest-shines"&gt;
+&lt;h2&gt;Where reST shines&lt;/h2&gt;
+&lt;p&gt;reStructuredText's initial release dates back to 2002, actually predating
+Markdown. The problem is, it lived in relative obscurity for most of its life,
+confined to some parts of the Python community. The core Python documentation
+has been written in reST for quite a while, but only after the release of
+&lt;a class="reference external" href="http://www.sphinx-doc.org/en/stable/"&gt;Sphinx&lt;/a&gt; has it seen serious uptake
+outside. These days reST is taken more seriously - GitHub supports it for pages
+and wikis, and some major projects use it by default for their documentation -
+including the Linux kernel, OpenCV and LLVM/Clang.&lt;/p&gt;
+&lt;p&gt;To me, reST stands out against Markdown it three main aspects, which I'll cover
+in detail:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;It's more fully-featured.&lt;/li&gt;
+&lt;li&gt;It's much more standardized and uniform.&lt;/li&gt;
+&lt;li&gt;It has built-in support for extensions.&lt;/li&gt;
+&lt;/ol&gt;
+&lt;div class="section" id="more-features"&gt;
+&lt;h3&gt;More features&lt;/h3&gt;
+&lt;p&gt;reST comes with more built-in features for writing more complex documents. Some
+examples I personally use the most: footnotes, tables, citations, tables of
+contents. There is no standard way of doing these in Markdown, which is a
+problem because these and other features are important for implementing complete
+documentation systems. Sure, these can be added as extensions; but Markdown
+doesn't have a standard extension mechanism, which means that every system
+develops its own non-standard way of doing things. Which leads me to...&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="more-standardized-and-uniform"&gt;
+&lt;h3&gt;More standardized and uniform&lt;/h3&gt;
+&lt;p&gt;The original Markdown syntax was defined de-facto by its initial implementation;
+there was no real standard to speak of, and the built-in assumptions and bugs of
+the initial implementation became unoffically baked in. There's a long and
+fascinating background story about the standardization attempt of Markdown led
+by Jeff Attwood (for the sake of StackOverflow); you can easily google for it.&lt;/p&gt;
+&lt;p&gt;I'll just point to the &lt;a class="reference external" href="http://spec.commonmark.org/0.27/"&gt;CommonMark spec&lt;/a&gt;,
+which is the result of this attempt. It has a section named &amp;quot;Why is a spec
+needed&amp;quot; listing some of the underspecified aspects of Markdown; it's worth
+reading.&lt;/p&gt;
+&lt;p&gt;Due to this, what ends up happening is that there's no single Markdown. There is
+a multitude of related markup languages with a common core, some more conformant
+than others. When features are missing, sites/tools usually roll on some custom
+extension which isn't coordinated with other sites/tools.&lt;/p&gt;
+&lt;p&gt;reST, on the contrary, has a fairly &lt;a class="reference external" href="http://docutils.sourceforge.net/docs/ref/rst/restructuredtext.html"&gt;comprehensive spec&lt;/a&gt; and a
+single canonical implementation that is still being actively developed - the
+&lt;a class="reference external" href="http://docutils.sourceforge.net/"&gt;docutils project&lt;/a&gt;. Sure, there are
+alternative implementations (such as a JS one for client-side rendering), but
+these at least can follow the written-down spec. Therefore, there's really just
+one reST, and the source you write is likely to work in multiple systems.&lt;/p&gt;
+&lt;img alt="A class diagram for docutils parser" class="align-center" src="https://eli.thegreenplace.net/images/2017/rest-class-diagram.png" /&gt;
+&lt;/div&gt;
+&lt;div class="section" id="built-in-support-for-extensions"&gt;
+&lt;h3&gt;Built-in support for extensions&lt;/h3&gt;
+&lt;p&gt;As discussed before, Markdown implementations are all over the place when it
+comes to features beyond the commonly-agreed-upon core. reST is very different.
+Extension is a core design principle, and both custom roles (for inline
+elements) and directives (for block elements) can be easily added. It's
+therefore straightforward to add extensions for commonly-needed stuff like
+syntax-highlighted code blocks, math equations for Latex rendering and so on.&lt;/p&gt;
+&lt;p&gt;With Markdown, to add an extension one has to &lt;em&gt;modify the parser&lt;/em&gt;, which makes
+every Markdown implementation out there an island of its own. In reST, adding an
+extension is just an API call in &lt;tt class="docutils literal"&gt;docutils&lt;/tt&gt;. With this in hand, documentation
+systems like Sphinx and static website generators like Pelican heavily customize
+their reST input language while using the original &lt;tt class="docutils literal"&gt;docutils&lt;/tt&gt; parser.&lt;/p&gt;
+&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class="section" id="conclusion"&gt;
+&lt;h2&gt;Conclusion&lt;/h2&gt;
+&lt;p&gt;So, which one to choose? I'd say this depends on the use case. For fully-fledged
+documentation of a large (or small) software project, I'd definitely go with
+reST, most likely using Sphinx. I hope this post managed to convey why reST is a
+better choice for this scenario.&lt;/p&gt;
+&lt;p&gt;For a simple markup system use in things like forum comments, or marking up chat
+messages, the decision is trickier. Markdown is a good choice because more users
+would be familiar with it. On the other hand, if you're already using reST for
+something else, consistency is important too.&lt;/p&gt;
+&lt;/div&gt;
+</content><category term="misc"></category><category term="Software &amp; Tools"></category></entry><entry><title>A brief tutorial on parsing reStructuredText (reST)</title><link href="https://eli.thegreenplace.net/2017/a-brief-tutorial-on-parsing-restructuredtext-rest/" rel="alternate"></link><published>2017-01-11T06:05:00-08:00</published><updated>2024-05-04T19:46:23-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2017-01-11:/2017/a-brief-tutorial-on-parsing-restructuredtext-rest/</id><summary type="html">&lt;p&gt;&lt;a class="reference external" href="http://docutils.sourceforge.net/rst.html"&gt;Docutils&lt;/a&gt;, the canonical library
+for processing and munging reStructuredText, is mostly used in an end-to-end
+mode where HTML or other user-consumable formats are produced from input reST
+files. However, sometimes it's useful to develop tooling that works on reST
+input directly and does something non-standard. In this case, one has …&lt;/p&gt;</summary><content type="html">&lt;p&gt;&lt;a class="reference external" href="http://docutils.sourceforge.net/rst.html"&gt;Docutils&lt;/a&gt;, the canonical library
+for processing and munging reStructuredText, is mostly used in an end-to-end
+mode where HTML or other user-consumable formats are produced from input reST
+files. However, sometimes it's useful to develop tooling that works on reST
+input directly and does something non-standard. In this case, one has to dig
+only a little deeper in Docutils to find useful modules to help with the task.&lt;/p&gt;
+&lt;p&gt;In this short tutorial I'm going to show how to write a tool that consumes reST
+files and does something other than generating HTML from them. As a simple but
+useful example, I'll demonstrate a link checker - a tool that checks that all
+web links within a reST document are valid. As a bonus, I'll show another tool
+that uses internal table-parsing libraries within Docutils that let us write
+pretty-looking ASCII tables and parse them.&lt;/p&gt;
+&lt;div class="section" id="parsing-rest-text-into-a-document"&gt;
+&lt;h2&gt;Parsing reST text into a Document&lt;/h2&gt;
+&lt;p&gt;This tutorial is a code walk-through for the complete code sample
+&lt;a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/parsing-rst/rst-link-check.py"&gt;available online&lt;/a&gt;.
+I'll only show a couple of the most important code snippets from the full
+sample.&lt;/p&gt;
+&lt;p&gt;Docutils represents a reST file internally as your typical document tree
+(similarly to many XML and HTML parsers), where every node is of a type derived
+from &lt;tt class="docutils literal"&gt;docutils.nodes.Node&lt;/tt&gt;. The top-level document is parsed into an object of
+type &lt;tt class="docutils literal"&gt;document&lt;/tt&gt; &lt;a class="footnote-reference" href="#footnote-1" id="footnote-reference-1"&gt;[1]&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;We start by creating a new document with some default settings and populating
+it with the output of a &lt;tt class="docutils literal"&gt;Parser&lt;/tt&gt;:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="c1"&gt;# ... here &amp;#39;fileobj&amp;#39; is a file-like object holding the contents of the input&lt;/span&gt;
+&lt;span class="c1"&gt;# reST file.&lt;/span&gt;
+
+&lt;span class="c1"&gt;# Parse the file into a document with the rst parser.&lt;/span&gt;
+&lt;span class="n"&gt;default_settings&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;docutils&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;frontend&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;OptionParser&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;
+    &lt;span class="n"&gt;components&lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;docutils&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;parsers&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;rst&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Parser&lt;/span&gt;&lt;span class="p"&gt;,))&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;get_default_values&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;span class="n"&gt;document&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;docutils&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;utils&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;new_document&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;fileobj&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;name&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;default_settings&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="n"&gt;parser&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;docutils&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;parsers&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;rst&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;Parser&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+&lt;span class="n"&gt;parser&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;parse&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;fileobj&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;read&lt;/span&gt;&lt;span class="p"&gt;(),&lt;/span&gt; &lt;span class="n"&gt;document&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;/div&gt;
+&lt;div class="section" id="processing-a-rest-document-with-a-visitor"&gt;
+&lt;h2&gt;Processing a reST document with a visitor&lt;/h2&gt;
+&lt;p&gt;Once we have the document, we can go through it and find the data we want.
+Docutils helps by defining a hierarchy of &lt;tt class="docutils literal"&gt;Visitor&lt;/tt&gt; types, and a &lt;tt class="docutils literal"&gt;walk&lt;/tt&gt;
+method on every &lt;tt class="docutils literal"&gt;Node&lt;/tt&gt; that will recursively visit the subtree starting with
+this node. This is a very typical pattern for Python code; the standard library
+has a number of similar objects - for example &lt;a class="reference external" href="https://docs.python.org/dev/library/ast.html#ast.NodeVisitor"&gt;ast.NodeVisitor&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;Here's our visitor class that handles &lt;tt class="docutils literal"&gt;reference&lt;/tt&gt; nodes specially:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="k"&gt;class&lt;/span&gt; &lt;span class="nc"&gt;LinkCheckerVisitor&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;docutils&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;nodes&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;GenericNodeVisitor&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
+    &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;visit_reference&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;node&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
+        &lt;span class="c1"&gt;# Catch reference nodes for link-checking.&lt;/span&gt;
+        &lt;span class="n"&gt;check_link&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;node&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="s1"&gt;&amp;#39;refuri&amp;#39;&lt;/span&gt;&lt;span class="p"&gt;])&lt;/span&gt;
+
+    &lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;default_visit&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="bp"&gt;self&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;node&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
+        &lt;span class="c1"&gt;# Pass all other nodes through.&lt;/span&gt;
+        &lt;span class="k"&gt;pass&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;How did I know it's &lt;tt class="docutils literal"&gt;reference&lt;/tt&gt; nodes I need and not something else? Just
+experemintation :) Once we parse a reST document we can &lt;tt class="docutils literal"&gt;print&lt;/tt&gt; the tree and
+it shows which nodes contain what. Coupled with reading the source code of
+Docutils (particularly the &lt;tt class="docutils literal"&gt;docutils/nodes.py&lt;/tt&gt; module) it's fairly easy to
+figure out which nodes one needs to catch.&lt;/p&gt;
+&lt;p&gt;With this visitor class in hand, we simply call &lt;tt class="docutils literal"&gt;walk&lt;/tt&gt; on the parsed document:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="c1"&gt;# Visit the parsed document with our link-checking visitor.&lt;/span&gt;
+&lt;span class="n"&gt;visitor&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;LinkCheckerVisitor&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;document&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;span class="n"&gt;document&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;walk&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;visitor&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;That's it! To see what &lt;tt class="docutils literal"&gt;check_link&lt;/tt&gt; does, check out the &lt;a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/parsing-rst/rst-link-check.py"&gt;code sample&lt;/a&gt;.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="bonus-parsing-ascii-grid-tables-with-docutils"&gt;
+&lt;h2&gt;Bonus: parsing ASCII grid tables with Docutils&lt;/h2&gt;
+&lt;p&gt;Docutils supports defining tables in ASCII in a &lt;a class="reference external" href="http://docutils.sourceforge.net/docs/user/rst/quickref.html#tables"&gt;couple of ways&lt;/a&gt;; one I
+like in particular is &amp;quot;grid tables&amp;quot;, done like this:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;+------------------------+------------+----------+----------+
+| Header row, column 1   | Header 2   | Header 3 | Header 4 |
++========================+============+==========+==========+
+| body row 1, column 1   | column 2   | column 3 | column 4 |
++------------------------+------------+----------+----------+
+| body row 2             | Cells may span columns.          |
++------------------------+------------+---------------------+
+| body row 3             | Cells may  | - Table cells       |
++------------------------+ span rows. | - contain           |
+| body row 4             |            | - body elements.    |
++------------------------+------------+---------------------+
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Even if we don't really care about reST but just want to be able to parse tables
+like the one above, Docutils can help. We can use its &lt;tt class="docutils literal"&gt;tableparser&lt;/tt&gt; module.
+Here's a short snippet from &lt;a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/parsing-rst/rst-table-parser.py"&gt;another code sample&lt;/a&gt;:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="k"&gt;def&lt;/span&gt; &lt;span class="nf"&gt;parse_grid_table&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;text&lt;/span&gt;&lt;span class="p"&gt;):&lt;/span&gt;
+    &lt;span class="c1"&gt;# Clean up the input: get rid of empty lines and strip all leading and&lt;/span&gt;
+    &lt;span class="c1"&gt;# trailing whitespace.&lt;/span&gt;
+    &lt;span class="n"&gt;lines&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="nb"&gt;filter&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;bool&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;line&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;strip&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="k"&gt;for&lt;/span&gt; &lt;span class="n"&gt;line&lt;/span&gt; &lt;span class="ow"&gt;in&lt;/span&gt; &lt;span class="n"&gt;text&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;splitlines&lt;/span&gt;&lt;span class="p"&gt;()))&lt;/span&gt;
+    &lt;span class="n"&gt;parser&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;docutils&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;parsers&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;rst&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;tableparser&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;GridTableParser&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;
+    &lt;span class="k"&gt;return&lt;/span&gt; &lt;span class="n"&gt;parser&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;parse&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;docutils&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;statemachine&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;StringList&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="nb"&gt;list&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;lines&lt;/span&gt;&lt;span class="p"&gt;)))&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The parser returns an internal representation of the table that can be easily
+used to analyze it or to munge &amp;amp; emit something else (by default Docutils can
+emit HTML tables from it).&lt;/p&gt;
+&lt;p&gt;One small caveat in this code to pay attention to: we need to represent the
+table as a list of lines (strings) and then wrap it in a
+&lt;tt class="docutils literal"&gt;docutils.statemachine.StringList&lt;/tt&gt; object, which is a Docutils helper that
+provides useful analysis methods on lists of strings.&lt;/p&gt;
+&lt;hr class="docutils" /&gt;
+&lt;table class="docutils footnote" frame="void" id="footnote-1" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#footnote-reference-1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;David Goodger points out that Docutils uses all-lowercase class names for
+types that coincide with element/tag names.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;/div&gt;
+</content><category term="misc"></category><category term="Python"></category><category term="Software &amp; Tools"></category></entry><entry><title>Persistent history in Bash - redux</title><link href="https://eli.thegreenplace.net/2016/persistent-history-in-bash-redux/" rel="alternate"></link><published>2016-01-26T05:07:00-08:00</published><updated>2024-05-04T19:46:23-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2016-01-26:/2016/persistent-history-in-bash-redux/</id><summary type="html">&lt;p&gt;A couple of years ago &lt;a class="reference external" href="https://eli.thegreenplace.net/2013/06/11/keeping-persistent-history-in-bash"&gt;I wrote about&lt;/a&gt;
+saving all the commands I ever ran in the terminal into a &amp;quot;persistent history&amp;quot;
+file, for later lookup. Since some people asked me whether this ended up being
+worthwhile, here's a short redux.&lt;/p&gt;
+&lt;p&gt;The TL;DR version is - keeping persistent history has …&lt;/p&gt;</summary><content type="html">&lt;p&gt;A couple of years ago &lt;a class="reference external" href="https://eli.thegreenplace.net/2013/06/11/keeping-persistent-history-in-bash"&gt;I wrote about&lt;/a&gt;
+saving all the commands I ever ran in the terminal into a &amp;quot;persistent history&amp;quot;
+file, for later lookup. Since some people asked me whether this ended up being
+worthwhile, here's a short redux.&lt;/p&gt;
+&lt;p&gt;The TL;DR version is - keeping persistent history has been one of the best
+productivity hacks I ever put to use; I rely on it daily, and would be much
+less productive without it.&lt;/p&gt;
+&lt;p&gt;Before doing this, the only way I had to remember which commands/flags are
+needed to run something was to write it down in all kinds of notes files,
+personal wikis and so on. It was cumbersome, unorganized and time-consuming to
+reuse. With the &lt;tt class="docutils literal"&gt;.persistent_history&lt;/tt&gt; file automatically populated by Bash
+from any terminal I'm typing into, and being kept in a Git repository for
+safekeeping, I have quick access to any command I ever ran. It's a life safer
+for someone who spends as much time in the terminal as me. I warmly recommend
+it, or some equivalent approach, to anyone who is using Linux daily.&lt;/p&gt;
+&lt;p&gt;Interestingly, at the time of the original post I was worried that with time
+this file will grow too long and will have to be trimmed. That turned out to be
+a completely needless worry. In over two years of using it at work, my
+&lt;tt class="docutils literal"&gt;.persistent_history&lt;/tt&gt; is somewhat over 6 MB long, with ~60000 lines &lt;a class="footnote-reference" href="#footnote-1" id="footnote-reference-1"&gt;[1]&lt;/a&gt;. It
+takes a negligible amount of time to append to it and to search within it (15
+milliseconds for a full search is the most I was able to measure). It doesn't
+even matter if you have a SSD or a hard drive as your main storage device; since
+the file is continously written to, it's almost certainly paged into memory most
+of the time anyway.&lt;/p&gt;
+&lt;p&gt;Also, I posted a histogram of the 10 most commonly used commands on my home
+machine for hobby hacking, so it's interesting to revisit that. Here's a
+histogram for the past year:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;git          : 1564
+ls           : 861
+gs           : 669
+cd           : 546
+vi           : 543
+make         : 538
+ll           : 388
+pssc         : 379
+PYTHONPATH=. : 337
+python       : 286
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;As the original post foresaw, the impending switch from Mercurial to Git for my
+personal projects, along with spending much less time on CPython core
+development have pushed &lt;tt class="docutils literal"&gt;hg&lt;/tt&gt; to the fringes, and Git is certainly the most
+used command now (&lt;tt class="docutils literal"&gt;gs&lt;/tt&gt; is my alias for &lt;tt class="docutils literal"&gt;git status&lt;/tt&gt;). Python should be
+higher than it appears because commands starting with &lt;tt class="docutils literal"&gt;PYTHONPATH=.&lt;/tt&gt; always
+precede &lt;tt class="docutils literal"&gt;python&lt;/tt&gt;. The rest is a fairly expected bunch from a terminal hermit.
+&lt;tt class="docutils literal"&gt;pssc&lt;/tt&gt; is one of the aliases I use for &lt;a class="reference external" href="https://github.com/eliben/pss"&gt;pss&lt;/a&gt;,
+which is why you don't see &lt;tt class="docutils literal"&gt;grep&lt;/tt&gt; or &lt;tt class="docutils literal"&gt;find&lt;/tt&gt; in the list.&lt;/p&gt;
+&lt;p&gt;I placed the Bash code enabling persistent history, along with the Python script
+I used to compute the command usage histogram shown above &lt;a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2016/persistent-history"&gt;on GitHub&lt;/a&gt;.&lt;/p&gt;
+&lt;hr class="docutils" /&gt;
+&lt;table class="docutils footnote" frame="void" id="footnote-1" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#footnote-reference-1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;In reality there were likely many more commands, but the script does some
+amount of de-duplication - it won't write down a command if it's exactly
+the same as the last one written. For example, if you spend the whole
+day hacking in an editor and rerunning &lt;tt class="docutils literal"&gt;python foo.py&lt;/tt&gt; every couple of
+minutes, the only commands that will be written in the history are
+opening the editor and then a single instance of &lt;tt class="docutils literal"&gt;python foo.py&lt;/tt&gt;.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+</content><category term="misc"></category><category term="Linux"></category><category term="Software &amp; Tools"></category></entry></feed>

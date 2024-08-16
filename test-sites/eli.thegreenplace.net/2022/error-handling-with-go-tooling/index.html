@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Error handling with Go tooling - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Error handling with Go tooling">
+                        Error handling with Go tooling
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> August 06, 2022 at 06:24</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/go-tooling.html">Go tooling</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>Most tutorials on Go tooling (and probably most other tooling) tend to focus
+on the <em>happy path</em> - the input code is perfectly valid and contains no errors.
+This is often a reasonable assumption, because we tend to run tools
+on existing code bases, and these are likely to compile correctly in their
+steady state. However, sometimes knowing how to handle errors is important, and
+good tooling infrastructure will enable that.</p>
+<p>In this quick post I'll discuss how Go tooling handles potentially erroneous
+code. The full code is <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2022/go-tool-errors">available on GitHub</a>.</p>
+<p>Our sample tool starts with the basic setup described in my <a class="reference external" href="../exploring-function-parameter-types-with-go-tooling/index.html">previous post</a>
+(Step 0), and for now just a bare-bones <tt class="docutils literal">processPackage</tt> that dumps the
+package's AST:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">processPackage</span><span class="p">(</span><span class="nx">pkg</span><span class="w"> </span><span class="o">*</span><span class="nx">packages</span><span class="p">.</span><span class="nx">Package</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">fileAst</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">pkg</span><span class="p">.</span><span class="nx">Syntax</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">ast</span><span class="p">.</span><span class="nx">Print</span><span class="p">(</span><span class="nx">fset</span><span class="p">,</span><span class="w"> </span><span class="nx">fileAst</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Let's look at an input file with some errors in it:</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span><span class="w"> </span><span class="nx">main</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">util</span><span class="p">(</span><span class="nx">x</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">util</span><span class="p">(</span><span class="mi">5</span><span class="w"> </span><span class="mi">6</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">s</span><span class="w"> </span><span class="kt">string</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mf">5.5</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Time for a brief self-evaluation :-) Most Go programmers will immediately
+identify two errors in this code; somewhat more experienced gophers will also
+find the third. Give yourself a few moments to play the compiler here - the
+answers are further down in the post.</p>
+<p>Despite this code having some errors, if we run our tool on it - it will happily
+dump an AST with no complaints! If you're new to Go tooling, this can be
+somewhat surprising; wouldn't you expect the tool to error out somehow?</p>
+<p>If you look closely at the dumped AST you'll notice that it's somewhat
+malformed, which is reasonable given the errors in the code. The call <tt class="docutils literal">util(5
+6)</tt> is syntactically incorrect - there's an extra parameter in a function call,
+without a separating comma. The AST dumped for this call is:</p>
+<div class="highlight"><pre><span></span>X: *ast.CallExpr {
+.  Fun: *ast.Ident {
+.  .  NamePos: sample-module/main.go:9:2
+.  .  Name: &quot;util&quot;
+.  .  Obj: *(obj @ 23)
+.  }
+.  Lparen: sample-module/main.go:9:6
+.  Args: []ast.Expr (len = 1) {
+.  .  0: *ast.BasicLit {
+.  .  .  ValuePos: sample-module/main.go:9:7
+.  .  .  Kind: INT
+.  .  .  Value: &quot;5&quot;
+.  .  }
+.  }
+</pre></div>
+<p>The parser chose to include the first parameter and ignore the second. Why does
+it bother to produce an AST at all here, even for code that doesn't parse
+correctly?</p>
+<p>The answer is that tooling is often used in things like IDEs. Imagine you have a
+long file open in an IDE and there's an error somewhere in the middle <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>; had
+the IDE stopped at the error, it would not syntax highlight the rest of the
+code, or offer any intellisense features for it like &quot;jump to definition&quot;.
+This would not be great for ergonomics. Therefore tools attempt to recover from
+compilation errors and continue churning through the code, to provide maximal
+utility.</p>
+<p>This isn't always possible and some syntax errors confuse the tool entirely;
+we're all familiar with what happens when we forget a closing <tt class="docutils literal">)</tt> or <tt class="docutils literal">}</tt>
+somewhere.</p>
+<div class="section" id="error-reports-from-go-tooling">
+<h2>Error reports from Go tooling</h2>
+<p>Back to the original goal of the post... given a tool we're writing, is there
+a way to know that there were errors in the code before we start analyzing the
+AST?</p>
+<p>Yes. The <tt class="docutils literal">packages.Package</tt> structure has a couple of fields set by <a class="reference external" href="https://pkg.go.dev/golang.org/x/tools/go/packages">XTGP</a> for this purpose. The
+most important one is <tt class="docutils literal">Errors</tt>. Let's add this code to our <tt class="docutils literal">processPackage</tt>
+function:</p>
+<div class="highlight"><pre><span></span><span class="k">if</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">pkg</span><span class="p">.</span><span class="nx">Errors</span><span class="p">)</span><span class="w"> </span><span class="p">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;package %v has %v errors\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">pkg</span><span class="p">.</span><span class="nx">PkgPath</span><span class="p">,</span><span class="w"> </span><span class="nb">len</span><span class="p">(</span><span class="nx">pkg</span><span class="p">.</span><span class="nx">Errors</span><span class="p">))</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">e</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">pkg</span><span class="p">.</span><span class="nx">Errors</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">errtype</span><span class="w"> </span><span class="kt">string</span><span class="w"></span>
+<span class="w">    </span><span class="k">switch</span><span class="w"> </span><span class="nx">e</span><span class="p">.</span><span class="nx">Kind</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="nx">packages</span><span class="p">.</span><span class="nx">ListError</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="nx">errtype</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s">&quot;listing/driver&quot;</span><span class="w"></span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="nx">packages</span><span class="p">.</span><span class="nx">ParseError</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="nx">errtype</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s">&quot;parser&quot;</span><span class="w"></span>
+<span class="w">    </span><span class="k">case</span><span class="w"> </span><span class="nx">packages</span><span class="p">.</span><span class="nx">TypeError</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="nx">errtype</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s">&quot;type checker&quot;</span><span class="w"></span>
+<span class="w">    </span><span class="k">default</span><span class="p">:</span><span class="w"></span>
+<span class="w">      </span><span class="nx">errtype</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s">&quot;unknown&quot;</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;Error [%v]: %s\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">errtype</span><span class="p">,</span><span class="w"> </span><span class="nx">e</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>When invoked on the erroneous module, we'll see:</p>
+<div class="highlight"><pre><span></span>package example.com has 3 errors
+Error [parser]: sample-module/main.go:9:9: missing &#39;,&#39; in argument list
+Error [type checker]: sample-module/main.go:11:17: cannot use 5.5 (untyped float constant) as string value in variable declaration
+Error [type checker]: sample-module/main.go:11:6: s declared but not used
+&lt;AST dump, if still enabled&gt;
+</pre></div>
+<p>Each error has the type <a class="reference external" href="https://pkg.go.dev/golang.org/x/tools/go/packages#Error">packages.Error</a>. An additional
+field that's set (but only if the <tt class="docutils literal">packages.NeedTypes</tt> flag is set while
+configuring the tool) is <tt class="docutils literal">IllTyped</tt>:</p>
+<div class="highlight"><pre><span></span><span class="c1">// IllTyped indicates whether the package or any dependency contains errors.</span><span class="w"></span>
+<span class="c1">// It is set only when Types is set.</span><span class="w"></span>
+<span class="nx">IllTyped</span><span class="w"> </span><span class="kt">bool</span><span class="w"></span>
+</pre></div>
+</div>
+<div class="section" id="how-should-this-be-used">
+<h2>How should this be used?</h2>
+<p>OK, so now we know how to see what errors were encountered when parsing the
+input module. What's next?</p>
+<p>What you do with this information is entirely dependent on the nature of your
+tool. As mentioned earlier, most tools assume that the code they're working on
+is already correct; in this case, erroring out if <tt class="docutils literal">len(pkg.Errors) &gt; 0</tt> may
+be a good idea since we don't want to produce phantom results from incorrect
+code. Other tools will specifically not care about errors and will try to
+churn through as much AST as possible, even for partially incorrect code. YMMV.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td><p class="first">Why would there be an error in the middle? Consider that IDEs often
+repeatedly parse the file, even <em>while we're typing</em>, to be able to
+provide intellisense features on the fly. While the code is being typed
+in, it's often un-parsable or has type errors (think of being in the
+middle of a parameter list fo a function call).</p>
+<p class="last">This also highlights an interesting topic in compiler frontends - error
+recovery. While classical compilers can be forgiven for printing out
+a few errors and bailing out, tools really do need to recover as quickly
+as possible to be able to process the rest of the code correctly, even
+if there's some issue in the middle.</p>
+</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

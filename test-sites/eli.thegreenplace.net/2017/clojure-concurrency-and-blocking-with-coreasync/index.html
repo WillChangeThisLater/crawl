@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Clojure concurrency and blocking with core.async - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Clojure concurrency and blocking with core.async">
+                        Clojure concurrency and blocking with core.async
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> June 23, 2017 at 06:01</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/clojure.html">Clojure</a>
+        ,
+    <a href="../../tag/lisp.html">Lisp</a>
+        ,
+    <a href="../../tag/programming.html">Programming</a>
+        ,
+    <a href="../../tag/concurrency.html">Concurrency</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This article is an attempt to dig into the performance problem of concurrent
+applications using <tt class="docutils literal">core.async</tt> in situations where blocking operations are
+involved. &quot;Blocking&quot; operations happen when the running program has to wait for
+something happening outside it; a canonical example is issuing an HTTP request
+and waiting for the remote server to respond. Such operations are also sometimes
+called &quot;synchronous&quot;.</p>
+<p>The <tt class="docutils literal">core.async</tt> library comes with many high-level features like transducers
+and pipelines; in this article I want to focus on the two fundamental mechanisms
+it provides for launching a new computation concurrently: threads and go-blocks.</p>
+<p>New threads can be created with <tt class="docutils literal">(thread <span class="pre">...)</span></tt>. This call runs the body in a
+new thread and (immediately) returns a channel to which the result of the body
+will be posted. Similarly, a go-block is created with <tt class="docutils literal">(go <span class="pre">...)</span></tt> - it also
+launches the computation concurrently, but instead of creating a new thread it
+posts the computation onto a <em>thread pool</em> of fixed size that the library
+maintains for all its go-blocks. Most of the article is focusing on exploring
+the differences between these two methods.</p>
+<div class="section" id="the-go-block-thread-pool">
+<h2>The go-block thread pool</h2>
+<p>In any given executing Clojure process, a single thread pool is dedicated to
+running all go-blocks. A quick glance at the Clojure source code shows that the
+size of this pool is 8, meaning that 8 physical threads are launched <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>. This
+number is hard-coded, though it can be modified by setting the
+<tt class="docutils literal"><span class="pre">clojure.core.async.pool-size</span></tt> property for the JVM running the program. So 8
+is the default number of threads <tt class="docutils literal">core.async</tt> has at its disposal to implement
+its ad-hoc cooperative multitasking.</p>
+<p>Let's start with a cute little experiment to determine the size of the thread
+pool empirically; this exercise will also shed some light on the effect of
+blocking calls inside go-blocks:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">launch-n-go-blocks</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">let </span><span class="p">[</span><span class="nv">c</span><span class="w"> </span><span class="p">(</span><span class="nf">async/chan</span><span class="p">)]</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nb">dotimes </span><span class="p">[</span><span class="nv">i</span><span class="w"> </span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="nf">async/go</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="nf">Thread/sleep</span><span class="w"> </span><span class="mi">10</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="nf">async/&gt;!</span><span class="w"> </span><span class="nv">c</span><span class="w"> </span><span class="nv">i</span><span class="p">)))</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">receive-n</span><span class="w"> </span><span class="nv">c</span><span class="w"> </span><span class="nv">n</span><span class="p">)))</span><span class="w"></span>
+</pre></div>
+<p>This function launches <tt class="docutils literal">n</tt> go-blocks, each sleeping for 10 milliseconds and
+then pushing a number into a shared channel. Then it waits to receive all
+numbers from the channel and returns; the effect is to block until all the
+go-blocks are done. <tt class="docutils literal"><span class="pre">receive-in</span></tt> is a simple function used throughout this
+article:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">receive-n</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;Receive n items from the given channel and return them as a vector.&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">c</span><span class="w"> </span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">loop </span><span class="p">[</span><span class="nv">i</span><span class="w"> </span><span class="mi">0</span><span class="w"></span>
+<span class="w">         </span><span class="nv">res</span><span class="w"> </span><span class="p">[]]</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="k">if </span><span class="p">(</span><span class="nb">= </span><span class="nv">i</span><span class="w"> </span><span class="nv">n</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="nv">res</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="nf">recur</span><span class="w"> </span><span class="p">(</span><span class="nb">inc </span><span class="nv">i</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nb">conj </span><span class="nv">res</span><span class="w"> </span><span class="p">(</span><span class="nf">async/&lt;!!</span><span class="w"> </span><span class="nv">c</span><span class="p">))))))</span><span class="w"></span>
+</pre></div>
+<p>Now let's call <tt class="docutils literal"><span class="pre">launch-n-go-blocks</span></tt> several times, with an increasing <tt class="docutils literal">n</tt>
+and observe what happens:</p>
+<div class="highlight"><pre><span></span>Launching  1 -&gt; &quot;Elapsed time: 11.403985 msecs&quot;
+Launching  2 -&gt; &quot;Elapsed time: 11.050685 msecs&quot;
+Launching  3 -&gt; &quot;Elapsed time: 10.37412 msecs&quot;
+Launching  4 -&gt; &quot;Elapsed time: 10.342037 msecs&quot;
+Launching  5 -&gt; &quot;Elapsed time: 10.359517 msecs&quot;
+Launching  6 -&gt; &quot;Elapsed time: 10.409539 msecs&quot;
+Launching  7 -&gt; &quot;Elapsed time: 10.543612 msecs&quot;
+Launching  8 -&gt; &quot;Elapsed time: 10.429726 msecs&quot;
+Launching  9 -&gt; &quot;Elapsed time: 20.480441 msecs&quot;
+Launching 10 -&gt; &quot;Elapsed time: 20.442724 msecs&quot;
+Launching 11 -&gt; &quot;Elapsed time: 21.115002 msecs&quot;
+Launching 12 -&gt; &quot;Elapsed time: 21.192993 msecs&quot;
+Launching 13 -&gt; &quot;Elapsed time: 21.113135 msecs&quot;
+Launching 14 -&gt; &quot;Elapsed time: 21.376159 msecs&quot;
+Launching 15 -&gt; &quot;Elapsed time: 20.754207 msecs&quot;
+Launching 16 -&gt; &quot;Elapsed time: 20.654873 msecs&quot;
+Launching 17 -&gt; &quot;Elapsed time: 31.084513 msecs&quot;
+Launching 18 -&gt; &quot;Elapsed time: 31.152651 msecs&quot;
+</pre></div>
+<p>Ignoring the minor fluctuations in measurements, there's a very clear pattern
+here; let's plot it:</p>
+<img alt="Runtime of launching go-blocks with sleeps" class="align-center" src="../../images/2017/go-block-sleep-runtime.png" />
+<p>The reason for this behavior is the blocking nature of <tt class="docutils literal">Thread/sleep</tt>. This
+function blocks the <em>current thread</em> for the specified duration (10 ms in our
+case); so the go-block executing it will block the thread it's currently running
+on. This thread is then effectively out of the pool until the sleep finishes.
+The plot immediately suggests the pool size is 8; as long as 8 or fewer
+go-blocks are launched, they all finish within ~10 ms because they all run
+concurrently. As soon as we go above 8, the runtime jumps to ~20 ms because one
+of the go-blocks will have to wait until there's a free thread in the pool.</p>
+<p>Let's try the same experiment using <tt class="docutils literal">thread</tt> instead of <tt class="docutils literal">go</tt>:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">launch-n-threads</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">let </span><span class="p">[</span><span class="nv">c</span><span class="w"> </span><span class="p">(</span><span class="nf">async/chan</span><span class="p">)]</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nb">dotimes </span><span class="p">[</span><span class="nv">i</span><span class="w"> </span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="nf">async/thread</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="nf">Thread/sleep</span><span class="w"> </span><span class="mi">10</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="nf">async/&gt;!!</span><span class="w"> </span><span class="nv">c</span><span class="w"> </span><span class="nv">i</span><span class="p">)))</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">receive-n</span><span class="w"> </span><span class="nv">c</span><span class="w"> </span><span class="nv">n</span><span class="p">)))</span><span class="w"></span>
+</pre></div>
+<p>Here, each time through the loop <em>a new thread</em> is launched, regardless of the
+number of threads already executing <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>. All these threads can run
+concurrently, so the runtime plot is:</p>
+<img alt="Runtime of launching threads with sleeps" class="align-center" src="../../images/2017/thread-sleep-runtime.png" />
+<p>The Clojure documentation and talks / presentations by developers are careful to
+warn against running blocking operations in go-blocks <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>; it's also not hard
+to understand why this is so by thinking a bit about the fixed thread-pool based
+implementation. That said, it's still useful to actually see this in action
+using an easy-to-understand experiment. In the next section we'll explore the
+real-life performance implications of blocking inside go-blocks.</p>
+</div>
+<div class="section" id="blocking-i-o">
+<h2>Blocking I/O</h2>
+<p>The sleeping example shown earlier is artificial, but the perils of blocking
+inside go-blocks are real. Blocking happens quite often in realistic programs,
+most often in the context of I/O. I/O devices tend to be significantly slower
+than the CPU executing our program, especially if by &quot;I/O device&quot; we mean a web
+server located half-way across the world to which we issue an HTTP request.</p>
+<p>So the next example is going to be a simple concurrent HTTP client; again, two
+versions are studied and compared - one with go-blocks, another with threads.
+For this sample, we'll be using the <a class="reference external" href="https://github.com/dakrone/clj-http">clj-http</a> library <a class="footnote-reference" href="index.html#footnote-4" id="footnote-reference-4">[4]</a>, which provides a simple
+API to issue blocking HTTP requests. The full code is <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/clojure-blocking-async/src/clojure_blocking_async/http_client.clj">available on GitHub</a>.</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="k">def </span><span class="nv">url-template</span><span class="w"> </span><span class="s">&quot;https://github.com/eliben/pycparser/pull/%d&quot;</span><span class="p">)</span><span class="w"></span>
+
+<span class="p">(</span><span class="kd">defn </span><span class="nv">blocking-get-page</span><span class="w"> </span><span class="p">[</span><span class="nv">i</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="nf">clj-http.client/get</span><span class="w"> </span><span class="p">(</span><span class="nf">format</span><span class="w"> </span><span class="nv">url-template</span><span class="w"> </span><span class="nv">i</span><span class="p">)))</span><span class="w"></span>
+
+<span class="p">(</span><span class="kd">defn </span><span class="nv">go-blocking-generator</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">c</span><span class="w"> </span><span class="nv">start</span><span class="w"> </span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="nb">doseq </span><span class="p">[</span><span class="nv">i</span><span class="w"> </span><span class="p">(</span><span class="nb">range </span><span class="nv">start</span><span class="w"> </span><span class="p">(</span><span class="nb">+ </span><span class="nv">start</span><span class="w"> </span><span class="nv">n</span><span class="p">))]</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">async/go</span><span class="w"> </span><span class="p">(</span><span class="nf">async/&gt;!</span><span class="w"> </span><span class="nv">c</span><span class="w"> </span><span class="p">(</span><span class="nf">blocking-get-page</span><span class="w"> </span><span class="nv">i</span><span class="p">)))))</span><span class="w"></span>
+</pre></div>
+<p>When <tt class="docutils literal"><span class="pre">go-blocking-generator</span></tt> is called, it launches <tt class="docutils literal">n</tt> go-blocks, each
+requesting a different page from <a class="reference external" href="https://github.com/eliben/pycparser">pycparser's</a> pull requests on GitHub. Fetching one
+page takes between 760 and 990 ms on my machine, depending on the exact page.
+When run with <tt class="docutils literal">n=20</tt>, this version takes about 2300 ms. Now let's do the same
+with threads:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">thread-blocking-generator</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">c</span><span class="w"> </span><span class="nv">start</span><span class="w"> </span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="nb">doseq </span><span class="p">[</span><span class="nv">i</span><span class="w"> </span><span class="p">(</span><span class="nb">range </span><span class="nv">start</span><span class="w"> </span><span class="p">(</span><span class="nb">+ </span><span class="nv">start</span><span class="w"> </span><span class="nv">n</span><span class="p">))]</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">async/thread</span><span class="w"> </span><span class="p">(</span><span class="nf">async/&gt;!!</span><span class="w"> </span><span class="nv">c</span><span class="w"> </span><span class="p">(</span><span class="nf">blocking-get-page</span><span class="w"> </span><span class="nv">i</span><span class="p">)))))</span><span class="w"></span>
+</pre></div>
+<p>With <tt class="docutils literal">n=20</tt>, this version takes only 1000 ms. As expected, all threads
+manage to run at the same time, which is mostly spent waiting on the remote
+server. In the go-blocks version, only 8 blocks run concurrently because of the
+thread pool size; this example should really drive home the notion of just how
+bad blocking I/O in go-blocks is. Most of the blocks sit there waiting for the
+thread pool to have a vacant spot, when all they have to do is just issue a HTTP
+request and wait anyway.</p>
+</div>
+<div class="section" id="parallelizing-cpu-bound-tasks">
+<h2>Parallelizing CPU-bound tasks</h2>
+<p>We've seen how go-blocks interact with blocking operations; now let's examine
+CPU-bound tasks, which spend their time doing actual computations on the CPU
+rather than waiting for I/O. In an older post, I explored the effects of using
+threads and processes <a class="reference external" href="../../2012/01/16/python-parallelizing-cpu-bound-tasks-with-multiprocessing.html">in Python to parallelize a simple numeric problem</a>.
+Here I'll be using a similar example: naïvely factorizing a large integer.</p>
+<p>Here's the function that factorizes a number into a vector of factors:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">factorize</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;Naive factorization function; takes an integer n and returns a vector of</span>
+<span class="s">  factors.&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">if </span><span class="p">(</span><span class="nb">&lt; </span><span class="nv">n</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">[]</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="k">loop </span><span class="p">[</span><span class="nv">factors</span><span class="w"> </span><span class="p">[]</span><span class="w"></span>
+<span class="w">           </span><span class="nv">n</span><span class="w"> </span><span class="nv">n</span><span class="w"></span>
+<span class="w">           </span><span class="nv">p</span><span class="w"> </span><span class="mi">2</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="nb">cond </span><span class="p">(</span><span class="nb">= </span><span class="nv">n</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="nv">factors</span><span class="w"></span>
+<span class="w">            </span><span class="p">(</span><span class="nb">= </span><span class="mi">0</span><span class="w"> </span><span class="p">(</span><span class="nf">mod</span><span class="w"> </span><span class="nv">n</span><span class="w"> </span><span class="nv">p</span><span class="p">))</span><span class="w"> </span><span class="p">(</span><span class="nf">recur</span><span class="w"> </span><span class="p">(</span><span class="nb">conj </span><span class="nv">factors</span><span class="w"> </span><span class="nv">p</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nb">quot </span><span class="nv">n</span><span class="w"> </span><span class="nv">p</span><span class="p">)</span><span class="w"> </span><span class="nv">p</span><span class="p">)</span><span class="w"></span>
+<span class="w">            </span><span class="p">(</span><span class="nb">&gt;= </span><span class="p">(</span><span class="nb">* </span><span class="nv">p</span><span class="w"> </span><span class="nv">p</span><span class="p">)</span><span class="w"> </span><span class="nv">n</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nb">conj </span><span class="nv">factors</span><span class="w"> </span><span class="nv">n</span><span class="p">)</span><span class="w"></span>
+<span class="w">            </span><span class="p">(</span><span class="nb">&gt; </span><span class="nv">p</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nf">recur</span><span class="w"> </span><span class="nv">factors</span><span class="w"> </span><span class="nv">n</span><span class="w"> </span><span class="p">(</span><span class="nb">+ </span><span class="nv">p</span><span class="w"> </span><span class="mi">2</span><span class="p">))</span><span class="w"></span>
+<span class="w">            </span><span class="ss">:else</span><span class="w"> </span><span class="p">(</span><span class="nf">recur</span><span class="w"> </span><span class="nv">factors</span><span class="w"> </span><span class="nv">n</span><span class="w"> </span><span class="p">(</span><span class="nb">+ </span><span class="nv">p</span><span class="w"> </span><span class="mi">1</span><span class="p">))))))</span><span class="w"></span>
+</pre></div>
+<p>It takes around 2.3 ms to factorize the number 29 * 982451653; I'll refer to it
+as <tt class="docutils literal">mynum</tt> from now on <a class="footnote-reference" href="index.html#footnote-5" id="footnote-reference-5">[5]</a>. Let's examine a few strategies of factorizing a
+large set of numbers in parallel. We'll start with a simple &quot;serial&quot; factorizer,
+which should also introduce the API:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">serial-factorizer</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;Simple serial factorizer.&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">nums</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="nb">zipmap </span><span class="nv">nums</span><span class="w"> </span><span class="p">(</span><span class="nb">map </span><span class="nv">factorize</span><span class="w"> </span><span class="nv">nums</span><span class="p">)))</span><span class="w"></span>
+</pre></div>
+<p>Each factorizer function in this sample takes a sequence of numbers and returns
+a new map, which maps a number to its vector of factors. If we run
+<tt class="docutils literal"><span class="pre">serial-factorizer</span></tt> on a sequence of 1000 <tt class="docutils literal">mynum</tt>s, it takes ~2.3 seconds;
+no surprises here!</p>
+<p>Now, a parallel factorizer using go-blocks:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">async-go-factorizer</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;Parallel factorizer for nums, launching n go blocks.&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">nums</span><span class="w"> </span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="c1">;;; Push nums into an input channel; spin up n go-blocks to read from this</span><span class="w"></span>
+<span class="w">  </span><span class="c1">;;; channel and add numbers to an output channel.</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">let </span><span class="p">[</span><span class="nv">in-c</span><span class="w"> </span><span class="p">(</span><span class="nf">async/chan</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="nv">out-c</span><span class="w"> </span><span class="p">(</span><span class="nf">async/chan</span><span class="p">)]</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">async/onto-chan</span><span class="w"> </span><span class="nv">in-c</span><span class="w"> </span><span class="nv">nums</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nb">dotimes </span><span class="p">[</span><span class="nv">i</span><span class="w"> </span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="nf">async/go-loop</span><span class="w"> </span><span class="p">[]</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="nb">when-let </span><span class="p">[</span><span class="nv">nextnum</span><span class="w"> </span><span class="p">(</span><span class="nf">async/&lt;!</span><span class="w"> </span><span class="nv">in-c</span><span class="p">)]</span><span class="w"></span>
+<span class="w">          </span><span class="p">(</span><span class="nf">async/&gt;!</span><span class="w"> </span><span class="nv">out-c</span><span class="w"> </span><span class="p">{</span><span class="nv">nextnum</span><span class="w"> </span><span class="p">(</span><span class="nf">factorize</span><span class="w"> </span><span class="nv">nextnum</span><span class="p">)})</span><span class="w"></span>
+<span class="w">          </span><span class="p">(</span><span class="nf">recur</span><span class="p">))))</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">receive-n-maps</span><span class="w"> </span><span class="nv">out-c</span><span class="w"> </span><span class="p">(</span><span class="nb">count </span><span class="nv">nums</span><span class="p">))))</span><span class="w"></span>
+</pre></div>
+<p>In a pattern that should be familiar by now, this function creates a couple of
+local channels and spins up a number of go-blocks to read and write from these
+channels; the code should be self-explanatory. <tt class="docutils literal"><span class="pre">receive-n-maps</span></tt> is similar to
+the <tt class="docutils literal"><span class="pre">receive-n</span></tt> function we've seen earlier in the article, just with maps
+instead of vectors.</p>
+<p>Knowing that my machine has 8 CPU threads (4 cores, hyper-threaded), I
+benchmarked <tt class="docutils literal"><span class="pre">async-go-factorizer</span></tt> with <tt class="docutils literal">n=8</tt>, and it took around 680 ms, a
+3.4x speedup over the serial version <a class="footnote-reference" href="index.html#footnote-6" id="footnote-reference-6">[6]</a>.</p>
+<p>Let's try the same with threads instead of go-blocks:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">async-thread-factorizer</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;Same as async-go-factorizer, but with thread instead of go.&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">nums</span><span class="w"> </span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">let </span><span class="p">[</span><span class="nv">in-c</span><span class="w"> </span><span class="p">(</span><span class="nf">async/chan</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="nv">out-c</span><span class="w"> </span><span class="p">(</span><span class="nf">async/chan</span><span class="p">)]</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">async/onto-chan</span><span class="w"> </span><span class="nv">in-c</span><span class="w"> </span><span class="nv">nums</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nb">dotimes </span><span class="p">[</span><span class="nv">i</span><span class="w"> </span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="nf">async/thread</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="k">loop </span><span class="p">[]</span><span class="w"></span>
+<span class="w">          </span><span class="p">(</span><span class="nb">when-let </span><span class="p">[</span><span class="nv">nextnum</span><span class="w"> </span><span class="p">(</span><span class="nf">async/&lt;!!</span><span class="w"> </span><span class="nv">in-c</span><span class="p">)]</span><span class="w"></span>
+<span class="w">            </span><span class="p">(</span><span class="nf">async/&gt;!!</span><span class="w"> </span><span class="nv">out-c</span><span class="w"> </span><span class="p">{</span><span class="nv">nextnum</span><span class="w"> </span><span class="p">(</span><span class="nf">factorize</span><span class="w"> </span><span class="nv">nextnum</span><span class="p">)})</span><span class="w"></span>
+<span class="w">            </span><span class="p">(</span><span class="nf">recur</span><span class="p">)))))</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">receive-n-maps</span><span class="w"> </span><span class="nv">out-c</span><span class="w"> </span><span class="p">(</span><span class="nb">count </span><span class="nv">nums</span><span class="p">))))</span><span class="w"></span>
+</pre></div>
+<p>The performance is pretty much the same - 680 ms for 1000 numbers with
+parallelism of <tt class="docutils literal">n=8</tt>.</p>
+<p>This is an important point! On purely CPU-bound workloads, go-blocks are no
+worse than threads because all the physical cores are kept busy doing useful
+work at all time. There's no waiting involved, so there's no opportunity to
+steal an idle core for a different thread. One minor gotcha is to be wary of
+the go-block thread pool size; if you run your program on a dual socket machine
+with dozens of cores, you may want to bump that number up and use a wider
+parallelism setting.</p>
+<p>For completeness (and fun!) let's try a couple more methods of parallelizing
+this computation. The pattern in these parallel factorizers is so common that
+<tt class="docutils literal">core.async</tt> has a function for it - <tt class="docutils literal">pipeline</tt>; here's how we use it:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">async-with-pipeline</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;Parallel factorizer using async/pipeline.&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">nums</span><span class="w"> </span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">let </span><span class="p">[</span><span class="nv">in-c</span><span class="w"> </span><span class="p">(</span><span class="nf">async/chan</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="nv">out-c</span><span class="w"> </span><span class="p">(</span><span class="nf">async/chan</span><span class="p">)]</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">async/onto-chan</span><span class="w"> </span><span class="nv">in-c</span><span class="w"> </span><span class="nv">nums</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">async/pipeline</span><span class="w"> </span><span class="nv">n</span><span class="w"> </span><span class="nv">out-c</span><span class="w"> </span><span class="p">(</span><span class="nb">map </span><span class="o">#</span><span class="p">(</span><span class="nb">hash-map </span><span class="nv">%</span><span class="w"> </span><span class="p">(</span><span class="nf">factorize</span><span class="w"> </span><span class="nv">%</span><span class="p">)))</span><span class="w"> </span><span class="nv">in-c</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">receive-n-maps</span><span class="w"> </span><span class="nv">out-c</span><span class="w"> </span><span class="p">(</span><span class="nb">count </span><span class="nv">nums</span><span class="p">))))</span><span class="w"></span>
+</pre></div>
+<p><tt class="docutils literal">async/pipeline</tt> takes an input channel, output channel and a transducer, as
+well as the parallelism. It takes care of spinning go-blocks and connecting all
+the channels properly <a class="footnote-reference" href="index.html#footnote-7" id="footnote-reference-7">[7]</a>. This takes about the same amount of time as the
+other versions shown earlier, which isn't surprising.</p>
+<p>Finally, let's try something slightly different and use Clojure's parallel
+<tt class="docutils literal">fold</tt> from the <tt class="docutils literal">clojure.core.reducers</tt> library (both <tt class="docutils literal">fold</tt> and
+transducers are described in <a class="reference external" href="../reducers-transducers-and-coreasync-in-clojure/index.html">my earlier article</a>
+- check it out!)</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">conjmap</span><span class="w"></span>
+<span class="w">  </span><span class="p">([</span><span class="nv">xs</span><span class="w"> </span><span class="nv">x</span><span class="p">]</span><span class="w"> </span><span class="p">(</span><span class="nb">conj </span><span class="nv">xs</span><span class="w"> </span><span class="nv">x</span><span class="p">))</span><span class="w"></span>
+<span class="w">  </span><span class="p">([]</span><span class="w"> </span><span class="p">{}))</span><span class="w"></span>
+
+<span class="p">(</span><span class="kd">defn </span><span class="nv">rfold</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;Parallel factorizer using r/fold.&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">nums</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="nf">r/fold</span><span class="w"> </span><span class="nv">conjmap</span><span class="w"> </span><span class="p">(</span><span class="nf">r/map</span><span class="w"> </span><span class="o">#</span><span class="p">(</span><span class="nb">hash-map </span><span class="nv">%</span><span class="w"> </span><span class="p">(</span><span class="nf">factorize</span><span class="w"> </span><span class="nv">%</span><span class="p">))</span><span class="w"> </span><span class="nv">nums</span><span class="p">)))</span><span class="w"></span>
+</pre></div>
+<p>Here we don't have to set the parallelism; <tt class="docutils literal">r/fold</tt> determines it on its own.
+This approach takes 1.15 seconds on 1000 numbers, quite a bit slower than the
+earlier attempts. It's entirely possible that the fork-join approach used by
+<tt class="docutils literal">r/fold</tt> is less efficient than the manual chunking to different threads done
+by the other versions.</p>
+<p>The conclusion from this section, however, should be that for purely CPU-bound
+tasks it doesn't matter much whether go-blocks or explicit threads are used -
+the performance should be more-or-less the same. That said, realistic programs
+don't often spend time purely in CPU-bound tasks; the reality is usually
+somewhere in between - some tasks do computations, other tasks wait on things.
+Let's see a benchmark that combines the two.</p>
+</div>
+<div class="section" id="combining-blocking-and-cpu-bound-tasks">
+<h2>Combining blocking and CPU-bound tasks</h2>
+<p>This section shows an artificial benchmark that explores how a combination of
+blocking and CPU-bound tasks behaves when launched on go-blocs vs. threads. The
+CPU bound task will be the same factorization but this time with a larger number
+that was carefully tuned to take about 230 ms to factorize on my machine. The
+blocking &quot;task&quot; will be <tt class="docutils literal">(Thread/sleep 250)</tt>. I deliberately choose the same
+duration for the two kinds of tasks here to make comparisons easier, but the
+principle applies more generally.</p>
+<p>Here is the go-block version of the benchmark:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">launch-go-blocking-and-compute</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">nblock</span><span class="w"> </span><span class="nv">ncompute</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">let </span><span class="p">[</span><span class="nv">c</span><span class="w"> </span><span class="p">(</span><span class="nf">async/chan</span><span class="p">)]</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nb">dotimes </span><span class="p">[</span><span class="nv">i</span><span class="w"> </span><span class="nv">nblock</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="nf">async/go</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="nf">Thread/sleep</span><span class="w"> </span><span class="mi">250</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="nf">async/&gt;!</span><span class="w"> </span><span class="nv">c</span><span class="w"> </span><span class="nv">i</span><span class="p">)))</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nb">dotimes </span><span class="p">[</span><span class="nv">i</span><span class="w"> </span><span class="nv">ncompute</span><span class="p">]</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="nf">async/go</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="nf">async/&gt;!</span><span class="w"> </span><span class="nv">c</span><span class="w"> </span><span class="p">(</span><span class="nf">factorize</span><span class="w"> </span><span class="nv">mynum</span><span class="p">))))</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">receive-n</span><span class="w"> </span><span class="nv">c</span><span class="w"> </span><span class="p">(</span><span class="nb">+ </span><span class="nv">nblock</span><span class="w"> </span><span class="nv">ncompute</span><span class="p">))))</span><span class="w"></span>
+</pre></div>
+<p><tt class="docutils literal">nblock</tt> is the number of blocking tasks to launch; <tt class="docutils literal">ncompute</tt> is the number
+of CPU-bound tasks to launch. The rest of the code is straightforward. You can
+guess what the threading version looks like by now - check out the <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/clojure-blocking-async/src/clojure_blocking_async/combine_cpubound_blocking.clj">full code
+sample</a>
+if not.</p>
+<p>The parameter space here is pretty large; let's try 32 blocking and 16 compute
+tasks in parallel:</p>
+<div class="highlight"><pre><span></span>nblock=32, ncompute=16
+
+launch-go-blocking-and-compute: 1521 ms
+launch-thread-blocking-and-compute: 530 ms
+</pre></div>
+<p>The larger we set <tt class="docutils literal">nblock</tt>, the worse the situation becomes for the go-block
+version:</p>
+<div class="highlight"><pre><span></span>nblock=64, ncompute=16
+
+launch-go-blocking-and-compute: 3200 ms
+launch-thread-blocking-and-compute: 530 ms
+</pre></div>
+<p>Up to some limit, the threading version is only limited by <tt class="docutils literal">ncompute</tt>, since
+these actually occupy the CPU cores; all the blocking tasks are run in the
+background and can complete at the same time (after the initial 250 ms).</p>
+<p>The go-block version fares much worse, because the blocking tasks can occupy
+threads while the compute tasks just wait in a queue. Depending on the exact
+mixture of blocking and compute-bound tasks, this can range from more-or-less
+the same to <em>exteremely</em> bad for the go-blocks version. YMMV!</p>
+</div>
+<div class="section" id="managing-callback-hell-with-go-blocks">
+<h2>Managing callback-hell with go-blocks</h2>
+<p>We've seen the issues that come up when mixing blocking I/o with go-blocks. The
+reason for this is the cooperative concurrency approach implemented by go-blocks
+on top of a fixed thread pool. For cooperative concurrency to work well with
+I/O, the language should either make the scheduler aware of the I/O calls (to be
+able to switch to another context while blocking) or the I/O should be
+non-blocking. The former requires runtime support in the language, like Go; the
+latter is what programming environments like Python (with <tt class="docutils literal">asyncio</tt>) and
+Node.js (with its fully non-blocking standard library) do. The same applies to
+Clojure, where <tt class="docutils literal">core.async</tt> is just a library without actual runtime support.</p>
+<p>The good news is that non-blocking I/O libraries are very popular these days,
+and Clojure has a good number of them for all the common tasks you can think of.
+Another good news is that <tt class="docutils literal">core.async</tt>'s channels make it very easy to deal
+with non-blocking I/O without sliding into <a class="reference external" href="http://callbackhell.com/">callback hell</a>.</p>
+<p>Here's a code sample that uses the asynchronous mode of <tt class="docutils literal"><span class="pre">clj-http</span></tt> to repeat
+the concurrent HTTP request benchmark:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">go-async-generator</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">c</span><span class="w"> </span><span class="nv">start</span><span class="w"> </span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="nb">doseq </span><span class="p">[</span><span class="nv">i</span><span class="w"> </span><span class="p">(</span><span class="nb">range </span><span class="nv">start</span><span class="w"> </span><span class="p">(</span><span class="nb">+ </span><span class="nv">start</span><span class="w"> </span><span class="nv">n</span><span class="p">))]</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">clj-http.client/get</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="nf">format</span><span class="w"> </span><span class="nv">url-template</span><span class="w"> </span><span class="nv">i</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="p">{</span><span class="ss">:async?</span><span class="w"> </span><span class="nv">true</span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="k">fn </span><span class="p">[</span><span class="nv">response</span><span class="p">]</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="nf">async/go</span><span class="w"> </span><span class="p">(</span><span class="nf">async/&gt;!</span><span class="w"> </span><span class="nv">c</span><span class="w"> </span><span class="nv">response</span><span class="p">)))</span><span class="w"></span>
+<span class="w">      </span><span class="c1">;; Exception callback.</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="k">fn </span><span class="p">[</span><span class="nv">exc</span><span class="p">]</span><span class="w"></span>
+<span class="w">        </span><span class="p">(</span><span class="nf">throw</span><span class="w"> </span><span class="nv">exc</span><span class="p">)))))</span><span class="w"></span>
+</pre></div>
+<p>When passed the <tt class="docutils literal">{:async? true}</tt> option, <tt class="docutils literal"><span class="pre">clj-http.client/get</span></tt> does a
+non-blocking request with a callback for the response (and another callback for
+an error). Our &quot;response callback&quot; simply spins a go-block that places the
+response into a channel. Now another go-block (or thread) can wait on the
+channel to perform the next step; compare that to cascading callbacks!</p>
+<p>The performance is good too - when run with multiple requests in parallel, this
+version runs as fast as the thread-launching example from earlier in the article
+(the full code <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/clojure-blocking-async/src/clojure_blocking_async/http_client_async.clj">is here</a>).
+All the <tt class="docutils literal">get</tt> requests are launched one after another, with no blocking. When
+the results arrive, go-blocks patiently &quot;park&quot; while sending them into a
+channel, but this is an explicit context-switch operation, so all of them
+peacefully run concurrently on the underlying thread pool.</p>
+</div>
+<div class="section" id="conclusion">
+<h2>Conclusion</h2>
+<p>Would launching a thread inside the callback work as well in the last example?
+Yes, I think it would. So why use go-blocks?</p>
+<p>The reason is scalability. Launching threads is fine as long as you don't have
+too many, and as long as the latency of the launch is not too important. Threads
+are OS constructs and have fairly heavy resource requirements - in terms of
+memory consumption and context-switching time. go-blocks are extremely
+lightweight in comparison.</p>
+<p>Therefore, if you want to serve 1000s of connections concurrently from a single
+machine - go-blocks are the way to go, combined with non-blocking APIs. Note
+that go-blocks use a thread pool that can use multipe cores, so this isn't just
+a single-core concurrent multitasking solution (such as you may encounter in
+Node.js or Python's <tt class="docutils literal">asyncio</tt>).</p>
+<p>If the number of concurrent tasks is not too large or blocking I/O is involved,
+I'd recommend using <tt class="docutils literal">async/thread</tt>. It avoids the pitfalls of blocking I/O,
+and in other cases performance is the same. <tt class="docutils literal">core.async</tt>'s wonderful tools
+like channels and <tt class="docutils literal">alts!!</tt> are still available, making concurrent programming
+much more pleasant.</p>
+<p>However, note that Clojure is a multi-environment language, and in some
+environments (most notably ClojureScript), threads are simply unavailable. In
+these cases using go-blocks is your only chance at any kind of reasonable
+concurrency (the alternative being callbacks).</p>
+<p>Another use case for go-blocks is to implement coroutines which can be useful in
+some cases - such as agents in games, as a <a class="reference external" href="../../2009/08/29/co-routines-as-an-alternative-to-state-machines.html">replacement for complex state
+machines</a>,
+etc. But here again, beware of the actual scale. If it's possible to use
+threads, just use threads. go-blocks are trickier to use correctly and one has
+to be always aware of what may block, lest performance is dramatically degraded.</p>
+<p>If there's something I'm missing, please let me know!</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>This is for the standard JVM implementation of Clojure; in ClojureScript
+there would just be a single thread, since JS doesn't support in-browser
+threads (yet).</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>The JVM also has some limit on the number of threads it runs at the same
+time, but it's fairly high so we'll ignore it here.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td><p class="first">W.r.t. transgressions committed in the code sample show here,
+<tt class="docutils literal">Thread/sleep</tt> is a big no-no inside go-blocks. By now I hope that it's
+obvious why. <tt class="docutils literal">timeout</tt> is the right function for &quot;waiting&quot; inside
+go-blocks, since it &quot;parks&quot; the go-block rather than blocking it. Parking
+is go-block friendly since it actually frees up the thread the go-block
+is running on. Similarly, <tt class="docutils literal">&gt;!</tt> is the right channel sending function to
+use inside go-blocks; <tt class="docutils literal">&gt;!!</tt> blocks the whole thread.</p>
+<p class="last">This is also a good place to mention that similar thread pool size
+&quot;artifacts&quot; <a class="reference external" href="https://www.future-processing.pl/blog/on-problems-with-threads-in-node-js/">can be found in Node.js</a>,
+which uses <tt class="docutils literal">libuv</tt> to handle events. <tt class="docutils literal">libuv</tt> uses its own thread pool
+to execute blocking calls, thus giving the calling application a sense of
+concurrency (up to some thread pool size).</p>
+</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-4">[4]</a></td><td>This sample is inspired by <a class="reference external" href="http://martintrojer.github.io/clojure/2013/07/07/coreasync-and-blocking-io">Martin Trojer's blog post</a>,
+which is the best introduction to the issues with blocking I/O in
+go-blocks I found before starting this article.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-5">[5]</a></td><td>Why this particular number? The second factor is a large-ish prime, so it
+will make the factorizer sweat a bit (by iterating over all the odd numbers
+up to its square root); the multiplication by another (prime) factor
+ensures more of the paths in the <tt class="docutils literal">factorize</tt> function are exercised.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-6" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-6">[6]</a></td><td>Benchmarking multi-core CPU performance with modern CPUs is notoriously
+tricky; CPUs regulate their frequency based on load, so it's entirely
+possible that a single core runs faster than each one core in a group of
+4; also, hyper-threading reuses some CPU resources within each core so
+its speedup is rarely linear.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-7" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-7">[7]</a></td><td>Note that <tt class="docutils literal">pipeline</tt> spins up go-blocks by default, so the cautions
+explored in this article apply. There's also <tt class="docutils literal"><span class="pre">pipeline-blocking</span></tt> if you
+need blocking operations. Looking at the <a class="reference external" href="https://github.com/clojure/core.async/blob/2afc2dc5102f60713135ffca6fab993fb35809f0/src/main/clojure/clojure/core/async.clj#L475">implementation if pipeline</a>
+is actually pretty illuminating, and should be easy to understand given
+what we discuss here.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

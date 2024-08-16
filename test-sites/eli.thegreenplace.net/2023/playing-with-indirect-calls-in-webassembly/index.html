@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Playing with indirect calls in WebAssembly - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Playing with indirect calls in WebAssembly">
+                        Playing with indirect calls in WebAssembly
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> February 16, 2023 at 05:54</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/webassembly.html">WebAssembly</a>
+        ,
+    <a href="../../tag/javascript.html">Javascript</a>
+        ,
+    <a href="../../tag/go.html">Go</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>I've recently started exploring WebAssembly, focusing on the language itself, by
+writing and testing small snippets of handwritten WASM text (WAT). This post
+describes what I've learned about using indirect calls via function tables.</p>
+<p>It shows how to invoke WASM-defined and imported functions via indirect calls,
+and discusses some related nuances of the WASM value stack.</p>
+<p>The full code sample is <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2023/wasm-call-indirect">on GitHub</a>,
+but it's also short enough for me to reproduce here. This is the entire WAT file
+for this post:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="k">module</span>
+    <span class="c1">;; The common type we use throughout the sample.</span>
+    <span class="p">(</span><span class="k">type</span> <span class="nv">$int2int</span> <span class="p">(</span><span class="k">func</span> <span class="p">(</span><span class="k">param</span> <span class="kt">i32</span><span class="p">)</span> <span class="p">(</span><span class="k">result</span> <span class="kt">i32</span><span class="p">)))</span>
+
+    <span class="c1">;; Import a function named jstimes3 from the environment and call it</span>
+    <span class="c1">;; $jstimes3 here.</span>
+    <span class="p">(</span><span class="k">import</span> <span class="s2">&quot;env&quot;</span> <span class="s2">&quot;jstimes3&quot;</span> <span class="p">(</span><span class="k">func</span> <span class="nv">$jstimes3</span> <span class="p">(</span><span class="k">type</span> <span class="nv">$int2int</span><span class="p">)))</span>
+
+    <span class="c1">;; Simple function that adds its parameter to itself and returns the sum.</span>
+    <span class="p">(</span><span class="k">func</span> <span class="nv">$wasmtimes2</span> <span class="p">(</span><span class="k">type</span> <span class="nv">$int2int</span><span class="p">)</span>
+        <span class="p">(</span><span class="nb">i32.add</span> <span class="p">(</span><span class="nb">local.get</span> <span class="mi">0</span><span class="p">)</span> <span class="p">(</span><span class="nb">local.get</span> <span class="mi">0</span><span class="p">))</span>
+    <span class="p">)</span>
+
+    <span class="c1">;; Declare the dispatch function table to have 32 slots, and populate slots</span>
+    <span class="c1">;; 16 and 17 with functions.</span>
+    <span class="c1">;; This uses the WASMv1 default table 0.</span>
+    <span class="p">(</span><span class="k">table</span> <span class="mi">32</span> <span class="k">funcref</span><span class="p">)</span>
+    <span class="p">(</span><span class="k">elem</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">16</span><span class="p">)</span> <span class="nv">$wasmtimes2</span> <span class="nv">$jstimes3</span><span class="p">)</span>
+
+    <span class="c1">;; The following two functions are exported to JS; when JS calls them, they</span>
+    <span class="c1">;; invoke functions from the table.</span>
+
+    <span class="p">(</span><span class="k">func</span> <span class="p">(</span><span class="k">export</span> <span class="s2">&quot;times2&quot;</span><span class="p">)</span> <span class="p">(</span><span class="k">type</span> <span class="nv">$int2int</span><span class="p">)</span>
+        <span class="c1">;; Place the value of the first parameter on the stack for the function</span>
+        <span class="c1">;; call_indirect will invoke.</span>
+        <span class="nb">local.get</span> <span class="mi">0</span>
+
+        <span class="c1">;; This call_indirect invokes a function of the given type from table at</span>
+        <span class="c1">;; offset 16. The parameters to this function are expected to be on</span>
+        <span class="c1">;; the stack.</span>
+        <span class="p">(</span><span class="nb">call_indirect</span> <span class="p">(</span><span class="k">type</span> <span class="nv">$int2int</span><span class="p">)</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">16</span><span class="p">))</span>
+    <span class="p">)</span>
+
+    <span class="p">(</span><span class="k">func</span> <span class="p">(</span><span class="k">export</span> <span class="s2">&quot;times3&quot;</span><span class="p">)</span> <span class="p">(</span><span class="k">type</span> <span class="nv">$int2int</span><span class="p">)</span>
+        <span class="c1">;; This is the same as times2, except it takes the function to call from</span>
+        <span class="c1">;; offset 17 in the table.</span>
+        <span class="nb">local.get</span> <span class="mi">0</span>
+        <span class="p">(</span><span class="nb">call_indirect</span> <span class="p">(</span><span class="k">type</span> <span class="nv">$int2int</span><span class="p">)</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">17</span><span class="p">))</span>
+    <span class="p">)</span>
+<span class="p">)</span>
+</pre></div>
+<p>It starts by declaring a type that all functions in this sample use: a function
+with a single <tt class="docutils literal">i32</tt> parameter and an <tt class="docutils literal">i32</tt> return type.</p>
+<p>Then, it defines two functions: one (<tt class="docutils literal">$jstimes3</tt>) is imported from the
+environment; we'll see the actual function shortly. The other is a simple WASM
+function that adds its parameter to itself and returns the result.</p>
+<p>Next, it adds these functions to a <em>table</em>, which in WASM parlance is a dispatch
+table for functions. This is what WASM uses to perform <em>indirect</em> function
+calls; when you think about function pointers, or references to functions, or
+more generally first-class functions - this is how they work in WASM.</p>
+<p>In <a class="reference external" href="https://www.w3.org/TR/wasm-core-1/">WASM v1</a>, there's only a single table
+in a module, at implicit index 0. With v2 there can be multiple tables and the
+index has to be specified explicitly, but we'll focus on v1 here. The following
+code:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="k">table</span> <span class="mi">32</span> <span class="k">funcref</span><span class="p">)</span>
+<span class="p">(</span><span class="k">elem</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">16</span><span class="p">)</span> <span class="nv">$wasmtimes2</span> <span class="nv">$jstimes3</span><span class="p">)</span>
+</pre></div>
+<p>First declares the table to have 32 slots of function references <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>. Then,
+it populates the table (starting at offset 16) with the two functions previously
+defined in the module. I'm using these indices (and not just 0 and 1) to help
+weed out potential value confusion errors; you can replace them by any offset
+you wish, as long as it's consistent across the code.</p>
+<p>Next, we export two functions to the embedding environment. These perform the
+actual dynamic call through the table. We'll get back to these functions later;
+first let's see how to run the example.</p>
+<div class="section" id="compiling-and-running-the-wat-sample">
+<h2>Compiling and running the WAT sample</h2>
+<p>This WAT file is saved in <tt class="docutils literal">table.wat</tt> in my sample. To compile it to the
+binary WASM format (which can be directly loaded by browsers and other embedding
+environments), we'll run the <tt class="docutils literal">wat2wasm</tt> tool from the
+<a class="reference external" href="https://github.com/WebAssembly/wabt">WebAssembly Binary Toolkit</a>:</p>
+<div class="highlight"><pre><span></span>$ wat2wasm table.wat
+</pre></div>
+<p>This creates a <tt class="docutils literal">table.wasm</tt> file in the same directory. Now we're ready to
+embed it and see it run; there are many embedding environments supporting
+WASM these days, but the easiest to work with from the command-line is probably
+Node.js, because it emulates the browser embedding environment very well <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.
+We'll write the following JS and save it in <tt class="docutils literal">table.js</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kd">const</span><span class="w"> </span><span class="nx">fs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">require</span><span class="p">(</span><span class="s1">&#39;fs&#39;</span><span class="p">);</span><span class="w"></span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">wasmfile</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">fs</span><span class="p">.</span><span class="nx">readFileSync</span><span class="p">(</span><span class="nx">__dirname</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s1">&#39;/table.wasm&#39;</span><span class="p">);</span><span class="w"></span>
+
+<span class="c1">// This object is imported into wasm.</span><span class="w"></span>
+<span class="kd">const</span><span class="w"> </span><span class="nx">importObject</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">env</span><span class="o">:</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">jstimes3</span><span class="o">:</span><span class="w"> </span><span class="p">(</span><span class="nx">n</span><span class="p">)</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="mf">3</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">n</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="nx">WebAssembly</span><span class="p">.</span><span class="nx">instantiate</span><span class="p">(</span><span class="ow">new</span><span class="w"> </span><span class="nb">Uint8Array</span><span class="p">(</span><span class="nx">wasmfile</span><span class="p">),</span><span class="w"> </span><span class="nx">importObject</span><span class="p">).</span><span class="nx">then</span><span class="p">(</span><span class="nx">obj</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Get two exported functions from wasm.</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">times2</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">obj</span><span class="p">.</span><span class="nx">instance</span><span class="p">.</span><span class="nx">exports</span><span class="p">.</span><span class="nx">times2</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="nx">times3</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">obj</span><span class="p">.</span><span class="nx">instance</span><span class="p">.</span><span class="nx">exports</span><span class="p">.</span><span class="nx">times3</span><span class="p">;</span><span class="w"></span>
+
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;times2(12) =&gt;&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">times2</span><span class="p">(</span><span class="mf">12</span><span class="p">));</span><span class="w"></span>
+<span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="s1">&#39;times3(12) =&gt;&#39;</span><span class="p">,</span><span class="w"> </span><span class="nx">times3</span><span class="p">(</span><span class="mf">12</span><span class="p">));</span><span class="w"></span>
+<span class="p">});</span><span class="w"></span>
+</pre></div>
+<p>If you've compiled the WAT file to WASM as instructed and it's in the same
+directory as <tt class="docutils literal">table.js</tt>, this should work:</p>
+<div class="highlight"><pre><span></span>$ node table.js
+times2(12) =&gt; 24
+times3(12) =&gt; 36
+</pre></div>
+<p>Let's trace what happens when Node invokes <tt class="docutils literal">times3(12)</tt>:</p>
+<ol class="arabic simple">
+<li><tt class="docutils literal">times3</tt> in the JS code is taken from the exports of the loaded WASM object.</li>
+<li>In the WAT code, the <tt class="docutils literal">times3</tt> function performs an indirect call through
+the function table, calling the function at offset 17 and forwarding it the
+parameter of the call.</li>
+<li>What's at offset 17? Looking at the <tt class="docutils literal">elem</tt> command, it's the function
+<tt class="docutils literal">$jstimes3</tt>.</li>
+<li>Looking further up in the WAT code, <tt class="docutils literal">$jstimes3</tt> identifies a function
+imported from the embedding environment's <tt class="docutils literal">env</tt> object, named <tt class="docutils literal">jstimes3</tt>.</li>
+<li>Now looking in the JS again, <tt class="docutils literal">jstimes3</tt> is defined as <tt class="docutils literal">(n) =&gt; 3 * n</tt> in
+the <tt class="docutils literal">env</tt> key of the import object: a function that multiplies its
+parameter by 3.</li>
+</ol>
+<p>Phew! Quite a journey - from JS into WASM, stored in a dispatch table, and
+called from JS again. This sample kicks the tires rather thoroughly.</p>
+</div>
+<div class="section" id="call-indirect-in-detail">
+<h2><tt class="docutils literal">call_indirect</tt> in detail</h2>
+<p>Since our two functions that perform an indirect call are similar, let's just
+focus on one of them:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="k">func</span> <span class="p">(</span><span class="k">export</span> <span class="s2">&quot;times3&quot;</span><span class="p">)</span> <span class="p">(</span><span class="k">type</span> <span class="nv">$int2int</span><span class="p">)</span>
+  <span class="nb">local.get</span> <span class="mi">0</span>
+  <span class="p">(</span><span class="nb">call_indirect</span> <span class="p">(</span><span class="k">type</span> <span class="nv">$int2int</span><span class="p">)</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">17</span><span class="p">))</span>
+<span class="p">)</span>
+</pre></div>
+<p>This invocation uses the WAT <em>folded instruction</em> capability of allowing s-exprs
+instead of a linear instruction sequence. The only required static parameter to
+<tt class="docutils literal">call_direct</tt> is the type index, so we can rewrite the function's contents as
+follows:</p>
+<div class="highlight"><pre><span></span><span class="nb">local.get</span> <span class="mi">0</span>
+<span class="nb">i32.const</span> <span class="mi">17</span>
+<span class="nb">call_indirect</span> <span class="p">(</span><span class="k">type</span> <span class="nv">$int2int</span><span class="p">)</span>
+</pre></div>
+<p>When <tt class="docutils literal">call_indirect</tt> is called, it takes the function index in the table
+from the top of the value stack. That's why <tt class="docutils literal">i32.const 17</tt> comes immediately
+before the call.</p>
+<p>The <tt class="docutils literal">(type $int2int)</tt> parameter is required; it we try to omit it, the
+<tt class="docutils literal">wat2wasm</tt> compilation will not complain (I wonder why), but during
+execution we'll run into an error:</p>
+<div class="highlight"><pre><span></span>RuntimeError: null function or function signature mismatch
+</pre></div>
+<p>As mentioned above, our original usage of <tt class="docutils literal">call_indirect</tt> relies on a folded
+instruction to provide the function index in-line in the call expression. Maybe
+we can place the whole thing inline:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="nb">call_indirect</span> <span class="p">(</span><span class="k">type</span> <span class="nv">$int2int</span><span class="p">)</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">17</span><span class="p">)</span> <span class="p">(</span><span class="nb">local.get</span> <span class="mi">0</span><span class="p">))</span>
+</pre></div>
+<p>This produces a runtime error again:</p>
+<div class="highlight"><pre><span></span>RuntimeError: null function or function signature mismatch
+</pre></div>
+<p>Interestingly, it will work fine if we flip the order of the last two arguments:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="nb">call_indirect</span> <span class="p">(</span><span class="k">type</span> <span class="nv">$int2int</span><span class="p">)</span> <span class="p">(</span><span class="nb">local.get</span> <span class="mi">0</span><span class="p">)</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">17</span><span class="p">))</span>
+</pre></div>
+<p>At first sight, this is paradoxical: don't we have to pass in the function index
+first, and only then the parameter to the dynamically-called function?</p>
+<p>To understand why there's no paradox here, we have to learn a bit about how
+the WASM stack works. The first thing to learn is that binary instructions and
+calls expect their arguments on the stack in reverse order (the first argument
+deepest in the stack while the last is on top of the stack). To demonstrate
+this, here's a function that performs subtraction of two <tt class="docutils literal">i32</tt> values:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="k">func</span> <span class="p">(</span><span class="k">export</span> <span class="s2">&quot;dosub1&quot;</span><span class="p">)</span>
+<span class="p">(</span><span class="k">param</span> <span class="kt">i32</span><span class="p">)</span> <span class="p">(</span><span class="k">param</span> <span class="kt">i32</span><span class="p">)</span>
+<span class="p">(</span><span class="k">result</span> <span class="kt">i32</span><span class="p">)</span>
+  <span class="nb">local.get</span> <span class="mi">0</span>
+  <span class="nb">local.get</span> <span class="mi">1</span>
+  <span class="nb">i32.sub</span>
+<span class="p">)</span>
+</pre></div>
+<p>We push the first argument on the stack first (<tt class="docutils literal">local.get 0</tt>), and then the
+second argument. This means that when <tt class="docutils literal">i32.sub</tt> is called, the stack looks
+like this:</p>
+<div class="highlight"><pre><span></span>| param 1 |    &lt;&lt;-- top of stack
+|---------|
+| param 0 |
+-----------
+</pre></div>
+<p>The second thing to learn is how WASM's folded instructions are compiled <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>.
+An equivalent subtraction function that uses folded instructions is:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="k">func</span> <span class="p">(</span><span class="k">export</span> <span class="s2">&quot;dosub2&quot;</span><span class="p">)</span>
+<span class="p">(</span><span class="k">param</span> <span class="kt">i32</span><span class="p">)</span> <span class="p">(</span><span class="k">param</span> <span class="kt">i32</span><span class="p">)</span>
+<span class="p">(</span><span class="k">result</span> <span class="kt">i32</span><span class="p">)</span>
+  <span class="p">(</span><span class="nb">i32.sub</span> <span class="p">(</span><span class="nb">local.get</span> <span class="mi">0</span><span class="p">)</span> <span class="p">(</span><span class="nb">local.get</span> <span class="mi">1</span><span class="p">))</span>
+<span class="p">)</span>
+</pre></div>
+<p>This is exactly equivalent to the <tt class="docutils literal">dosub1</tt> function. The WAT compiler unfolds
+the folded instruction into the same sequence:</p>
+<div class="highlight"><pre><span></span><span class="nb">local.get</span> <span class="mi">0</span>
+<span class="nb">local.get</span> <span class="mi">1</span>
+<span class="nb">i32.sub</span>
+</pre></div>
+<p>So far so good; now let's get back to our first attempt at fully folding the
+indirect call:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="nb">call_indirect</span> <span class="p">(</span><span class="k">type</span> <span class="nv">$int2int</span><span class="p">)</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">17</span><span class="p">)</span> <span class="p">(</span><span class="nb">local.get</span> <span class="mi">0</span><span class="p">))</span>
+</pre></div>
+<p>As discussed, this is equivalent to:</p>
+<div class="highlight"><pre><span></span><span class="nb">i32.const</span> <span class="mi">17</span>
+<span class="nb">local.get</span> <span class="mi">0</span>
+<span class="nb">call_indirect</span> <span class="p">(</span><span class="k">type</span> <span class="nv">$int2int</span><span class="p">)</span>
+</pre></div>
+<p>But herein lies the catch. When the <tt class="docutils literal">call_indirect</tt> instruction executes, it
+only needs a single stack argument - the function index. The value on top of
+the stack when it executes is the <tt class="docutils literal">local.get 0</tt>, which is not the function
+index - so we get an error. If you recall, the fully unfolded form that does
+work is:</p>
+<div class="highlight"><pre><span></span><span class="nb">local.get</span> <span class="mi">0</span>
+<span class="nb">i32.const</span> <span class="mi">17</span>
+<span class="nb">call_indirect</span> <span class="p">(</span><span class="k">type</span> <span class="nv">$int2int</span><span class="p">)</span>
+</pre></div>
+<p>This is because <tt class="docutils literal">i32.const 17</tt> is the argument to <tt class="docutils literal">call_indirect</tt>; it takes
+it from the top of the stack and executes to find a function in the table. Then,
+once the function is found, <em>that function</em> takes its own arguments from the
+stack in the usual order, and that's where it finds the <tt class="docutils literal">local.get 0</tt> it
+needs.</p>
+<p>This is why listing the arguments in reverse in the folded form works:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="nb">call_indirect</span> <span class="p">(</span><span class="k">type</span> <span class="nv">$int2int</span><span class="p">)</span> <span class="p">(</span><span class="nb">local.get</span> <span class="mi">0</span><span class="p">)</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">17</span><span class="p">))</span>
+</pre></div>
+<p>The folded form is definitely useful when all of the arguments are actually
+passed to the instruction/call that heads the s-expr. For more complex stack
+interactions like <tt class="docutils literal">call_indirect</tt>, the folded form seems more confusing than
+helpful. This is why I originally wrote this function as:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="k">func</span> <span class="p">(</span><span class="k">export</span> <span class="s2">&quot;times3&quot;</span><span class="p">)</span> <span class="p">(</span><span class="k">type</span> <span class="nv">$int2int</span><span class="p">)</span>
+  <span class="nb">local.get</span> <span class="mi">0</span>
+  <span class="p">(</span><span class="nb">call_indirect</span> <span class="p">(</span><span class="k">type</span> <span class="nv">$int2int</span><span class="p">)</span> <span class="p">(</span><span class="nb">i32.const</span> <span class="mi">17</span><span class="p">))</span>
+<span class="p">)</span>
+</pre></div>
+<p>It clearly distinguishes between the different kinds of arguments;
+<tt class="docutils literal">i32.const 17</tt> belongs to the <tt class="docutils literal">call_indirect</tt>, so it's part of the s-expr.
+<tt class="docutils literal">local.get 0</tt> has to be on the stack for the dynamically-called function,
+so it's left out separately.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>The type used for function references is <tt class="docutils literal">funcref</tt>; in some older
+code samples you'll see <tt class="docutils literal">anyfunc</tt> used instead, but this is outdated.
+The WASM standard settled on <tt class="docutils literal">funcref</tt> and tools like <tt class="docutils literal">wat2wasm</tt> will
+reject <tt class="docutils literal">anyfunc</tt>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>I've also written the same program using Go and the
+<a class="reference external" href="https://wazero.io/">wazero runtime</a>; it's <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2023/wasm-call-indirect/go-env">on GitHub too</a>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>In one sense, WAT is to WASM like assembly language is to machine code;
+therefore, it may make sense of talking about <em>assembling</em> WAT code into
+WASM. On the other hand, with syntactic sugar like folded instructions
+WAT is much higher level than most assembly languages, so the term
+<em>compiling</em> makes some sense too. In this post I'm using <em>compiling</em>
+for consistency.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

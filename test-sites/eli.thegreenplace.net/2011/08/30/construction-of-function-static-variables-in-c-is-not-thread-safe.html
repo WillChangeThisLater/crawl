@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Construction of function static variables in C++ is not thread safe - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="construction-of-function-static-variables-in-c-is-not-thread-safe.html"
+                       rel="bookmark"
+                       title="Permalink to Construction of function static variables in C++ is not thread safe">
+                        Construction of function static variables in C++ is not thread safe
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> August 30, 2011 at 17:30</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../../tag/concurrency.html">Concurrency</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+  <p><i><strong>Update (26-Aug-2017):</strong> C++11 changes the guarantees for
+thread safety of function static variable. See <a href="https://stackoverflow.com/questions/1661529/is-meyers-implementation-of-the-singleton-pattern-thread-safe">this page</a>
+for an example discussion. This article should still be interesting for historical reasons
+and to better understand the underlying issue and behavior of older compilers.
+</i></p>
+        <p>Here's a short quiz. What will the following code print:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">#include &lt;iostream&gt;</span>
+
+<span style="color: #00007f; font-weight: bold">using</span> <span style="color: #00007f; font-weight: bold">namespace</span> std;
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">Foo</span> {
+<span style="color: #00007f; font-weight: bold">public</span>:
+    Foo(<span style="color: #00007f; font-weight: bold">const</span> <span style="color: #00007f; font-weight: bold">char</span>* s = <span style="color: #7f007f">&quot;&quot;</span>) {
+        cerr &lt;&lt; <span style="color: #7f007f">&quot;Constructing Foo with &quot;</span> &lt;&lt; s &lt;&lt; endl;
+    }
+};
+
+<span style="color: #00007f; font-weight: bold">void</span> somefunc()
+{
+    <span style="color: #00007f; font-weight: bold">static</span> Foo funcstatic(<span style="color: #7f007f">&quot;funcstatic&quot;</span>);
+    Foo funcauto(<span style="color: #7f007f">&quot;funcauto&quot;</span>);
+}
+
+<span style="color: #00007f; font-weight: bold">static</span> Foo glob(<span style="color: #7f007f">&quot;global&quot;</span>);
+
+<span style="color: #00007f; font-weight: bold">int</span> main()
+{
+    cerr &lt;&lt; <span style="color: #7f007f">&quot;Entering main\n&quot;</span>;
+    somefunc();
+    somefunc();
+    somefunc();
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">0</span>;
+}
+</pre></div>
+<p>Try to think about it for a moment before reading on. <tt class="docutils literal">Foo</tt> is a dummy class with the sole purpose of demonstrating when its constructor is being called. There are a few <tt class="docutils literal">Foo</tt> instances here: one global, one function static (by which I mean <tt class="docutils literal">static</tt> in a function scope) and one function local (automatic).</p>
+<p>Recently I ran into (a variation of) this code and was surprised that its output is:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">Constructing Foo with global
+Entering main
+Constructing Foo with funcstatic
+Constructing Foo with funcauto
+Constructing Foo with funcauto
+Constructing Foo with funcauto
+</pre></div>
+<p>What's surprising here is the construction of <tt class="docutils literal">funcstatic</tt> happening <em>after</em> entering <tt class="docutils literal">main</tt>. Actually, it's happening when <tt class="docutils literal">somefunc</tt> is first called. Why was I surprised? Because I always kind-of assumed that function static variables are handled similarly to global static variables, except their visibility is limited only to the function. While this is true in C, it's only partially true in C++, and here's why.</p>
+<p>In C++, variables not only have to be initialized - sometimes, they also have to be <em>constructed</em>. While for POD (Plain Old Data) types the behavior is C-like (the compiler just writes the initialization value into the <tt class="docutils literal">.data</tt> segment, no special code required), for types with custom constructors this can't work. Some code has to be generated to call these constructors.</p>
+<p>It turns out that in case of function static variables, this code can be placed in the function and thus is executed <em>when the function is first called</em>. This behavior is actually allowed by the C++ standard. Here's an excerpt from section 6.7 of a working draft (N1095) of the current C++ standard (C++98):</p>
+<blockquote>
+The zero-initialization (8.5) of all local objects with static storage duration (3.7.1) is performed before any other initialization takes place. A local object of POD type (3.9) with static storage duration initialized with constant-expressions is initialized before its block is first entered. <strong>An implementation is permitted to perform early initialization of other local objects with static storage duration under the same conditions that an implementation is permitted to statically initialize an object with static storage duration in namespace scope (3.6.2). Otherwise such an object is initialized the first time control passes through its declaration;</strong> such an object is considered initialized upon the completion of its initialization.</blockquote>
+<p>Highlight is mine. What this means, less formally, is that while the compiler is permitted to invoke the constructors of function static variables at global scope, it's free to do this in the function if it wants.</p>
+<p>And apparently, most modern compilers indeed choose to construct function static objects when the function is first called. This makes sense as an optimization - calling too many constructors before <tt class="docutils literal">main</tt> runs can have a <a class="reference external" href="http://neugierig.org/software/chromium/notes/2011/08/static-initializers.html">negative impact on program start-up</a>. Not to mention that dependencies between statically constructed objects are one of the <a class="reference external" href="http://www.parashift.com/c++-faq-lite/ctors.html#faq-10.14">biggest headaches</a> C++ has to offer.</p>
+<p>But herein lies a problem: this construction of static function variables <strong>is not thread safe!</strong> If <tt class="docutils literal">somefunc</tt> is being called from multiple threads, it may so happen that the constructor of <tt class="docutils literal">funcstatic</tt> will be called multiple times. After all, being <tt class="docutils literal">static</tt>, <tt class="docutils literal">funcstatic</tt> is shared between all threads. The C++ standard doesn't protect us from this happening - it doesn't even acknowledge the existence of threads (this is C++98 we're talking about).</p>
+<p>So keep this in mind: such code is not thread safe - you can not assume that in the presence of multiple threads the function static variable will be constructed only once. <strong>It is the job of the programmer to guarantee this won't happen.</strong></p>
+<p>This is the main point I wanted to make in this post. The rest is going to examine in more detail the code generated by popular compilers for this scenario and discuss the implications.</p>
+<p>Let's start with MS Visual C++ 2008. Here's the disassembly of <tt class="docutils literal">somefunc</tt>, skipping the function prologue:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">    static Foo funcstatic(&quot;funcstatic&quot;);
+00E314FD  mov         eax,dword ptr [$S1 (0E3A148h)]
+00E31502  and         eax,1
+00E31505  jne         somefunc+71h (0E31531h)
+00E31507  mov         eax,dword ptr [$S1 (0E3A148h)]
+00E3150C  or          eax,1
+00E3150F  mov         dword ptr [$S1 (0E3A148h)],eax
+00E31514  mov         dword ptr [ebp-4],0
+00E3151B  push        offset string &quot;funcstatic&quot; (0E3890Ch)
+00E31520  mov         ecx,offset funcstatic (0E3A14Ch)
+00E31525  call        Foo::Foo (0E31177h)
+00E3152A  mov         dword ptr [ebp-4],0FFFFFFFFh
+    Foo funcauto(&quot;funcauto&quot;);
+00E31531  push        offset string &quot;funcauto&quot; (0E38900h)
+00E31536  lea         ecx,[ebp-11h]
+00E31539  call        Foo::Foo (0E31177h)
+</pre></div>
+<p>Here's what this does: a special flag is being kept in memory (in address <tt class="docutils literal">0x0E3A148</tt> for this particular run). Its goal is to make sure the constructor of <tt class="docutils literal">funcstatic</tt> is only called once. The code fetches the flag into <tt class="docutils literal">eax</tt> and looks at its lowest bit. If that bit is already turned on, it just skips the call and goes to the next line. Otherwise, it places 1 in the lowest bit and calls the constructor.</p>
+<p>The idea here is obvious - this flag is used to ensure the constructor is only being called once. Note how it blissfully ignores the existence of threads. Suppose two threads - A and B enter <tt class="docutils literal">somefunc</tt> simultaneously. Both can check the flag at the same time, see it's still 0 and then call the constructor. Nothing here prevents that from happening. And this is all good and fine according to the C++ standard.</p>
+<p>With GCC, however, things get more interesting. Here's the same function compiled with <tt class="docutils literal">g++ <span class="pre">-O0</span> <span class="pre">-g</span></tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">0000000000400a9d &lt;_Z8somefuncv&gt;:
+  400a9d:  55                      push   rbp
+  400a9e:  48 89 e5                mov    rbp,rsp
+  400aa1:  48 83 ec 40             sub    rsp,0x40
+  400aa5:  b8 a8 21 60 00          mov    eax,0x6021a8
+  400aaa:  0f b6 00                movzx  eax,BYTE PTR [rax]
+  400aad:  84 c0                   test   al,al
+  400aaf:  75 76                   jne    400b27 &lt;_Z8somefuncv+0x8a&gt;
+  400ab1:  bf a8 21 60 00          mov    edi,0x6021a8
+  400ab6:  e8 cd fd ff ff          call   400888 &lt;__cxa_guard_acquire@plt&gt;
+  400abb:  85 c0                   test   eax,eax
+  400abd:  0f 95 c0                setne  al
+  400ac0:  84 c0                   test   al,al
+  400ac2:  74 63                   je     400b27 &lt;_Z8somefuncv+0x8a&gt;
+  400ac4:  c6 45 df 00             mov    BYTE PTR [rbp-0x21],0x0
+  400ac8:  be aa 0c 40 00          mov    esi,0x400caa
+  400acd:  bf b0 21 60 00          mov    edi,0x6021b0
+  400ad2:  e8 89 00 00 00          call   400b60 &lt;_ZN3FooC1EPKc&gt;
+  400ad7:  c6 45 df 01             mov    BYTE PTR [rbp-0x21],0x1
+  400adb:  bf a8 21 60 00          mov    edi,0x6021a8
+  400ae0:  e8 03 fe ff ff          call   4008e8 &lt;__cxa_guard_release@plt&gt;
+  400ae5:  eb 40                   jmp    400b27 &lt;_Z8somefuncv+0x8a&gt;
+  400ae7:  48 89 45 c8             mov    QWORD PTR [rbp-0x38],rax
+  400aeb:  48 89 55 d0             mov    QWORD PTR [rbp-0x30],rdx
+  400aef:  8b 45 d0                mov    eax,DWORD PTR [rbp-0x30]
+  400af2:  89 45 ec                mov    DWORD PTR [rbp-0x14],eax
+  400af5:  48 8b 45 c8             mov    rax,QWORD PTR [rbp-0x38]
+  400af9:  48 89 45 e0             mov    QWORD PTR [rbp-0x20],rax
+  400afd:  0f b6 45 df             movzx  eax,BYTE PTR [rbp-0x21]
+  400b01:  83 f0 01                xor    eax,0x1
+  400b04:  84 c0                   test   al,al
+  400b06:  74 0a                   je     400b12 &lt;_Z8somefuncv+0x75&gt;
+  400b08:  bf a8 21 60 00          mov    edi,0x6021a8
+  400b0d:  e8 06 fe ff ff          call   400918 &lt;__cxa_guard_abort@plt&gt;
+  400b12:  48 8b 45 e0             mov    rax,QWORD PTR [rbp-0x20]
+  400b16:  48 89 45 c8             mov    QWORD PTR [rbp-0x38],rax
+  400b1a:  48 63 45 ec             movsxd rax,DWORD PTR [rbp-0x14]
+  400b1e:  48 8b 7d c8             mov    rdi,QWORD PTR [rbp-0x38]
+  400b22:  e8 11 fe ff ff          call   400938 &lt;_Unwind_Resume@plt&gt;
+  400b27:  48 8d 7d ff             lea    rdi,[rbp-0x1]
+  400b2b:  be b5 0c 40 00          mov    esi,0x400cb5
+  400b30:  e8 2b 00 00 00          call   400b60 &lt;_ZN3FooC1EPKc&gt;
+  400b35:  c9                      leave
+  400b36:  c3                      ret
+</pre></div>
+<p>What's going on here? It turns out that <a class="reference external" href="http://gcc.gnu.org/bugzilla/show_bug.cgi?id=13684">since version 4</a>, GCC generates &quot;guard&quot; calls that ensure multi-threaded safety for this kind of initialization. To better understand what's going on in the code above, there's a relevant section in the Itanium C++ ABI (which GCC follows) <a class="reference external" href="http://www.codesourcery.com/public/cxx-abi/abi.html#once-ctor">right here</a>. GCC also allows to disable these guards by passing <tt class="docutils literal"><span class="pre">-fno-threadsafe-statics</span></tt> flag during compilation. With this flag, the code generated by GCC for our code sample is quite similar to the one generated by MSVC.</p>
+<p>On one hand, this is nice of GCC to do. On the other hand, it's one of those things that introduce insidious portability problems. Develop the code for GCC and everything is peachy for function static constructors - no multithreading problems because of the guard code. Then port the code to Windows and start witnessing intermittent failures due to races between threads. Not fun.</p>
+<p>The only solution is, of course, to write code that adheres to the C++ standard and doesn't make assumptions that must not be made.</p>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="construction-of-function-static-variables-in-c-is-not-thread-safe.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

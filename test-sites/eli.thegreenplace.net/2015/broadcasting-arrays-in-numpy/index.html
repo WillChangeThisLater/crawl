@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Broadcasting arrays in Numpy - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Broadcasting arrays in Numpy">
+                        Broadcasting arrays in Numpy
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> December 22, 2015 at 06:00</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/python.html">Python</a>
+        ,
+    <a href="../../tag/math.html">Math</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p><em>Broadcasting</em> is Numpy's terminology for performing mathematical operations
+between arrays with different shapes. This article will explain why broadcasting
+is useful, how to use it and touch upon some of its performance implications.</p>
+<div class="section" id="motivating-example">
+<h2>Motivating example</h2>
+<p>Say we have a large data set; each datum is a list of parameters.
+In Numpy terms, we have a 2-D array, where each row is a datum and the number of
+rows is the size of the data set. Suppose we want to apply some sort of scaling
+to all these data - every parameter gets its own scaling factor; in other words,
+every parameter is multiplied by some factor.</p>
+<p>Just to have something tangible to think about, let's count calories in foods
+using a macro-nutrient breakdown. Roughly put, the caloric parts of food are
+made of fats (9 calories per gram), protein (4 calories per gram) and carbs (4
+calories per gram). So if we list some foods (our data), and for each food list
+its macro-nutrient breakdown (parameters), we can then multiply each nutrient by
+its caloric value (apply scaling) to compute the caloric breakdown of each food
+item <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>:</p>
+<img alt="Calories macros" class="align-center" src="../../images/2015/cal-data.png" />
+<p>With this transformation, we can now compute all kinds of useful information.
+For example, what is the total number of calories in some food. Or, given a
+breakdown of my dinner - how much calories did I get from protein. And so on.</p>
+<p>Let's see a naive way of producing this computation with Numpy:</p>
+<div class="highlight"><pre><span></span><span class="n">In</span> <span class="p">[</span><span class="mi">65</span><span class="p">]:</span> <span class="n">macros</span> <span class="o">=</span> <span class="n">array</span><span class="p">([</span>
+  <span class="p">[</span><span class="mf">0.3</span><span class="p">,</span> <span class="mf">2.5</span><span class="p">,</span> <span class="mf">3.5</span><span class="p">],</span>
+  <span class="p">[</span><span class="mf">2.9</span><span class="p">,</span> <span class="mf">27.5</span><span class="p">,</span> <span class="mi">0</span><span class="p">],</span>
+  <span class="p">[</span><span class="mf">0.4</span><span class="p">,</span> <span class="mf">1.3</span><span class="p">,</span> <span class="mf">23.9</span><span class="p">],</span>
+  <span class="p">[</span><span class="mf">14.4</span><span class="p">,</span> <span class="mi">6</span><span class="p">,</span> <span class="mf">2.3</span><span class="p">]])</span>
+
+<span class="c1"># Create a new array filled with zeros, of the same shape as macros.</span>
+<span class="n">In</span> <span class="p">[</span><span class="mi">67</span><span class="p">]:</span> <span class="n">result</span> <span class="o">=</span> <span class="n">zeros_like</span><span class="p">(</span><span class="n">macros</span><span class="p">)</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">69</span><span class="p">]:</span> <span class="n">cal_per_macro</span> <span class="o">=</span> <span class="n">array</span><span class="p">([</span><span class="mi">9</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">4</span><span class="p">])</span>
+
+<span class="c1"># Now multiply each row of macros by cal_per_macro. In Numpy, `*` is</span>
+<span class="c1"># element-wise multiplication between two arrays.</span>
+<span class="n">In</span> <span class="p">[</span><span class="mi">70</span><span class="p">]:</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">xrange</span><span class="p">(</span><span class="n">macros</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]):</span>
+   <span class="o">....</span><span class="p">:</span>     <span class="n">result</span><span class="p">[</span><span class="n">i</span><span class="p">,</span> <span class="p">:]</span> <span class="o">=</span> <span class="n">macros</span><span class="p">[</span><span class="n">i</span><span class="p">,</span> <span class="p">:]</span> <span class="o">*</span> <span class="n">cal_per_macro</span>
+   <span class="o">....</span><span class="p">:</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">71</span><span class="p">]:</span> <span class="n">result</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">71</span><span class="p">]:</span>
+<span class="n">array</span><span class="p">([[</span>   <span class="mf">2.7</span><span class="p">,</span>   <span class="mf">10.</span> <span class="p">,</span>   <span class="mf">14.</span> <span class="p">],</span>
+       <span class="p">[</span>  <span class="mf">26.1</span><span class="p">,</span>  <span class="mf">110.</span> <span class="p">,</span>    <span class="mf">0.</span> <span class="p">],</span>
+       <span class="p">[</span>   <span class="mf">3.6</span><span class="p">,</span>    <span class="mf">5.2</span><span class="p">,</span>   <span class="mf">95.6</span><span class="p">],</span>
+       <span class="p">[</span> <span class="mf">129.6</span><span class="p">,</span>   <span class="mf">24.</span> <span class="p">,</span>    <span class="mf">9.2</span><span class="p">]])</span>
+</pre></div>
+<p>This is a reasonable approach when coding in a low-level programming language:
+allocate the output, loop over input performing some operation, write result
+into output. In Numpy, however, this is fairly bad for performance because the
+looping is done in (slow) Python code instead of internally by Numpy in (fast) C
+code.</p>
+<p>Since element-wise operators like <tt class="docutils literal">*</tt> work on arbitrary shapes, a better way
+would be to delegate all the looping to Numpy, by &quot;stretching&quot; the
+<tt class="docutils literal">cal_per_macro</tt> array vertically and then performing element-wise
+multiplication with <tt class="docutils literal">macros</tt>; this moves the per-row loop from above into
+Numpy itself, where it can run much more efficiently:</p>
+<div class="highlight"><pre><span></span><span class="c1"># Use the &#39;tile&#39; function to replicate cal_per_macro over the number</span>
+<span class="c1"># of rows &#39;macros&#39; has (rows is the first element of the shape tuple for</span>
+<span class="c1"># a 2-D array).</span>
+<span class="n">In</span> <span class="p">[</span><span class="mi">72</span><span class="p">]:</span> <span class="n">cal_per_macro_stretch</span> <span class="o">=</span> <span class="n">tile</span><span class="p">(</span><span class="n">cal_per_macro</span><span class="p">,</span> <span class="p">(</span><span class="n">macros</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="mi">1</span><span class="p">))</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">73</span><span class="p">]:</span> <span class="n">cal_per_macro_stretch</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">73</span><span class="p">]:</span>
+<span class="n">array</span><span class="p">([[</span><span class="mi">9</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">4</span><span class="p">],</span>
+       <span class="p">[</span><span class="mi">9</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">4</span><span class="p">],</span>
+       <span class="p">[</span><span class="mi">9</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">4</span><span class="p">],</span>
+       <span class="p">[</span><span class="mi">9</span><span class="p">,</span> <span class="mi">4</span><span class="p">,</span> <span class="mi">4</span><span class="p">]])</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">74</span><span class="p">]:</span> <span class="n">macros</span> <span class="o">*</span> <span class="n">cal_per_macro_stretch</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">74</span><span class="p">]:</span>
+<span class="n">array</span><span class="p">([[</span>   <span class="mf">2.7</span><span class="p">,</span>   <span class="mf">10.</span> <span class="p">,</span>   <span class="mf">14.</span> <span class="p">],</span>
+       <span class="p">[</span>  <span class="mf">26.1</span><span class="p">,</span>  <span class="mf">110.</span> <span class="p">,</span>    <span class="mf">0.</span> <span class="p">],</span>
+       <span class="p">[</span>   <span class="mf">3.6</span><span class="p">,</span>    <span class="mf">5.2</span><span class="p">,</span>   <span class="mf">95.6</span><span class="p">],</span>
+       <span class="p">[</span> <span class="mf">129.6</span><span class="p">,</span>   <span class="mf">24.</span> <span class="p">,</span>    <span class="mf">9.2</span><span class="p">]])</span>
+</pre></div>
+<p>Nice, it's shorter too. And much, much faster! To measure the speed I created a
+large random data set, with 1 million rows of 10 parameters each. The
+loop-in-Python method takes ~2.3 seconds to churn through it. The stretching
+method takes 30 <em>milliseconds</em>, a ~75x speedup.</p>
+<p>And now, finally, comes the interesting part. You see, the operation we just
+did - stretching one array so that its shape matches that of another and then
+applying some element-wise operation between them - is actually pretty common.
+This often happens when we want to take a lower-dimensional array and use it
+to perform a computation along some axis of a higher-dimensional array. In fact,
+when taken to the extreme this is exactly what happens when we perform an
+operation between an array and a scalar - the scalar is <em>stretched</em> across the
+whole array so that the element-wise operation gets the same scalar value for
+each element it computes.</p>
+<p>Numpy generalizes this concept into <em>broadcasting</em> - a set of rules that permit
+element-wise computations between arrays of different shapes, as long as some
+constraints apply. We'll discuss the actual constraints later, but for the case
+at hand a simple example will suffice: our original <tt class="docutils literal">macros</tt> array is 4x3 (4
+rows by 3 columns). <tt class="docutils literal">cal_per_macro</tt> is a 3-element array. Since its length
+matches the number of columns in <tt class="docutils literal">macros</tt>, it's pretty natural to apply some
+operation between <tt class="docutils literal">cal_per_macro</tt> and every row of <tt class="docutils literal">macros</tt> - each row of
+<tt class="docutils literal">macros</tt> has the exact same size as <tt class="docutils literal">cal_per_macro</tt>, so the element-wise
+operation makes perfect sense.</p>
+<p>Incidentally, this lets Numpy achieve two separate goals - usefulness
+as well as more consistent and general semantics. Binary operators like <tt class="docutils literal">*</tt>
+are element-wise, but what happens when we apply them between arrays of
+different shapes? Should it work or should it be rejected? If it works, how
+should it work? Broadcasting defines the semantics of these operations.</p>
+<p>Back to our example. Here's yet another way to compute the result data:</p>
+<div class="highlight"><pre><span></span><span class="n">In</span> <span class="p">[</span><span class="mi">75</span><span class="p">]:</span> <span class="n">macros</span> <span class="o">*</span> <span class="n">cal_per_macro</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">75</span><span class="p">]:</span>
+<span class="n">array</span><span class="p">([[</span>   <span class="mf">2.7</span><span class="p">,</span>   <span class="mf">10.</span> <span class="p">,</span>   <span class="mf">14.</span> <span class="p">],</span>
+       <span class="p">[</span>  <span class="mf">26.1</span><span class="p">,</span>  <span class="mf">110.</span> <span class="p">,</span>    <span class="mf">0.</span> <span class="p">],</span>
+       <span class="p">[</span>   <span class="mf">3.6</span><span class="p">,</span>    <span class="mf">5.2</span><span class="p">,</span>   <span class="mf">95.6</span><span class="p">],</span>
+       <span class="p">[</span> <span class="mf">129.6</span><span class="p">,</span>   <span class="mf">24.</span> <span class="p">,</span>    <span class="mf">9.2</span><span class="p">]])</span>
+</pre></div>
+<p>Simple and elegant, and the fastest approach to boot <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.</p>
+</div>
+<div class="section" id="defining-broadcasting">
+<h2>Defining broadcasting</h2>
+<p>Broadcasting is often described as an operation between a &quot;smaller&quot; and a
+&quot;larger&quot; array. This doesn't necessarily have to be the case, as broadcasting
+applies also to arrays of the same size, though with different shapes.
+Therefore, I believe the following definition of broadcasting is the most useful
+one.</p>
+<p>Element-wise operations on arrays are only valid when the arrays' shapes are
+either equal or compatible. The equal shapes case is trivial - this is the
+stretched array from the example above. What does &quot;compatible&quot; mean, though?</p>
+<p>To determine if two shapes are compatible, Numpy compares their dimensions,
+starting with the trailing ones and working its way backwards <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>. If two
+dimensions are equal, or if one of them equals 1, the comparison continues.
+Otherwise, you'll see a <tt class="docutils literal">ValueError</tt> raised (saying something like &quot;operands
+could not be broadcast together with shapes ...&quot;).</p>
+<p>When one of the shapes runs out of dimensions (because it has less dimensions
+than the other shape), Numpy will use 1 in the comparison process until the
+other shape's dimensions run out as well.</p>
+<p>Once Numpy determines that two shapes are compatible, the shape of the result is
+simply the maximum of the two shapes' sizes in each dimension.</p>
+<p>Put a little bit more formally, here's a pseudo-algorithm:</p>
+<div class="highlight"><pre><span></span>Inputs: array A with m dimensions; array B with n dimensions
+p = max(m, n)
+if m &lt; p:
+    left-pad A&#39;s shape with 1s until it also has p dimensions
+else if n &lt; p:
+    left-pad B&#39;s shape with 1s until is also has p dimensions
+result_dims = new list with p elements
+for i in p-1 ... 0:
+    A_dim_i = A.shape[i]
+    B_dim_i = B.shape[i]
+    if A_dim_i != 1 and B_dim_i != 1 and A_dim_i != B_dim_i:
+        raise ValueError(&quot;could not broadcast&quot;)
+    else:
+        result_dims[i] = max(A_dim_i, B_dim_i)
+</pre></div>
+</div>
+<div class="section" id="examples">
+<h2>Examples</h2>
+<p>The definition above is precise and complete; to get a feel for it, we'll need a
+few examples.</p>
+<p>I'm using the Numpy convention of describing shapes as tuples. <tt class="docutils literal">macros</tt> is a
+4-by-3 array, meaning that it has 4 rows with 3 columns each, or 4x3. The
+Numpy way of describing the shape of <tt class="docutils literal">macros</tt> is <tt class="docutils literal">(4, 3)</tt>:</p>
+<div class="highlight"><pre><span></span><span class="n">In</span> <span class="p">[</span><span class="mi">80</span><span class="p">]:</span> <span class="n">macros</span><span class="o">.</span><span class="n">shape</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">80</span><span class="p">]:</span> <span class="p">(</span><span class="mi">4</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>
+</pre></div>
+<p>When we computed the caloric table using broadcasting, what we did was an
+operation between <tt class="docutils literal">macros</tt> - a <tt class="docutils literal">(4, 3)</tt> array, and <tt class="docutils literal">cal_per_macro</tt>, a
+<tt class="docutils literal">(3,)</tt> array <a class="footnote-reference" href="index.html#footnote-4" id="footnote-reference-4">[4]</a>. Therefore, following the broadcasting rules outlined above,
+the shape <tt class="docutils literal">(3,)</tt> is left-padded with 1 to make comparison with <tt class="docutils literal">(4, 3)</tt>
+possible. The shapes are then deemed compatible and the result shape is <tt class="docutils literal">(4,
+3)</tt>, which is exactly what we observed.</p>
+<p>Schematically:</p>
+<div class="highlight"><pre><span></span>(4, 3)                   (4, 3)
+         == padding ==&gt;          == result ==&gt; (4, 3)
+(3,)                     (1, 3)
+</pre></div>
+<p>Here's another example, broadcasting between a 3-D and a 1-D array:</p>
+<div class="highlight"><pre><span></span>(3,)                       (1, 1, 3)
+           == padding ==&gt;             == result ==&gt; (5, 4, 3)
+(5, 4, 3)                  (5, 4, 3)
+</pre></div>
+<p>Note, however, that only left-padding with 1s is allowed. Therefore:</p>
+<div class="highlight"><pre><span></span>(5,)                       (1, 1, 5)
+           == padding ==&gt;             ==&gt; error (5 != 3)
+(5, 4, 3)                  (5, 4, 3)
+</pre></div>
+<p>Theoretically, had the broadcasting rules been less rigid - we could say that
+this broadcasting is valid if we <em>right-pad</em> <tt class="docutils literal">(5,)</tt> with 1s. However, this is
+not how the rules are defined - therefore these shapes are incompatible.</p>
+<p>Broadcasting is valid between higher-dimensional arrays too:</p>
+<div class="highlight"><pre><span></span>(5, 4, 3)                     (1, 5, 4, 3)
+              == padding ==&gt;                == result ==&gt; (6, 5, 4, 3)
+(6, 5, 4, 3)                  (6, 5, 4, 3)
+</pre></div>
+<p>Also, in the beginning of the article I mentioned that broadcasting does not
+necessarily occur between arrays of different number of dimensions. It's
+perfectly valid to broadcast arrays with the same number of dimensions, as long
+as they are compatible:</p>
+<div class="highlight"><pre><span></span>(5, 4, 1)
+           == no padding needed ==&gt; result ==&gt; (5, 4, 3)
+(5, 1, 3)
+</pre></div>
+<p>Finally, scalars are treated specially as 1-dimensional arrays with size 1:</p>
+<div class="highlight"><pre><span></span><span class="n">In</span> <span class="p">[</span><span class="mi">93</span><span class="p">]:</span> <span class="n">ones</span><span class="p">((</span><span class="mi">4</span><span class="p">,</span> <span class="mi">3</span><span class="p">))</span> <span class="o">+</span> <span class="mi">1</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">93</span><span class="p">]:</span>
+<span class="n">array</span><span class="p">([[</span> <span class="mf">2.</span><span class="p">,</span>  <span class="mf">2.</span><span class="p">,</span>  <span class="mf">2.</span><span class="p">],</span>
+       <span class="p">[</span> <span class="mf">2.</span><span class="p">,</span>  <span class="mf">2.</span><span class="p">,</span>  <span class="mf">2.</span><span class="p">],</span>
+       <span class="p">[</span> <span class="mf">2.</span><span class="p">,</span>  <span class="mf">2.</span><span class="p">,</span>  <span class="mf">2.</span><span class="p">],</span>
+       <span class="p">[</span> <span class="mf">2.</span><span class="p">,</span>  <span class="mf">2.</span><span class="p">,</span>  <span class="mf">2.</span><span class="p">]])</span>
+
+<span class="c1"># Is the same as:</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">94</span><span class="p">]:</span> <span class="n">one</span> <span class="o">=</span> <span class="n">ones</span><span class="p">((</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">95</span><span class="p">]:</span> <span class="n">one</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">95</span><span class="p">]:</span> <span class="n">array</span><span class="p">([[</span> <span class="mf">1.</span><span class="p">]])</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">96</span><span class="p">]:</span> <span class="n">ones</span><span class="p">((</span><span class="mi">4</span><span class="p">,</span> <span class="mi">3</span><span class="p">))</span> <span class="o">+</span> <span class="n">one</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">96</span><span class="p">]:</span>
+<span class="n">array</span><span class="p">([[</span> <span class="mf">2.</span><span class="p">,</span>  <span class="mf">2.</span><span class="p">,</span>  <span class="mf">2.</span><span class="p">],</span>
+       <span class="p">[</span> <span class="mf">2.</span><span class="p">,</span>  <span class="mf">2.</span><span class="p">,</span>  <span class="mf">2.</span><span class="p">],</span>
+       <span class="p">[</span> <span class="mf">2.</span><span class="p">,</span>  <span class="mf">2.</span><span class="p">,</span>  <span class="mf">2.</span><span class="p">],</span>
+       <span class="p">[</span> <span class="mf">2.</span><span class="p">,</span>  <span class="mf">2.</span><span class="p">,</span>  <span class="mf">2.</span><span class="p">]])</span>
+</pre></div>
+</div>
+<div class="section" id="explicit-broadcasting-with-numpy-broadcast">
+<h2>Explicit broadcasting with numpy.broadcast</h2>
+<p>In the examples above, we've seen how Numpy employs broadcasting behind the
+scenes to match together arrays that have compatible, but not similar, shapes.
+We can also ask Numpy for a more explicit exposure of broadcasting, using the
+<tt class="docutils literal">numpy.broadcast</tt> class:</p>
+<div class="highlight"><pre><span></span><span class="n">In</span> <span class="p">[</span><span class="mi">103</span><span class="p">]:</span> <span class="n">macros</span><span class="o">.</span><span class="n">shape</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">103</span><span class="p">]:</span> <span class="p">(</span><span class="mi">4</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">104</span><span class="p">]:</span> <span class="n">cal_per_macro</span><span class="o">.</span><span class="n">shape</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">104</span><span class="p">]:</span> <span class="p">(</span><span class="mi">3</span><span class="p">,)</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">105</span><span class="p">]:</span> <span class="n">b</span> <span class="o">=</span> <span class="n">broadcast</span><span class="p">(</span><span class="n">macros</span><span class="p">,</span> <span class="n">cal_per_macro</span><span class="p">)</span>
+</pre></div>
+<p>Now <tt class="docutils literal">b</tt> is an object of type <tt class="docutils literal">numpy.broadcast</tt>, and we can query it for the
+result shape of broadcasting, as well as use it to iterate over pairs of
+elements from the input arrays in the order matched by broadcasting them:</p>
+<div class="highlight"><pre><span></span><span class="n">In</span> <span class="p">[</span><span class="mi">108</span><span class="p">]:</span> <span class="n">b</span><span class="o">.</span><span class="n">shape</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">108</span><span class="p">]:</span> <span class="p">(</span><span class="mi">4</span><span class="p">,</span> <span class="mi">3</span><span class="p">)</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">120</span><span class="p">]:</span> <span class="k">for</span> <span class="n">i</span><span class="p">,</span> <span class="n">j</span> <span class="ow">in</span> <span class="n">b</span><span class="p">:</span>
+              <span class="nb">print</span> <span class="s1">&#39;</span><span class="si">{0}</span><span class="s1">:  </span><span class="si">{1}</span><span class="s1">  </span><span class="si">{2}</span><span class="s1">&#39;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">b</span><span class="o">.</span><span class="n">index</span><span class="p">,</span> <span class="n">i</span><span class="p">,</span> <span class="n">j</span><span class="p">)</span>
+   <span class="o">.....</span><span class="p">:</span>
+<span class="mi">1</span><span class="p">:</span>  <span class="mf">0.3</span>  <span class="mi">9</span>
+<span class="mi">2</span><span class="p">:</span>  <span class="mf">2.5</span>  <span class="mi">4</span>
+<span class="mi">3</span><span class="p">:</span>  <span class="mf">3.5</span>  <span class="mi">4</span>
+<span class="mi">4</span><span class="p">:</span>  <span class="mf">2.9</span>  <span class="mi">9</span>
+<span class="mi">5</span><span class="p">:</span>  <span class="mf">27.5</span>  <span class="mi">4</span>
+<span class="mi">6</span><span class="p">:</span>  <span class="mf">0.0</span>  <span class="mi">4</span>
+<span class="mi">7</span><span class="p">:</span>  <span class="mf">0.4</span>  <span class="mi">9</span>
+<span class="mi">8</span><span class="p">:</span>  <span class="mf">1.3</span>  <span class="mi">4</span>
+<span class="mi">9</span><span class="p">:</span>  <span class="mf">23.9</span>  <span class="mi">4</span>
+<span class="mi">10</span><span class="p">:</span>  <span class="mf">14.4</span>  <span class="mi">9</span>
+<span class="mi">11</span><span class="p">:</span>  <span class="mf">6.0</span>  <span class="mi">4</span>
+<span class="mi">12</span><span class="p">:</span>  <span class="mf">2.3</span>  <span class="mi">4</span>
+</pre></div>
+<p>This lets us see very explicitly how the &quot;stretching&quot; of <tt class="docutils literal">cal_per_macro</tt> is
+done to match the shape of <tt class="docutils literal">macros</tt>. So if you ever want to perform some
+complex computation on two arrays whose shapes aren't similar but compatible,
+and you want to use broadcasting, <tt class="docutils literal">numpy.broadcast</tt> can help.</p>
+</div>
+<div class="section" id="computing-outer-products-with-broadcasting">
+<h2>Computing outer products with broadcasting</h2>
+<p>As another cool example of broadcasting rules, consider the outer product of two
+vectors.</p>
+<p>In linear algebra, it is customary to deal with column vectors by default, using
+a transpose for row vector. Therefore, given two vectors
+<img alt="x" class="valign-0" src="../../images/math/11f6ad8ec52a2984abaafd7c3b516503785c2072.png" style="height: 8px;" /> and <img alt="y" class="valign-m4" src="../../images/math/95cb0bfd2977c761298d9624e4b4d4c72a39974a.png" style="height: 12px;" />, their &quot;outer product&quot; is defined as <img alt="xy^T" class="valign-m4" src="../../images/math/2903d8355c674ee7c2e06b7ba1940714f100243e.png" style="height: 19px;" />.
+Treating <img alt="x" class="valign-0" src="../../images/math/11f6ad8ec52a2984abaafd7c3b516503785c2072.png" style="height: 8px;" /> and <img alt="y" class="valign-m4" src="../../images/math/95cb0bfd2977c761298d9624e4b4d4c72a39974a.png" style="height: 12px;" /> as Nx1 matrices
+this matrix multiplication results in:</p>
+<img alt="\[xy^T=\begin{bmatrix} x_1 \\ x_2 \\ ... \\ x_N \end{bmatrix}[y_1, y_2, ..., y_N]= \begin{bmatrix} x_1y_1 &amp;amp; x_1y_2 &amp;amp; \cdots &amp;amp; x_1y_N \\ x_2y_1 &amp;amp; x_2y_2 &amp;amp; \cdots &amp;amp; x_2y_N \\ \vdots\\ x_Ny_1 &amp;amp; x_Ny_2 &amp;amp; \cdots &amp;amp; x_Ny_N \\ \end{bmatrix}\]" class="align-center" src="../../images/math/d4c1d88533494c698a0628fe472bb099b2195a13.png" style="height: 97px;" />
+<p>How can we implement this in Numpy? Note that the shape of the row vector is
+<tt class="docutils literal">(1, N)</tt> <a class="footnote-reference" href="index.html#footnote-5" id="footnote-reference-5">[5]</a>. The shape of the column vector is <tt class="docutils literal">(N, 1)</tt>. Therefore, if
+we apply an element-wise operation between them, broadcasting will kick in, find
+that the shapes are compatible and the result shape is <tt class="docutils literal">(N, N)</tt>. The row
+vector is going to be &quot;stretched&quot; over N rows and the column vector over N
+columns - so we'll get the outer product! Here's an interactive session that
+demonstrates this:</p>
+<div class="highlight"><pre><span></span><span class="n">In</span> <span class="p">[</span><span class="mi">137</span><span class="p">]:</span> <span class="n">ten</span> <span class="o">=</span> <span class="n">arange</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">11</span><span class="p">)</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">138</span><span class="p">]:</span> <span class="n">ten</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">138</span><span class="p">]:</span> <span class="n">array</span><span class="p">([</span> <span class="mi">1</span><span class="p">,</span>  <span class="mi">2</span><span class="p">,</span>  <span class="mi">3</span><span class="p">,</span>  <span class="mi">4</span><span class="p">,</span>  <span class="mi">5</span><span class="p">,</span>  <span class="mi">6</span><span class="p">,</span>  <span class="mi">7</span><span class="p">,</span>  <span class="mi">8</span><span class="p">,</span>  <span class="mi">9</span><span class="p">,</span> <span class="mi">10</span><span class="p">])</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">139</span><span class="p">]:</span> <span class="n">ten</span><span class="o">.</span><span class="n">shape</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">139</span><span class="p">]:</span> <span class="p">(</span><span class="mi">10</span><span class="p">,)</span>
+
+<span class="c1"># Using Numpy&#39;s reshape method to convert the row vector into a</span>
+<span class="c1"># column vector.</span>
+<span class="n">In</span> <span class="p">[</span><span class="mi">140</span><span class="p">]:</span> <span class="n">ten</span><span class="o">.</span><span class="n">reshape</span><span class="p">((</span><span class="mi">10</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">140</span><span class="p">]:</span>
+<span class="n">array</span><span class="p">([[</span> <span class="mi">1</span><span class="p">],</span>
+       <span class="p">[</span> <span class="mi">2</span><span class="p">],</span>
+       <span class="p">[</span> <span class="mi">3</span><span class="p">],</span>
+       <span class="p">[</span> <span class="mi">4</span><span class="p">],</span>
+       <span class="p">[</span> <span class="mi">5</span><span class="p">],</span>
+       <span class="p">[</span> <span class="mi">6</span><span class="p">],</span>
+       <span class="p">[</span> <span class="mi">7</span><span class="p">],</span>
+       <span class="p">[</span> <span class="mi">8</span><span class="p">],</span>
+       <span class="p">[</span> <span class="mi">9</span><span class="p">],</span>
+       <span class="p">[</span><span class="mi">10</span><span class="p">]])</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">141</span><span class="p">]:</span> <span class="n">ten</span><span class="o">.</span><span class="n">reshape</span><span class="p">((</span><span class="mi">10</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span><span class="o">.</span><span class="n">shape</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">141</span><span class="p">]:</span> <span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+
+<span class="c1"># Let&#39;s see what the &#39;broadcast&#39; class tells us about the resulting</span>
+<span class="c1"># shape of broadcasting ten and its column-vector version</span>
+<span class="n">In</span> <span class="p">[</span><span class="mi">142</span><span class="p">]:</span> <span class="n">broadcast</span><span class="p">(</span><span class="n">ten</span><span class="p">,</span> <span class="n">ten</span><span class="o">.</span><span class="n">reshape</span><span class="p">((</span><span class="mi">10</span><span class="p">,</span> <span class="mi">1</span><span class="p">)))</span><span class="o">.</span><span class="n">shape</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">142</span><span class="p">]:</span> <span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">10</span><span class="p">)</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">143</span><span class="p">]:</span> <span class="n">ten</span> <span class="o">*</span> <span class="n">ten</span><span class="o">.</span><span class="n">reshape</span><span class="p">((</span><span class="mi">10</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">143</span><span class="p">]:</span>
+<span class="n">array</span><span class="p">([[</span>  <span class="mi">1</span><span class="p">,</span>   <span class="mi">2</span><span class="p">,</span>   <span class="mi">3</span><span class="p">,</span>   <span class="mi">4</span><span class="p">,</span>   <span class="mi">5</span><span class="p">,</span>   <span class="mi">6</span><span class="p">,</span>   <span class="mi">7</span><span class="p">,</span>   <span class="mi">8</span><span class="p">,</span>   <span class="mi">9</span><span class="p">,</span>  <span class="mi">10</span><span class="p">],</span>
+       <span class="p">[</span>  <span class="mi">2</span><span class="p">,</span>   <span class="mi">4</span><span class="p">,</span>   <span class="mi">6</span><span class="p">,</span>   <span class="mi">8</span><span class="p">,</span>  <span class="mi">10</span><span class="p">,</span>  <span class="mi">12</span><span class="p">,</span>  <span class="mi">14</span><span class="p">,</span>  <span class="mi">16</span><span class="p">,</span>  <span class="mi">18</span><span class="p">,</span>  <span class="mi">20</span><span class="p">],</span>
+       <span class="p">[</span>  <span class="mi">3</span><span class="p">,</span>   <span class="mi">6</span><span class="p">,</span>   <span class="mi">9</span><span class="p">,</span>  <span class="mi">12</span><span class="p">,</span>  <span class="mi">15</span><span class="p">,</span>  <span class="mi">18</span><span class="p">,</span>  <span class="mi">21</span><span class="p">,</span>  <span class="mi">24</span><span class="p">,</span>  <span class="mi">27</span><span class="p">,</span>  <span class="mi">30</span><span class="p">],</span>
+       <span class="p">[</span>  <span class="mi">4</span><span class="p">,</span>   <span class="mi">8</span><span class="p">,</span>  <span class="mi">12</span><span class="p">,</span>  <span class="mi">16</span><span class="p">,</span>  <span class="mi">20</span><span class="p">,</span>  <span class="mi">24</span><span class="p">,</span>  <span class="mi">28</span><span class="p">,</span>  <span class="mi">32</span><span class="p">,</span>  <span class="mi">36</span><span class="p">,</span>  <span class="mi">40</span><span class="p">],</span>
+       <span class="p">[</span>  <span class="mi">5</span><span class="p">,</span>  <span class="mi">10</span><span class="p">,</span>  <span class="mi">15</span><span class="p">,</span>  <span class="mi">20</span><span class="p">,</span>  <span class="mi">25</span><span class="p">,</span>  <span class="mi">30</span><span class="p">,</span>  <span class="mi">35</span><span class="p">,</span>  <span class="mi">40</span><span class="p">,</span>  <span class="mi">45</span><span class="p">,</span>  <span class="mi">50</span><span class="p">],</span>
+       <span class="p">[</span>  <span class="mi">6</span><span class="p">,</span>  <span class="mi">12</span><span class="p">,</span>  <span class="mi">18</span><span class="p">,</span>  <span class="mi">24</span><span class="p">,</span>  <span class="mi">30</span><span class="p">,</span>  <span class="mi">36</span><span class="p">,</span>  <span class="mi">42</span><span class="p">,</span>  <span class="mi">48</span><span class="p">,</span>  <span class="mi">54</span><span class="p">,</span>  <span class="mi">60</span><span class="p">],</span>
+       <span class="p">[</span>  <span class="mi">7</span><span class="p">,</span>  <span class="mi">14</span><span class="p">,</span>  <span class="mi">21</span><span class="p">,</span>  <span class="mi">28</span><span class="p">,</span>  <span class="mi">35</span><span class="p">,</span>  <span class="mi">42</span><span class="p">,</span>  <span class="mi">49</span><span class="p">,</span>  <span class="mi">56</span><span class="p">,</span>  <span class="mi">63</span><span class="p">,</span>  <span class="mi">70</span><span class="p">],</span>
+       <span class="p">[</span>  <span class="mi">8</span><span class="p">,</span>  <span class="mi">16</span><span class="p">,</span>  <span class="mi">24</span><span class="p">,</span>  <span class="mi">32</span><span class="p">,</span>  <span class="mi">40</span><span class="p">,</span>  <span class="mi">48</span><span class="p">,</span>  <span class="mi">56</span><span class="p">,</span>  <span class="mi">64</span><span class="p">,</span>  <span class="mi">72</span><span class="p">,</span>  <span class="mi">80</span><span class="p">],</span>
+       <span class="p">[</span>  <span class="mi">9</span><span class="p">,</span>  <span class="mi">18</span><span class="p">,</span>  <span class="mi">27</span><span class="p">,</span>  <span class="mi">36</span><span class="p">,</span>  <span class="mi">45</span><span class="p">,</span>  <span class="mi">54</span><span class="p">,</span>  <span class="mi">63</span><span class="p">,</span>  <span class="mi">72</span><span class="p">,</span>  <span class="mi">81</span><span class="p">,</span>  <span class="mi">90</span><span class="p">],</span>
+       <span class="p">[</span> <span class="mi">10</span><span class="p">,</span>  <span class="mi">20</span><span class="p">,</span>  <span class="mi">30</span><span class="p">,</span>  <span class="mi">40</span><span class="p">,</span>  <span class="mi">50</span><span class="p">,</span>  <span class="mi">60</span><span class="p">,</span>  <span class="mi">70</span><span class="p">,</span>  <span class="mi">80</span><span class="p">,</span>  <span class="mi">90</span><span class="p">,</span> <span class="mi">100</span><span class="p">]])</span>
+</pre></div>
+<p>The output should be familiar to anyone who's finished grade school, of course.</p>
+<p>Interestingly, even though Numpy has a function named <tt class="docutils literal">outer</tt> that computes
+the outer product between two vectors, my timings show that at least in this
+particular case broadcasting multiplication as shown above is more than twice
+as fast - so be sure to always measure.</p>
+</div>
+<div class="section" id="use-the-right-tool-for-the-job">
+<h2>Use the right tool for the job</h2>
+<p>I'll end this article with another educational example that demonstrates a
+problem that can be solved in two different ways, one of which is much more
+efficient because it uses the right tool for the job.</p>
+<p>Back to the original example of counting calories in foods. Suppose I just want
+to know how many calories each serving of food has (total from fats, protein and
+carbs).</p>
+<p>Given the <tt class="docutils literal">macros</tt> data and a <tt class="docutils literal">cal_per_macro</tt> breakdown, we can use
+the broadcasting multiplication as seen before to compute a &quot;calories per macro&quot;
+table efficiently, for each food. All that's left is to add together the columns
+in each row into a sum - this will be the number of calories per serving in that
+food:</p>
+<div class="highlight"><pre><span></span><span class="n">In</span> <span class="p">[</span><span class="mi">160</span><span class="p">]:</span> <span class="n">macros</span> <span class="o">*</span> <span class="n">cal_per_macro</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">160</span><span class="p">]:</span>
+<span class="n">array</span><span class="p">([[</span>   <span class="mf">2.7</span><span class="p">,</span>   <span class="mf">10.</span> <span class="p">,</span>   <span class="mf">14.</span> <span class="p">],</span>
+       <span class="p">[</span>  <span class="mf">26.1</span><span class="p">,</span>  <span class="mf">110.</span> <span class="p">,</span>    <span class="mf">0.</span> <span class="p">],</span>
+       <span class="p">[</span>   <span class="mf">3.6</span><span class="p">,</span>    <span class="mf">5.2</span><span class="p">,</span>   <span class="mf">95.6</span><span class="p">],</span>
+       <span class="p">[</span> <span class="mf">129.6</span><span class="p">,</span>   <span class="mf">24.</span> <span class="p">,</span>    <span class="mf">9.2</span><span class="p">]])</span>
+
+<span class="n">In</span> <span class="p">[</span><span class="mi">161</span><span class="p">]:</span> <span class="nb">sum</span><span class="p">(</span><span class="n">macros</span> <span class="o">*</span> <span class="n">cal_per_macro</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">161</span><span class="p">]:</span> <span class="n">array</span><span class="p">([</span>  <span class="mf">26.7</span><span class="p">,</span>  <span class="mf">136.1</span><span class="p">,</span>  <span class="mf">104.4</span><span class="p">,</span>  <span class="mf">162.8</span><span class="p">])</span>
+</pre></div>
+<p>Here I'm using the <tt class="docutils literal">axis</tt> parameter of the <tt class="docutils literal">sum</tt> function to tell Numpy to
+sum only over axis 1 (columns), rather than computing the sum of the whole
+multi-dimensional array.</p>
+<p>Looks easy. But is there a better way? Indeed, if you think for a moment about
+the operation we've just performed, a natural solution emerges. We've taken a
+vector (<tt class="docutils literal">cal_per_macro</tt>), element-wise multiplied it with each row of
+<tt class="docutils literal">macros</tt> and then added up the results. In other words, we've computed the
+dot-product of <tt class="docutils literal">cal_per_macro</tt> with each row of <tt class="docutils literal">macros</tt>. In linear algebra
+there's already an operation that will do this for the whole input table: matrix
+multiplication. You can work out the details on paper, but it's easy to see that
+multiplying the matrix <tt class="docutils literal">macros</tt> on the right by <tt class="docutils literal">cal_per_macro</tt> as a column
+vector, we get the same result. Let's check:</p>
+<div class="highlight"><pre><span></span><span class="c1"># Create a column vector out of cal_per_macro</span>
+<span class="n">In</span> <span class="p">[</span><span class="mi">168</span><span class="p">]:</span> <span class="n">cal_per_macro_col_vec</span> <span class="o">=</span> <span class="n">cal_per_macro</span><span class="o">.</span><span class="n">reshape</span><span class="p">((</span><span class="mi">3</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+
+<span class="c1"># Use the &#39;dot&#39; function for matrix multiplication. Starting with Python 3.5,</span>
+<span class="c1"># we&#39;ll be able to use an operator instead: macros @ cal_per_macro_col_vec</span>
+<span class="n">In</span> <span class="p">[</span><span class="mi">169</span><span class="p">]:</span> <span class="n">macros</span><span class="o">.</span><span class="n">dot</span><span class="p">(</span><span class="n">cal_per_macro_col_vec</span><span class="p">)</span>
+<span class="n">Out</span><span class="p">[</span><span class="mi">169</span><span class="p">]:</span>
+<span class="n">array</span><span class="p">([[</span>  <span class="mf">26.7</span><span class="p">],</span>
+       <span class="p">[</span> <span class="mf">136.1</span><span class="p">],</span>
+       <span class="p">[</span> <span class="mf">104.4</span><span class="p">],</span>
+       <span class="p">[</span> <span class="mf">162.8</span><span class="p">]])</span>
+</pre></div>
+<p>On my machine, using <tt class="docutils literal">dot</tt> is 4-5x faster than composing <tt class="docutils literal">sum</tt> with
+element-wise multiplication. Even though the latter is implemented in optimized
+C code in the guts of Numpy, it has the disadvantage of moving too much data
+around - computing the intermediate matrix representing the
+broadcasted multiplication is not really necessary for the end product. <tt class="docutils literal">dot</tt>,
+on the other hand, performs the operation in one step using a highly optimized
+<a class="reference external" href="https://en.wikipedia.org/wiki/Basic_Linear_Algebra_Subprograms">BLAS routine</a>.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>For the pedantic: I'm taking these numbers from
+<a class="reference external" href="http://www.calorieking.com">http://www.calorieking.com</a>, and I subtract the fiber from total carbs
+because it doesn't count for the calories.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>About 30% faster than the &quot;stretching&quot; method. This is mostly due to the
+creation of the <tt class="docutils literal"><span class="pre">..._stretch</span></tt> array, which takes time. Once the
+stretched array is there, the broadcasting method is ~5% faster
+- this difference being due to a better use of memory (we don't <em>really</em>
+have to create the whole stretched array, do we? It's just repeating the
+same data so why waste so much memory?)</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>For the shape <tt class="docutils literal">(4, 3, 2)</tt> the trailing dimension is 2, and working from
+2 &quot;backwards&quot; produces: 2, then 3, then 4.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-4">[4]</a></td><td>Following the usual Python convention, single-element tuples also have
+a comma, which helps us destinguish them from other entities.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-5">[5]</a></td><td>More precisely, <tt class="docutils literal">(1, N)</tt> is the shape of a 1-by-N matrix (matrix with
+one row and N columns). An actual row vector is just a 1D array with the
+single-dimension shape <tt class="docutils literal">(10,)</tt>. For most purposes, the two are
+equivalent in Numpy.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

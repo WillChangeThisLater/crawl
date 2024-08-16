@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Python internals: Symbol tables, part 2 - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../../index.html" class="navbar-brand">
+                <img src="../../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="../python-internals-symbol-tables-part-2.html"
+                       rel="bookmark"
+                       title="Permalink to Python internals: Symbol tables, part 2">
+                        Python internals: Symbol tables, part 2
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> September 20, 2010 at 07:59</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../../tag/python-internals.html">Python internals</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>This is the second part of the article. Make sure you read the <a class="reference external" href="../../18/python-internals-symbol-tables-part-1/index.html">first part</a> before this one.</p>
+<p>In this article I will explain how symbol tables are implemented in the CPython core <a class="footnote-reference" href="index.html#id10" id="id1">[1]</a>. The implementation itself is contained mainly in two files, the header <tt class="docutils literal"><span class="pre">Include/symtable.h</span></tt> and the C source file <tt class="docutils literal"><span class="pre">Python/symtable.c</span></tt>.</p>
+<p>My strategy for understanding the implementation will follow Fred Brooks' advice from his book <em>The Mythical Man-Month</em>:</p>
+<blockquote>
+Show me your flowchart and conceal your tables, and I shall continue to be mystified. Show me your tables, and I won't usually need your flowchart; it'll be obvious.</blockquote>
+<p>A more modern translation would be: &quot;The key to understanding a program is to understand its data structures. With that in hand, the algorithms usually become obvious.&quot;</p>
+<p>This is especially true when the data structures of some module closely model the problem this module intends to solve, and the algorithms' job is to correctly create and use these data structures. Fortunately, this is exactly the case in CPython's implementation of symbol tables. Without further ado, let's delve in.</p>
+<div class="section" id="symbol-table-entries">
+<h3>Symbol table entries</h3>
+<p>The key data structure to study is the symbol table <em>entry</em>, named <tt class="docutils literal"><span class="pre">PySTEntryObject</span></tt> <a class="footnote-reference" href="index.html#id11" id="id2">[2]</a>:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">typedef</span> <span style="color: #00007f; font-weight: bold">struct</span> _symtable_entry {
+    PyObject_HEAD
+    PyObject *ste_id;
+    PyObject *ste_symbols;
+    PyObject *ste_name;
+    PyObject *ste_varnames;
+    PyObject *ste_children;
+    _Py_block_ty ste_type;
+    <span style="color: #00007f; font-weight: bold">int</span> ste_unoptimized;
+    <span style="color: #00007f; font-weight: bold">int</span> ste_nested;
+    <span style="color: #00007f; font-weight: bold">unsigned</span> ste_free : <span style="color: #007f7f">1</span>;
+    <span style="color: #00007f; font-weight: bold">unsigned</span> ste_child_free : <span style="color: #007f7f">1</span>;
+    <span style="color: #00007f; font-weight: bold">unsigned</span> ste_generator : <span style="color: #007f7f">1</span>;
+    <span style="color: #00007f; font-weight: bold">unsigned</span> ste_varargs : <span style="color: #007f7f">1</span>;
+    <span style="color: #00007f; font-weight: bold">unsigned</span> ste_varkeywords : <span style="color: #007f7f">1</span>;
+    <span style="color: #00007f; font-weight: bold">unsigned</span> ste_returns_value : <span style="color: #007f7f">1</span>;
+    <span style="color: #00007f; font-weight: bold">int</span> ste_lineno;
+    <span style="color: #00007f; font-weight: bold">int</span> ste_opt_lineno;
+    <span style="color: #00007f; font-weight: bold">int</span> ste_tmpname;
+    <span style="color: #00007f; font-weight: bold">struct</span> symtable *ste_table;
+} PySTEntryObject;
+</pre></div>
+<p>Before I explain what each field in the structure means, some background is in order. An entry object is created for each <em>block</em> in the Python source code. A block <a class="reference external" href="http://docs.python.org/dev/reference/executionmodel.html">is defined</a> as:</p>
+<blockquote>
+[...] A piece of Python program text that is executed as a unit. The following are blocks: a module, a function body and a class definition. [...]</blockquote>
+<p>Therefore, if we have the following definition in our Python source:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">outer</span>(aa):
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">inner</span>():
+        bb = <span style="color: #007f7f">1</span>
+        <span style="color: #00007f; font-weight: bold">return</span> aa + bb + cc
+    dd = aa + inner()
+    <span style="color: #00007f; font-weight: bold">return</span> dd
+</pre></div>
+<p>The definition of <tt class="docutils literal"><span class="pre">outer</span></tt> creates a block with its body. So does the definition of <tt class="docutils literal"><span class="pre">inner</span></tt>. In addition, the top-level module in which <tt class="docutils literal"><span class="pre">outer</span></tt> is defined is also a block. All these blocks are represented by symbol table entries.</p>
+<p>In essence, each entry is a symbol table on its own, containing information on the symbols in the block it represents. These entries are linked together into hierarchies, to represent nested blocks.</p>
+<p>Once again, the <tt class="docutils literal"><span class="pre">symtable</span></tt> module can be used to explore these entries. In the first part of the article I used it to show what CPython knows about the symbols, but here I want to show how entries work. Here's a function that uses <tt class="docutils literal"><span class="pre">symtable</span></tt> to show how entries nest:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">describe_symtable</span>(st, recursive=<span style="color: #00007f">True</span>, indent=<span style="color: #007f7f">0</span>):
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">print_d</span>(s, *args):
+        prefix = <span style="color: #7f007f">&#39; &#39;</span> * indent
+        <span style="color: #00007f; font-weight: bold">print</span>(prefix + s, *args)
+
+    <span style="color: #00007f; font-weight: bold">assert</span> <span style="color: #00007f">isinstance</span>(st, symtable.SymbolTable)
+    print_d(<span style="color: #7f007f">&#39;Symtable: type=%s, id=%s, name=%s&#39;</span> % (
+                st.get_type(), st.get_id(), st.get_name()))
+    print_d(<span style="color: #7f007f">&#39;  nested:&#39;</span>, st.is_nested())
+    print_d(<span style="color: #7f007f">&#39;  has children:&#39;</span>, st.has_children())
+    print_d(<span style="color: #7f007f">&#39;  identifiers:&#39;</span>, <span style="color: #00007f">list</span>(st.get_identifiers()))
+
+    <span style="color: #00007f; font-weight: bold">if</span> recursive:
+        <span style="color: #00007f; font-weight: bold">for</span> child_st <span style="color: #0000aa">in</span> st.get_children():
+            describe_symtable(child_st, recursive, indent + <span style="color: #007f7f">5</span>)
+</pre></div>
+<p>When executed on the symbol table created from the Python code we saw earlier, it prints out:</p>
+<div class="highlight"><pre>Symtable: type=module, id=164192096, name=top
+  nested: False
+  has children: True
+  identifiers: [&#39;outer&#39;]
+     Symtable: type=function, id=164192056, name=outer
+       nested: False
+       has children: True
+       identifiers: [&#39;aa&#39;, &#39;dd&#39;, &#39;inner&#39;]
+          Symtable: type=function, id=164191736, name=inner
+            nested: True
+            has children: False
+            identifiers: [&#39;aa&#39;, &#39;cc&#39;, &#39;bb&#39;]
+</pre></div>
+<p>Note how entries are nested. The top-level entry representing the module has the entry for <tt class="docutils literal"><span class="pre">outer</span></tt> as its child, which in turn has the entry for <tt class="docutils literal"><span class="pre">inner</span></tt> as its child.</p>
+<p>With this understood, we can go over the fields of the <tt class="docutils literal"><span class="pre">PySTEntryObject</span></tt> struct and explain what each one means <a class="footnote-reference" href="index.html#id12" id="id3">[3]</a>. Note that I use the terms &quot;block&quot; and &quot;entry&quot; interchangeably.</p>
+<ul class="simple">
+<li><tt class="docutils literal"><span class="pre">ste_id</span></tt>: a unique integer ID for the entry taken as the Python object ID of the AST node it was created from.</li>
+<li><tt class="docutils literal"><span class="pre">ste_symbols</span></tt>: the actual symbol table of this entry, a Python <tt class="docutils literal"><span class="pre">dict</span></tt> object mapping symbol names to flags that describe them. See the <tt class="docutils literal"><span class="pre">describe_symbol</span></tt> function <a class="reference external" href="../../18/python-internals-symbol-tables-part-1/index.html">in part 1 of the article</a> to understand what information is stored in the flags for each symbol. All the symbols that are used in the block (whether defined or only referenced) are mapped here.</li>
+<li><tt class="docutils literal"><span class="pre">ste_name</span></tt>: block name (if applicable). For example, for the function <tt class="docutils literal"><span class="pre">outer</span></tt>, the name is <tt class="docutils literal"><span class="pre">outer</span></tt>. Used primarily for debugging and error reporting.</li>
+<li><tt class="docutils literal"><span class="pre">ste_varnames</span></tt>: the name of the field (as well as the comment that follows it) is somewhat misleading <a class="footnote-reference" href="index.html#id13" id="id4">[4]</a>. It's actually a list of the <em>parameters</em> of the block. For example, for the <tt class="docutils literal"><span class="pre">outer</span></tt> function in the example it's a list with the single name <tt class="docutils literal"><span class="pre">aa</span></tt>.</li>
+<li><tt class="docutils literal"><span class="pre">ste_children</span></tt>: list of child blocks (also <tt class="docutils literal"><span class="pre">PySTEntryObject</span></tt> objects). As we saw earlier, blocks are nested, modeling the nesting of scopes in the Python source.</li>
+<li><tt class="docutils literal"><span class="pre">ste_type</span></tt>: a value of the enumeration type <tt class="docutils literal"><span class="pre">_Py_block_ty</span></tt> which has three possible values: <tt class="docutils literal"><span class="pre">FunctionBlock</span></tt>, <tt class="docutils literal"><span class="pre">ClassBlock</span></tt>, <tt class="docutils literal"><span class="pre">ModuleBlock</span></tt> for the three kinds of blocks supported by the symbol table.</li>
+<li><tt class="docutils literal"><span class="pre">ste_unoptimized</span></tt>: this flag helps deal with some special blocks (top-level and those containing <tt class="docutils literal"><span class="pre">import</span> <span class="pre">*</span></tt>). It's safe to ignore it for our purposes.</li>
+<li><tt class="docutils literal"><span class="pre">ste_nested</span></tt>: An integer flag: 1 if it's a function block nested in some other function block (like our <tt class="docutils literal"><span class="pre">inner</span></tt> function), 0 otherwise.</li>
+<li>Next come some other flags with information about the block: <tt class="docutils literal"><span class="pre">ste_free</span></tt>, <tt class="docutils literal"><span class="pre">ste_child_free</span></tt>, <tt class="docutils literal"><span class="pre">ste_generator</span></tt>, <tt class="docutils literal"><span class="pre">ste_varargs</span></tt>, <tt class="docutils literal"><span class="pre">ste_varkeywords</span></tt> and <tt class="docutils literal"><span class="pre">ste_returns_value</span></tt>. The comments after these flags describe them quite well.</li>
+<li><tt class="docutils literal"><span class="pre">ste_lineno</span></tt>: number of the first line of the block in the Python source - taken directly from the AST.</li>
+<li><tt class="docutils literal"><span class="pre">ste_opt_lineno</span></tt>: related to the <tt class="docutils literal"><span class="pre">ste_unoptimized</span></tt> flag. Again, we'll ignore it for now.</li>
+<li><tt class="docutils literal"><span class="pre">ste_tmpname</span></tt>: used to generate temporary names of variables in comprehensions</li>
+<li><tt class="docutils literal"><span class="pre">ste_table</span></tt>: link to the <tt class="docutils literal"><span class="pre">symtable</span></tt> object this entry is part of.</li>
+</ul>
+<p>As I mentioned above, the entry is the key data structure in CPython's symbol table code. When the symbol table creation algorithm finishes running, we get a set of inter-linked (for nesting) entries which contain information about all the symbols defined and used in our code. These entries are used in later stages of the compiler to generate bytecode from the AST.</p>
+</div>
+<div class="section" id="symtable">
+<h3>symtable</h3>
+<p><tt class="docutils literal"><span class="pre">symtable</span></tt> is less important for the <em>usage</em> of symbol tables by the compiler, but it's essential for the initial construction of a symbol table from the AST.</p>
+<p>The symbol table construction algorithm uses an instance of the <tt class="docutils literal"><span class="pre">symtable</span></tt> structure to keep its state as it walks the AST recursively and builds entries for the blocks it finds.</p>
+<p>Here are the fields of <tt class="docutils literal"><span class="pre">symtable</span></tt> annotated:</p>
+<ul class="simple">
+<li><tt class="docutils literal"><span class="pre">st_filename</span></tt>: name of the file being compiled - used for generating meaningful warnings and errors.</li>
+<li><tt class="docutils literal"><span class="pre">st_cur</span></tt>: the current entry (<tt class="docutils literal"><span class="pre">PySTEntryObject</span></tt>) the construction algorithm is in. Think of it (together with <tt class="docutils literal"><span class="pre">st_stack</span></tt>) as the current state of the algorithm as it walks the AST nodes recursively to create new entries.</li>
+<li><tt class="docutils literal"><span class="pre">st_top</span></tt>: top-level entry for the module. Serves as the entry-point for the second pass of the symbol table construction algorithm.</li>
+<li><tt class="docutils literal"><span class="pre">st_blocks</span></tt>: a dict mapping entry IDs (<tt class="docutils literal"><span class="pre">ste_id</span></tt>) to entry objects. Can be used to find the entry for some AST node.</li>
+<li><tt class="docutils literal"><span class="pre">st_stack</span></tt>: a list representing a stack of entries. Used when working on nested blocks.</li>
+<li><tt class="docutils literal"><span class="pre">st_global</span></tt>: direct link to the <tt class="docutils literal"><span class="pre">ste_symbols</span></tt> dict of the top-level module entry (<tt class="docutils literal"><span class="pre">st_top</span></tt>). Useful for accessing global (module-level) definitions from anywhere.</li>
+<li><tt class="docutils literal"><span class="pre">st_nblocks</span></tt> / <tt class="docutils literal"><span class="pre">st_future</span></tt>: these fields aren't being used anywhere in the source so we'll ignore them.</li>
+<li><tt class="docutils literal"><span class="pre">st_private</span></tt>: the name of the current class. This field is used for &quot;mangling&quot; private variables in classes <a class="footnote-reference" href="index.html#id14" id="id5">[5]</a>.</li>
+</ul>
+</div>
+<div class="section" id="midway-recap-what-we-have-so-far">
+<h3>Midway recap: what we have so far</h3>
+<p>Now that we have the data structures covered, it should be much simpler to understand the code implementing symbol table construction. There's no need to memorize the meanings of all fields - they can serve as a reference when reading the rest of the article and/or the source code. But it's definitely recommended to go over them at least once to have a general sense of what each data structure contains.</p>
+</div>
+<div class="section" id="constructing-the-symbol-table-algorithm-outline">
+<h3>Constructing the symbol table: algorithm outline</h3>
+<p>Once we have a clear notion in our head of what information the symbol table eventually contains, the algorithm for constructing it is quite obvious. In the following diagram I've sketched an outline:</p>
+<div align="center" class="align-center"><img class="align-center" src="../../../../images/2010/09/symtable_creation_passes.png" /></div>
+<p>The algorithm is divided into two passes <a class="footnote-reference" href="index.html#id15" id="id6">[6]</a>. The first pass creates the basic structure of entries modeling the blocks in the source code and marks some of the simple information easily available directly in the AST - for example, which symbols are defined and referenced in each block.</p>
+<p>The second pass walks the symbol table and infers the less obvious information about symbols: which symbols are free, which are implicitly global, etc.</p>
+</div>
+<div class="section" id="constructing-the-symbol-table-first-pass">
+<h3>Constructing the symbol table: first pass</h3>
+<p>The implementation of the first pass of the algorithm consumes a good chunk of the source-code of <tt class="docutils literal"><span class="pre">Python/symtable.c</span></tt>, but it's actually quite simple to understand, because the bulk of it exists to deal with the large variety of AST nodes Python generates.</p>
+<p>First, let's take a look at how new blocks get created. When a new block-defining-statement (such as the top-level module or a function/class definition) is encountered, <tt class="docutils literal"><span class="pre">symtable_enter_block</span></tt> is called. It creates a new block and handles nesting by using <tt class="docutils literal"><span class="pre">st-&gt;st_stack</span></tt> <a class="footnote-reference" href="index.html#id16" id="id7">[7]</a>, making sure <tt class="docutils literal"><span class="pre">st-&gt;st_cur</span></tt> always points to the currently processed block. The complementary function <tt class="docutils literal"><span class="pre">symtable_exit_block</span></tt> is called when a block has been processed. It uses <tt class="docutils literal"><span class="pre">st-&gt;st_stack</span></tt> to roll <tt class="docutils literal"><span class="pre">st-&gt;st_cur</span></tt> back to the enclosing block.</p>
+<p>The next function that's important to understand is <tt class="docutils literal"><span class="pre">symtable_add_def</span></tt>. Its name could be clearer, though, since it's being called not only for symbol definitions but also for symbol <em>uses</em> (recall that the symbol table keeps track of which symbols are being used in which blocks). What it does is basically add a flag to the symbols dict (<tt class="docutils literal"><span class="pre">ste_symbols</span></tt>) of an entry that specifies the symbol's definition or use.</p>
+<p>The rest of the code of the first pass is just a bunch of AST visiting functions that are implemented in a manner similar to other AST walkers in the CPython code base. There's a <tt class="docutils literal"><span class="pre">symtable_visit_&lt;type&gt;</span></tt> function for every major <tt class="docutils literal"><span class="pre">&lt;type&gt;</span></tt> of AST node the symbol table is interested in, along with a family of <tt class="docutils literal"><span class="pre">VISIT_*</span></tt> macros that help keep the code shorter.</p>
+<p>I will pick a couple of examples to demonstrate the stuff explained earlier.</p>
+<p>The most interesting would be handling function definitions in <tt class="docutils literal"><span class="pre">symtable_visit_stmt</span></tt>, under <tt class="docutils literal"><span class="pre">case</span> <span class="pre">FunctionDef_kind</span></tt>:</p>
+<ul class="simple">
+<li>First the function's name is added as a definition to the current block</li>
+<li>Next, default values, annotations and decorators are recursively visited.</li>
+<li>Since the function definition creates a new block, <tt class="docutils literal"><span class="pre">symtable_enter_block</span></tt> is called, only after which the actual function arguments and body get visited. Then, <tt class="docutils literal"><span class="pre">symtable_exit_block</span></tt> is called to get back to the parent block.</li>
+</ul>
+<p>Another interesting example is the <tt class="docutils literal"><span class="pre">case</span> <span class="pre">Yield_kind</span></tt> code of <tt class="docutils literal"><span class="pre">symtable_visit_expr</span></tt> that handles <tt class="docutils literal"><span class="pre">yield</span></tt> statements. After visiting the yielded value (if any), the current block is marked as a generator. Since returning values from generators isn't allowed, the algorithm raises a syntax error if the block is also marked as returning a value <a class="footnote-reference" href="index.html#id17" id="id8">[8]</a>.</p>
+<p>The output of the first pass is a structurally complete symbol table, consisting of nested entries that model the blocks in the source code. At this stage the symbol table contains only partial information about symbols, however. Although it already maps all symbols defined and used in the code, and even flags special cases such as global symbols and generators, it still lacks some information, such as the distinction between free symbols that are defined in enclosing scopes and implicitly global symbols. This is the job of the second pass <a class="footnote-reference" href="index.html#id18" id="id9">[9]</a>.</p>
+</div>
+<div class="section" id="constructing-the-symbol-table-second-pass">
+<h3>Constructing the symbol table: second pass</h3>
+<p>The second pass is actually documented not badly in the comments inside <tt class="docutils literal"><span class="pre">Python/symtable.c</span></tt>. However, these comments are scattered all over the place, so I'll try to provide a quick summary that should serve as a good starting point for reading the commented source. I will use a concrete example along with my explanation to aid understanding.</p>
+<p>Here's our sample Python code once again:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">outer</span>(aa):
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">inner</span>():
+        bb = <span style="color: #007f7f">1</span>
+        <span style="color: #00007f; font-weight: bold">return</span> aa + bb + cc
+    dd = aa + inner()
+    <span style="color: #00007f; font-weight: bold">return</span> dd
+</pre></div>
+<p>Let's focus on the symbols used in <tt class="docutils literal"><span class="pre">inner</span></tt>. After the first pass, the algorithm knows the following:</p>
+<ol class="arabic simple">
+<li><tt class="docutils literal"><span class="pre">bb</span></tt> is bound in <tt class="docutils literal"><span class="pre">inner</span></tt></li>
+<li><tt class="docutils literal"><span class="pre">aa</span></tt> is bound (as a parameter) in <tt class="docutils literal"><span class="pre">outer</span></tt></li>
+<li><tt class="docutils literal"><span class="pre">aa</span></tt>, <tt class="docutils literal"><span class="pre">bb</span></tt>, <tt class="docutils literal"><span class="pre">cc</span></tt> are used in <tt class="docutils literal"><span class="pre">inner</span></tt></li>
+</ol>
+<p>With this information, the algorithm should infer that <tt class="docutils literal"><span class="pre">aa</span></tt> is free and <tt class="docutils literal"><span class="pre">cc</span></tt> is global. For this, it runs another analysis, this time on the entries, pushing information from parent blocks into child blocks and back up again.</p>
+<p>For example, when it analyzes <tt class="docutils literal"><span class="pre">inner</span></tt>, the second pass takes along a set of all variables bound in <tt class="docutils literal"><span class="pre">inner</span></tt>'s parent (enclosing) scopes - <tt class="docutils literal"><span class="pre">aa</span></tt> and <tt class="docutils literal"><span class="pre">dd</span></tt>. In the analysis of <tt class="docutils literal"><span class="pre">inner</span></tt>, seeing that <tt class="docutils literal"><span class="pre">aa</span></tt> is used but not defined in <tt class="docutils literal"><span class="pre">inner</span></tt> but is defined in an enclosing scope, it can go on and mark <tt class="docutils literal"><span class="pre">aa</span></tt> as a free variable in the <tt class="docutils literal"><span class="pre">ste_symbols</span></tt> dict for <tt class="docutils literal"><span class="pre">inner</span></tt>'s entry. Similarly, seeing that <tt class="docutils literal"><span class="pre">cc</span></tt> is not defined in any enclosing scope, it marks it global.</p>
+<p>The information has to travel back up as well. An implementation detail of CPython which we won't get into in this article is &quot;cells&quot; which are used to implement free variables. For the purposes of the symbol table, all we need to know is that the symbol table is required to mark which variables serve as cells in an enclosing scopes for free variables in child scopes. So the algorithm should mark <tt class="docutils literal"><span class="pre">aa</span></tt> as a cell variable in <tt class="docutils literal"><span class="pre">outer</span></tt>. For this, it should first analyze <tt class="docutils literal"><span class="pre">inner</span></tt> and find out it's free there.</p>
+<p>The most important function of the second pass is <tt class="docutils literal"><span class="pre">analyze_block</span></tt> - it is being called over and over again for each block in the symbol table. The arguments of <tt class="docutils literal"><span class="pre">analyze_block</span></tt> are:</p>
+<ul class="simple">
+<li><tt class="docutils literal"><span class="pre">ste</span></tt>: The symbol table entry for the block to analyze</li>
+<li><tt class="docutils literal"><span class="pre">bound</span></tt>: a set of all variables bound in enclosing scopes</li>
+<li><tt class="docutils literal"><span class="pre">global</span></tt>: a set of all variables declared global in enclosing scopes</li>
+<li><tt class="docutils literal"><span class="pre">free</span></tt>: output from the function - the set of all free variables in this entry and its enclosed scopes</li>
+</ul>
+<p>Using a couple of auxiliary functions, <tt class="docutils literal"><span class="pre">analyze_block</span></tt> calls itself recursively on the child blocks of the given block, passing around and gathering the required information. Apart from creating the <tt class="docutils literal"><span class="pre">free</span></tt> set for the enclosing scope, <tt class="docutils literal"><span class="pre">analyze_block</span></tt> modifies <tt class="docutils literal"><span class="pre">ste</span></tt> as it finds new information about symbols in it.</p>
+<p><em>Special thanks to Nick Coghlan for reviewing this article.</em></p>
+<div align="center" class="align-center"><img class="align-center" src="../../../../images/hline.jpg" style="width: 320px; height: 5px;" /></div>
+<table class="docutils footnote" frame="void" id="id10" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id1">[1]</a></td><td>The specific version I'm describing is a relatively up-to-date snapshot of the <tt class="docutils literal"><span class="pre">py3k</span></tt> branch, in other words the &quot;cutting edge&quot; of CPython.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id11" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id2">[2]</a></td><td>The struct declaration in <tt class="docutils literal"><span class="pre">Include/symtable.h</span></tt> has short comments after each field. I've removed those intentionally.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id12" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id3">[3]</a></td><td>It helps to have the relevant code open in a separate window while reading this article, in particular this section. Also keep in mind that many of the fields are implemented as actual Python objects (created by the CPython C API), so when I say a list or a dict it's an actual Python list or a dict, the interaction with which is via its C API.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id13" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id4">[4]</a></td><td>The reason for the confusing name may be this list's later role in the compiler's flow in the creation of a code object. The <tt class="docutils literal"><span class="pre">co_varnames</span></tt> field of a code object contains the names of all local variables in a block starting with the parameter names (actually taken by the compiler from the <tt class="docutils literal"><span class="pre">ste_varnames</span></tt> field of the symbol table).</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id14" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id5">[5]</a></td><td>Look up &quot;python private name mangling&quot; on Google if you're not familiar with the mangling of private (marked by starting with two or more underscores) identifiers in Python classes.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id15" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id6">[6]</a></td><td>You may be wondering why two passes are required and a single one isn't enough. It's a good question that ponders some philosophical and stylistic issues behind the practice of software development. My guess is that while the task could've been accomplished in a single pass, the multi-pass approach allows the code to be simplified at the cost of a very modest (if any) hit in performance. Sometimes splitting algorithms into multiple steps makes them much easier to grasp - readability and maintainability are important traits of well-written code.</td></tr>
+</tbody>
+</table>
+<p>Consider, for example, this code:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">outer</span>():
+    <span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">inner</span>():
+        bb = <span style="color: #007f7f">1</span>
+        <span style="color: #00007f; font-weight: bold">return</span> aa + bb + cc
+    aa = <span style="color: #007f7f">2</span>
+    <span style="color: #00007f; font-weight: bold">return</span> inner
+</pre></div>
+<p>Here, <tt class="docutils literal"><span class="pre">aa</span></tt> is free in <tt class="docutils literal"><span class="pre">inner</span></tt>, lexically bound to the <tt class="docutils literal"><span class="pre">aa</span></tt> defined in <tt class="docutils literal"><span class="pre">outer</span></tt>. But a one-pass algorithm would see <tt class="docutils literal"><span class="pre">inner</span></tt> before it ever saw the definition of <tt class="docutils literal"><span class="pre">aa</span></tt>, so to implement this correctly it would be forced to use some complex data structure to remember the variable uses it saw. With a two-pass algorithm, handling this case is much simpler.</p>
+<table class="docutils footnote" frame="void" id="id16" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id7">[7]</a></td><td>Throughout the code <tt class="docutils literal"><span class="pre">st</span></tt> refers to the <tt class="docutils literal"><span class="pre">symtable</span></tt> object that's being passed into functions, and <tt class="docutils literal"><span class="pre">ste</span></tt> to an entry object.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id17" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id8">[8]</a></td><td>As an exercise, think whether this ensures that all generators returning values are caught as errors. Hint #1: what happens if the <tt class="docutils literal"><span class="pre">yield</span></tt> is found before the <tt class="docutils literal"><span class="pre">return</span></tt>? Hint #2: Locate the code for the handling of <tt class="docutils literal"><span class="pre">return</span></tt> statements by the first pass.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id18" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id9">[9]</a></td><td>Here and on I'm presenting a somewhat simplified view of the second pass. There are further complications like variables declared global in enclosing scopes and referenced in enclosed scopes, that affect the results. I'm ignoring this on purpose to try and focus on the main aim of the second pass. Any source code has important special cases and trying to accurately summarize 1000 lines of code in a few paragraphs of text is an endeavor destined to fail.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../../theme/js/count.js"></script>
+</body>
+</html>

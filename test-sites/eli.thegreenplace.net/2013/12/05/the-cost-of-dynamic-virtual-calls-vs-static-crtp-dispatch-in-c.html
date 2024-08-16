@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>The cost of dynamic (virtual calls) vs. static (CRTP) dispatch in C++ - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="the-cost-of-dynamic-virtual-calls-vs-static-crtp-dispatch-in-c.html"
+                       rel="bookmark"
+                       title="Permalink to The cost of dynamic (virtual calls) vs. static (CRTP) dispatch in C++">
+                        The cost of dynamic (virtual calls) vs. static (CRTP) dispatch in C++
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> December 05, 2013 at 06:13</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/assembly.html">Assembly</a>
+        ,
+    <a href="../../../tag/c-c.html">C & C++</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>A couple of years ago I wrote <a class="reference external" href="../../../2011/05/17/the-curiously-recurring-template-pattern-in-c/index.html">an article about the Curiously Recurring Template Pattern in C++</a>, focusing on the motivation behind it and how to implement it.</p>
+<p>That article mentioned runtime performance as the main reason for employing CRTP instead of the more traditional runtime polymorphism (dispatch via virtual functions). While some rationale for the cost of virtual calls was given, I didn't go too deep into it. Today I want to fix that by carefully analyzing the performance of virtual calls as opposed to the static calls made possible by CRTP.</p>
+<div class="section" id="mandatory-precaution-about-benchmarks">
+<h3>Mandatory precaution about benchmarks</h3>
+<p>Benchmarking in 2013 is really hard. Today's CPUs are super-pipelined, branch-predicting out-of-order executing beasts. The memory hierarchy is very deep and the caches have complex behavior. All of this makes detailed performance analysis devilishly complex, and the <a class="reference external" href="../03/intel-i7-loop-performance-anomaly/index.html">results are sometimes baffling</a>. We're clearly long past counting MIPS. Add to that overly-clever optimizing compilers that occasionally produce not quite the code you expected, and it's apparent why so many online resources and articles provide bad benchmarks.</p>
+<p>So any benchmarks need to be taken with a large grain of salt, including the one posted here. Personally, I'm trying to validate the benchmarks I'm running by attacking them with the scientific method:</p>
+<ol class="arabic simple">
+<li>First, create a <em>hypothesis</em> about the relative speed of two approaches.</li>
+<li>Take a detailed look at the code generated by the compiler to verify the hypothesis w.r.t. code generation - is this the machine code you expected to see?</li>
+<li>Run the benchmark and compare the runtime to the initial hypothesis, as well as to (2) - while not perfect, performance is easier to correlate to machine code than to original source code.</li>
+<li>If anything doesn't feel right, or just to make (3) more careful, use low-level counters to make sure that the amount of instructions executed and other such details makes sense given (2).</li>
+</ol>
+</div>
+<div class="section" id="hypothesis-what-makes-virtual-calls-slower">
+<h3>Hypothesis - what makes virtual calls slower</h3>
+<p>The <a class="reference external" href="../../../2011/05/17/the-curiously-recurring-template-pattern-in-c/index.html">previous article</a> listed the following components in the runtime cost of virtual calls:</p>
+<ul class="simple">
+<li>Extra indirection (pointer dereference) for each call to a virtual method.</li>
+<li>Virtual methods usually can’t be inlined, which may be a significant cost hit for some small methods.</li>
+<li>Additional pointer per object. On 64-bit systems which are prevalent these days, this is 8 bytes per object. For small objects that carry little data this may be a serious overhead.</li>
+</ul>
+<p>While the third component can definitely play a role in some scenarios (i.e. a lot of small objects where the additional memory means less of them fit into L1 data cache), I'll focus on the first two in this article, because they are easier to expose in a simple synthetic benchmark.</p>
+</div>
+<div class="section" id="the-source-code-what-are-we-comparing">
+<h3>The source code - what are we comparing?</h3>
+<p>There's a plethora of uses for polymorphism in C++. Here I'll focus on a basic one that will let me expose the performance characteristics of virtual calls. I'll define a simple interface with a couple of methods and one implementation of it:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">DynamicInterface</span> {
+<span style="color: #00007f; font-weight: bold">public</span>:
+  <span style="color: #00007f; font-weight: bold">virtual</span> <span style="color: #00007f; font-weight: bold">void</span> tick(uint64_t n) = <span style="color: #007f7f">0</span>;
+  <span style="color: #00007f; font-weight: bold">virtual</span> uint64_t getvalue() = <span style="color: #007f7f">0</span>;
+};
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">DynamicImplementation</span> : <span style="color: #00007f; font-weight: bold">public</span> DynamicInterface {
+  uint64_t counter;
+
+<span style="color: #00007f; font-weight: bold">public</span>:
+  DynamicImplementation()
+    : counter(<span style="color: #007f7f">0</span>) {
+  }
+
+  <span style="color: #00007f; font-weight: bold">virtual</span> <span style="color: #00007f; font-weight: bold">void</span> tick(uint64_t n) {
+    counter += n;
+  }
+
+  <span style="color: #00007f; font-weight: bold">virtual</span> uint64_t getvalue() {
+    <span style="color: #00007f; font-weight: bold">return</span> counter;
+  }
+};
+</pre></div>
+<p>The following code runs the actual benchmark:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">const</span> <span style="color: #00007f; font-weight: bold">unsigned</span> N = <span style="color: #007f7f">40000</span>;
+
+<span style="color: #00007f; font-weight: bold">void</span> run_dynamic(DynamicInterface* obj) {
+  <span style="color: #00007f; font-weight: bold">for</span> (<span style="color: #00007f; font-weight: bold">unsigned</span> i = <span style="color: #007f7f">0</span>; i &lt; N; ++i) {
+    <span style="color: #00007f; font-weight: bold">for</span> (<span style="color: #00007f; font-weight: bold">unsigned</span> j = <span style="color: #007f7f">0</span>; j &lt; i; ++j) {
+      obj-&gt;tick(j);
+    }
+  }
+}
+</pre></div>
+<p>What this does is simply invoke the virtual method <tt class="docutils literal">tick</tt> on the base pointer <tt class="docutils literal">obj</tt> in the order of <tt class="docutils literal">O(N^2)</tt> times.</p>
+<p>The alternative statically-polymorphic implementation is this <a class="footnote-reference" href="the-cost-of-dynamic-virtual-calls-vs-static-crtp-dispatch-in-c.html#id3" id="id1">[1]</a>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">template</span> &lt;<span style="color: #00007f; font-weight: bold">typename</span> Implementation&gt;
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">CRTPInterface</span> {
+<span style="color: #00007f; font-weight: bold">public</span>:
+  <span style="color: #00007f; font-weight: bold">void</span> tick(uint64_t n) {
+    impl().tick(n);
+  }
+
+  uint64_t getvalue() {
+    <span style="color: #00007f; font-weight: bold">return</span> impl().getvalue();
+  }
+<span style="color: #00007f; font-weight: bold">private</span>:
+  Implementation&amp; impl() {
+    <span style="color: #00007f; font-weight: bold">return</span> *<span style="color: #00007f; font-weight: bold">static_cast</span>&lt;Implementation*&gt;(<span style="color: #00007f; font-weight: bold">this</span>);
+  }
+};
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">CRTPImplementation</span> : <span style="color: #00007f; font-weight: bold">public</span> CRTPInterface&lt;CRTPImplementation&gt; {
+  uint64_t counter;
+<span style="color: #00007f; font-weight: bold">public</span>:
+  CRTPImplementation()
+    : counter(<span style="color: #007f7f">0</span>) {
+  }
+
+  <span style="color: #00007f; font-weight: bold">void</span> tick(uint64_t n) {
+    counter += n;
+  }
+
+  uint64_t getvalue() {
+    <span style="color: #00007f; font-weight: bold">return</span> counter;
+  }
+};
+
+<span style="color: #00007f; font-weight: bold">template</span> &lt;<span style="color: #00007f; font-weight: bold">typename</span> Implementation&gt;
+<span style="color: #00007f; font-weight: bold">void</span> run_crtp(CRTPInterface&lt;Implementation&gt;* obj) {
+  <span style="color: #00007f; font-weight: bold">for</span> (<span style="color: #00007f; font-weight: bold">unsigned</span> i = <span style="color: #007f7f">0</span>; i &lt; N; ++i) {
+    <span style="color: #00007f; font-weight: bold">for</span> (<span style="color: #00007f; font-weight: bold">unsigned</span> j = <span style="color: #007f7f">0</span>; j &lt; i; ++j) {
+      obj-&gt;tick(j);
+    }
+  }
+}
+</pre></div>
+</div>
+<div class="section" id="generated-code-how-virtual-calls-look-under-the-hood">
+<h3>Generated code - how virtual calls look under the hood</h3>
+<p>Now let's spend some time studying the machine code generated by gcc -O2 (version 4.8) from the code above. The code for <tt class="docutils literal"><span class="pre">DynamicImplementation::tick</span></tt> is very compact:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f7f">0000000000400</span>cf0 &lt;_ZN21DynamicImplementation4tickEm&gt;:
+  <span style="color: #007f7f">400</span>cf0:       add    %rsi,<span style="color: #007f7f">0x8</span>(%rdi)
+  <span style="color: #007f7f">400</span>cf4:       retq
+</pre></div>
+<p>To understand what this means, some familiarity with the <a class="reference external" href="http://mentorembedded.github.io/cxx-abi/abi.html">Itanium C++ ABI</a> is required. The ABI in this case mandates both the name mangling that produces the weird symbol name, and the layout of the object in memory, which mandates how its fields are accessed. Here's a short description for the code above:</p>
+<p>Since <tt class="docutils literal">DynamicInterface</tt> has virtual methods, the class hierarchy it begets comes with a virtual method table, a pointer to which resides in each object. This is the way the compiler arranges for the runtime code to call the correct method when an actual object is used. The address of the virtual method table (<tt class="docutils literal">vptr</tt>) is in the beginning of the object, and the actual class members come afterwards. So <tt class="docutils literal">counter</tt> lives at offset 8 in <tt class="docutils literal">DynamicImplementation</tt> objects.</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">add    %rsi,<span style="color: #007f7f">0x8</span>(%rdi)
+</pre></div>
+<p><tt class="docutils literal">%rdi</tt> is the first argument to <tt class="docutils literal">tick</tt>, which is the hidden <tt class="docutils literal">this</tt> pointer - the address of the object. Hence <tt class="docutils literal"><span class="pre">0x8(%rdi)</span></tt> is the address of <tt class="docutils literal"><span class="pre">this-&gt;counter</span></tt>. The instruction, then, adds <tt class="docutils literal">n</tt> (passed in <tt class="docutils literal">%rsi</tt> according to the calling convention) to <tt class="docutils literal"><span class="pre">this-&gt;counter</span></tt>.</p>
+<p>By the way, whenever you're curious about object layouts and want to verify your understanding of the ABI, I find <a class="reference external" href="../../../2012/12/17/dumping-a-c-objects-memory-layout-with-clang/index.html">Clang's ability to dump the class record layouts</a> very helpful. In this case:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">*** Dumping AST Record Layout
+   0 | class DynamicImplementation
+   0 |   class DynamicInterface (primary base)
+   0 |     (DynamicInterface vtable pointer)
+   8 |   uint64_t counter
+     | [sizeof=16, dsize=16, align=8
+     |  nvsize=16, nvalign=8]
+
+*** Dumping AST Record Layout
+   0 | class CRTPImplementation
+   0 |   class CRTPInterface&lt;class CRTPImplementation&gt; (base) (empty)
+   0 |   uint64_t counter
+     | [sizeof=8, dsize=8, align=8
+     |  nvsize=8, nvalign=8]
+</pre></div>
+<p>On to the invocation of <tt class="docutils literal">tick</tt> now. This is the disassembly for <tt class="docutils literal">run_dynamic</tt>, annotated with comments:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f7f">0000000000400</span>c10 &lt;_Z11run_dynamicP16DynamicInterface&gt;:
+  <span style="color: #007f7f">400</span>c10:       push   %r13
+  <span style="color: #007f7f">400</span>c12:       mov    $0x1,%r13d
+  <span style="color: #007f7f">400</span>c18:       push   %r12
+        <span style="color: #007f00">// r12d holds i, initialized to 0</span>
+  <span style="color: #007f7f">400</span>c1a:       xor    %r12d,%r12d
+  <span style="color: #007f7f">400</span>c1d:       push   %rbp
+        <span style="color: #007f00">// Place obj in %rbp</span>
+  <span style="color: #007f7f">400</span>c1e:       mov    %rdi,%rbp
+  <span style="color: #007f7f">400</span>c21:       push   %rbx
+  <span style="color: #007f7f">400</span>c22:       sub    $0x8,%rsp
+  <span style="color: #007f7f">400</span>c26:       nopw   %cs:<span style="color: #007f7f">0x0</span>(%rax,%rax,<span style="color: #007f7f">1</span>)
+  <span style="color: #007f7f">400</span>c30:       test   %r12d,%r12d
+        <span style="color: #007f00">// when i is 0, the body of the loop won&#39;t run, so increment</span>
+        <span style="color: #007f00">// both i and j and try again.</span>
+  <span style="color: #007f7f">400</span>c33:       je     <span style="color: #007f7f">400</span>c5e
+        <span style="color: #007f00">// rbx holds j, initialized to 0</span>
+  <span style="color: #007f7f">400</span>c35:       xor    %ebx,%ebx
+  <span style="color: #007f7f">400</span>c37:       nopw   <span style="color: #007f7f">0x0</span>(%rax,%rax,<span style="color: #007f7f">1</span>)
+        <span style="color: #007f00">// Place the address of obj&#39;s vtable in rax</span>
+  <span style="color: #007f7f">400</span>c40:       mov    <span style="color: #007f7f">0x0</span>(%rbp),%rax
+        <span style="color: #007f00">// j is the second argument of tick</span>
+  <span style="color: #007f7f">400</span>c44:       mov    %rbx,%rsi
+        <span style="color: #007f00">// j++</span>
+  <span style="color: #007f7f">400</span>c47:       add    $0x1,%rbx
+        <span style="color: #007f00">// obj is the first argument of tick (&#39;this&#39; pointer)</span>
+  <span style="color: #007f7f">400</span>c4b:       mov    %rbp,%rdi
+        <span style="color: #007f00">// tick is the first entry in the vtable.</span>
+        <span style="color: #007f00">// This calls obj-&gt;tick(obj, j)</span>
+  <span style="color: #007f7f">400</span>c4e:       callq  *(%rax)
+        <span style="color: #007f00">// Compare j &lt; i and perform inner loop</span>
+  <span style="color: #007f7f">400</span>c50:       cmp    %ebx,%r12d
+  <span style="color: #007f7f">400</span>c53:       ja     <span style="color: #007f7f">400</span>c40
+        <span style="color: #007f00">// Compare i == 40000 and perform outer loop</span>
+  <span style="color: #007f7f">400</span>c55:       cmp    $0x9c40,%r13d
+  <span style="color: #007f7f">400</span>c5c:       je     <span style="color: #007f7f">400</span>c68
+  <span style="color: #007f7f">400</span>c5e:       add    $0x1,%r13d
+  <span style="color: #007f7f">400</span>c62:       add    $0x1,%r12d
+  <span style="color: #007f7f">400</span>c66:       jmp    <span style="color: #007f7f">400</span>c30
+  <span style="color: #007f7f">400</span>c68:       add    $0x8,%rsp
+  <span style="color: #007f7f">400</span>c6c:       pop    %rbx
+  <span style="color: #007f7f">400</span>c6d:       pop    %rbp
+  <span style="color: #007f7f">400</span>c6e:       pop    %r12
+  <span style="color: #007f7f">400</span>c70:       pop    %r13
+  <span style="color: #007f7f">400</span>c72:       retq
+  <span style="color: #007f7f">400</span>c73:       data32 data32 data32 nopw %cs:<span style="color: #007f7f">0x0</span>(%rax,%rax,<span style="color: #007f7f">1</span>)
+</pre></div>
+<p>The interesting parts here are:</p>
+<ol class="arabic simple">
+<li>How <tt class="docutils literal"><span class="pre">obj-&gt;tick</span></tt> is actually invoked. Since <tt class="docutils literal">tick</tt> is the first method in <tt class="docutils literal">DynamicInterface</tt>, it sits in the first slot in the vtable. So to actually call it, we have a double indirection from <tt class="docutils literal">obj</tt> - one to get to the vtable, the other to get to the method in the vtable.</li>
+<li>The constituents of the inner loop - the part that the program spends the vast majority of its time executing. We'll get back to it for a more careful analysis later.</li>
+</ol>
+</div>
+<div class="section" id="how-crtp-calls-look-under-the-hood">
+<h3>How CRTP calls look under the hood</h3>
+<p>Now it's time to disassemble the equivalent code that uses CRTP for static polymorphism. Again, we'll want to start with <tt class="docutils literal"><span class="pre">CRTPImplementation::tick</span></tt>, but we won't find it in the disassembly because it was fully inlined into <tt class="docutils literal">run_crtp</tt>. The compiler was able to inline it because it could know statically (at compile time) which method is called. Such inlining is an important tenet of the &quot;zero-cost abstractions&quot; philosophy of modern C++.</p>
+<p>Let's go straight to <tt class="docutils literal">run_crtp</tt>, then:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f7f">0000000000400</span>d00 &lt;_Z8run_crtpI18CRTPImplementationEvP13CRTPInterfaceIT_E&gt;:
+        <span style="color: #007f00">// Place obj-&gt;counter into rdx</span>
+  <span style="color: #007f7f">400</span>d00:       mov    (%rdi),%rdx
+  <span style="color: #007f7f">400</span>d03:       mov    $0x1,%esi
+        <span style="color: #007f00">// rcx holds i, initialized to 0</span>
+  <span style="color: #007f7f">400</span>d08:       xor    %ecx,%ecx
+  <span style="color: #007f7f">400</span>d0a:       nopw   <span style="color: #007f7f">0x0</span>(%rax,%rax,<span style="color: #007f7f">1</span>)
+  <span style="color: #007f7f">400</span>d10:       test   %ecx,%ecx
+  <span style="color: #007f7f">400</span>d12:       je     <span style="color: #007f7f">400</span>d36
+        <span style="color: #007f00">// rax holds j, initialized to 0</span>
+  <span style="color: #007f7f">400</span>d14:       xor    %eax,%eax
+  <span style="color: #007f7f">400</span>d16:       nopw   %cs:<span style="color: #007f7f">0x0</span>(%rax,%rax,<span style="color: #007f7f">1</span>)
+        <span style="color: #007f00">// counter += j</span>
+  <span style="color: #007f7f">400</span>d20:       add    %rax,%rdx
+        <span style="color: #007f00">// j++ and perform inner loop</span>
+  <span style="color: #007f7f">400</span>d23:       add    $0x1,%rax
+  <span style="color: #007f7f">400</span>d27:       cmp    %eax,%ecx
+  <span style="color: #007f7f">400</span>d29:       ja     <span style="color: #007f7f">400</span>d20
+  <span style="color: #007f7f">400</span>d2b:       cmp    $0x9c40,%esi
+        <span style="color: #007f00">// when we&#39;re done, put the final value back into obj-&gt;counter</span>
+  <span style="color: #007f7f">400</span>d31:       mov    %rdx,(%rdi)
+  <span style="color: #007f7f">400</span>d34:       je     <span style="color: #007f7f">400</span>d3e
+  <span style="color: #007f7f">400</span>d36:       add    $0x1,%esi
+  <span style="color: #007f7f">400</span>d39:       add    $0x1,%ecx
+  <span style="color: #007f7f">400</span>d3c:       jmp    <span style="color: #007f7f">400</span>d10
+  <span style="color: #007f7f">400</span>d3e:       repz retq
+</pre></div>
+<p>It's not hard to see we'd expect this code to run much faster, for two main reasons:</p>
+<ol class="arabic simple">
+<li>Since the <tt class="docutils literal">tick</tt> dispatch was inlined, the compiler was free to see that all it does is a simple member increment. The member is then saved in <tt class="docutils literal">rdx</tt> and the loop can then simply bump a register, instead of having a <tt class="docutils literal">call</tt> on each iteration.</li>
+<li>As there's no call involved, the inner loop is shorter.</li>
+</ol>
+</div>
+<div class="section" id="performance-numbers">
+<h3>Performance numbers</h3>
+<p>As expected, the CRTP approach is much faster. The benchmark above takes 1.25 seconds on my i7-4771 CPU for <tt class="docutils literal">run_dynamic</tt> and 0.21 seconds for <tt class="docutils literal">run_crtp</tt> This is a huge difference, and it's much larger than I expected. I was looking for a 2x boost, not 6x <a class="footnote-reference" href="the-cost-of-dynamic-virtual-calls-vs-static-crtp-dispatch-in-c.html#id5" id="id2">[2]</a>. So here comes the 4th bullet of the benchmarking methodology I outlined above. Let's look more carefully at the numbers.</p>
+<p>I'll start with producing a trace of the inner loop for both cases, to see the sequence of instructions executed. Since the loop is short, this can be easily done with basic disassembly reading, and also verifying with <tt class="docutils literal">gdb</tt> by stepping through the execution for a few iterations.</p>
+<p>Here is the inner loop for <tt class="docutils literal">run_dynamic</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f7f">400</span>c40:     mov    <span style="color: #007f7f">0x0</span>(%rbp),%rax
+<span style="color: #007f7f">400</span>c44:     mov    %rbx,%rsi
+<span style="color: #007f7f">400</span>c47:     add    $0x1,%rbx
+<span style="color: #007f7f">400</span>c4b:     mov    %rbp,%rdi
+<span style="color: #007f7f">400</span>c4e:     callq  *(%rax) ... calls tick
+    <span style="color: #007f7f">400</span>ce0: add    %rsi,<span style="color: #007f7f">0x8</span>(%rdi)
+    <span style="color: #007f7f">400</span>ce4: retq
+<span style="color: #007f7f">400</span>c50:     cmp    %ebx,%r12d
+<span style="color: #007f7f">400</span>c53:     ja     <span style="color: #007f7f">400</span>c40
+</pre></div>
+<p>How many times we'd expect it to run? The double loop has a simple summing pattern so we can compute it's in the vicinity of <tt class="docutils literal">N/2 * N</tt>, which in our case means 800e6 (800 million times).</p>
+<p>Since the loop above is 9 instructions long, it means 7.2e9 instructions total. Let's look at detailed <tt class="docutils literal">perf stat</tt> numbers for this run:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">Performance counter stats for &#39;build/vcall-benchmark d&#39;:
+
+      1253.807247 task-clock                #    0.999 CPUs utilized
+              107 context-switches          #    0.085 K/sec
+                0 cpu-migrations            #    0.000 K/sec
+              318 page-faults               #    0.254 K/sec
+    4,807,848,980 cycles                    #    3.835 GHz
+  &lt;not supported&gt; stalled-cycles-frontend
+  &lt;not supported&gt; stalled-cycles-backend
+    7,203,771,146 instructions              #    1.50  insns per cycle
+    2,400,716,784 branches                  # 1914.742 M/sec
+           58,358 branch-misses             #    0.00% of all branches
+
+      1.255560284 seconds time elapsed
+</pre></div>
+<p>Indeed, the amount of instructions fits our expectation.</p>
+<p>Now, let's turn to <tt class="docutils literal">run_crtp</tt>. Its inner loop is this:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">400d20:     add    %rax,%rdx
+400d23:     add    $0x1,%rax
+400d27:     cmp    %eax,%ecx
+400d29:     ja     400d20
+</pre></div>
+<p>So only 4 instructions. In other words, we'd expect the total amount of instructions executed to be in the area of 3.2e9. Let's see:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">Performance counter stats for &#39;build/vcall-benchmark c&#39;:
+
+       215.919352 task-clock                #    0.997 CPUs utilized
+               18 context-switches          #    0.083 K/sec
+                0 cpu-migrations            #    0.000 K/sec
+              318 page-faults               #    0.001 M/sec
+      809,355,502 cycles                    #    3.748 GHz
+  &lt;not supported&gt; stalled-cycles-frontend
+  &lt;not supported&gt; stalled-cycles-backend
+    3,202,645,106 instructions              #    3.96  insns per cycle
+      800,522,521 branches                  # 3707.507 M/sec
+           53,684 branch-misses             #    0.01% of all branches
+
+      0.216596060 seconds time elapsed
+</pre></div>
+<p>Bingo!</p>
+<p>But wait, a 2.25x difference in the amount of instructions should not have translated to a 6x difference in runtime, right? Note the amount of branches, though. While the CRTP run has one branch per inner loop, the numbers for the dynamic run show 3 branches per inner loop (for a total of 2.4e9). What gives?</p>
+<p>The CPU considers indirect calls and returns as branches for this purpose, and if you think about it, this makes sense. An indirect branch or return transfer control to a location the CPU cannot determine statically (unlike a direct call, for instance) - it depends on the contents of registers &amp; stack. So the CPU doesn't know where to fetch instructions ahead-of-time in order to satisfy its eternally hungry super-pipeline. True, the branch predictor alleviates most of that cost, but such instructions are still more expensive for the CPU than, say, simple adds, because they cannot pump through the pipeline as quickly.</p>
+<p>Moreover, the <tt class="docutils literal">call</tt> and <tt class="docutils literal">ret</tt> instructions push and pop data to the stack, which resides in memory. It's almost certainly in L1 cache, but that's still more expensive to access than registers.</p>
+</div>
+<div class="section" id="variation-o3-compilation">
+<h3>Variation: -O3 compilation</h3>
+<p>Vigilant readers might have noticed that I did not set the highest optimization level of gcc for this benchmark. This was done on purpose, to make the results simpler to explain.</p>
+<p>When compiled with <tt class="docutils literal"><span class="pre">-O3</span></tt>, the dynamic version runs as before (and the code produced for it is the same), but the CRTP version runs even faster and finishes within 0.17 seconds, which is 7.2x faster than the dynamic version.</p>
+<p>The extra boost comes from auto-vectorization. When one looks at the code produced by the compiler for <tt class="docutils literal">run_crtp</tt>, one can see SIMD instructions in there. The inner loop was unrolled 4x and the operations are performed on whole quad-words, combining several inner loop iterations at a time.</p>
+<p>So this is an example where previous optimizations (inlining) enabled the compiler to apply even more advanced optimizations such as vectorization to make the code faster yet.</p>
+</div>
+<div class="section" id="variation-disabling-inlining">
+<h3>Variation: disabling inlining</h3>
+<p>It's also interesting to build the benchmark with <tt class="docutils literal"><span class="pre">-fno-inline</span></tt> and compare the results. Curiously, in this case the CRTP approach runs 1.5x <em>slower</em> than virtual calls. Before you read on, can you guess why?</p>
+<p>The reason is quite simple. Note that for proper CRTP, the interface class implements the interface methods and calls through to the implementation. So to actually invoke <tt class="docutils literal">tick</tt>, <tt class="docutils literal">run_crtp</tt> calls:</p>
+<ul class="simple">
+<li><tt class="docutils literal"><span class="pre">CRTPInterface&lt;CRTPImplementation&gt;::tick</span></tt>, which calls</li>
+</ul>
+<blockquote>
+<ul class="simple">
+<li><tt class="docutils literal"><span class="pre">CRTPInterface&lt;CRTPImplementation&gt;::impl</span></tt>, and then calls</li>
+<li><tt class="docutils literal"><span class="pre">CRTPImplementation::tick</span></tt></li>
+</ul>
+</blockquote>
+<p>This is a lot of calls, which all have to be executed when the inliner is turned off. When it's turned on, <em>all</em> of these calls get inlined and the actual instructions of the leaf call are embedded into <tt class="docutils literal">run_crtp</tt>.</p>
+<p>There are two lessons here:</p>
+<ol class="arabic simple">
+<li>Be careful with benchmarking, but you already knew that ;-)</li>
+<li>When implementing inlining in a compiler, it's super important to make the inliner iterative - doing multiple passes on the code and discovering new inlining opportunities in each iteration.</li>
+</ol>
+</div>
+<div class="section" id="devirtualization">
+<h3>Devirtualization</h3>
+<p>A brand new optimization that I recently heard about is <em>devirtualization</em>. The idea is to find cases of dynamic dispatch where the actual type at a given call site can always to proven to be known at compile time, and specialize those call sites to dispatch statically. This carries the promise of making virtual calls as fast as static dispatch in some special cases.</p>
+<p>While this definitely sound interesting, at the time of writing this article devirtualization is still experimental (support in gcc started trickling in version 4.7). In any case, the example examined in this article is probably simple enough to trigger the optimization, but as you can see it didn't happen, even though the <tt class="docutils literal"><span class="pre">-fdevirtualize</span></tt> flag should be on in gcc with optimization levels <tt class="docutils literal"><span class="pre">-O2</span></tt> and <tt class="docutils literal"><span class="pre">-O3</span></tt>. It will be interesting to follow the development of this optimization and see what cases of virtual calls it can detect and optimize in the future.</p>
+</div>
+<div class="section" id="conclusions">
+<h3>Conclusions</h3>
+<p>There are a lot of lessons to be learned here, so I'll just list them in an arbitrary order:</p>
+<ul class="simple">
+<li>Benchmarking is an art - if everything is too easy, you're either doing something trivial or wrong. Always cross-verify your assumptions and results with hard data like disassembly listings and detailed performance numbers.</li>
+<li>Beware of different compilers and different targets. The above discusses gcc 4.8 for x86-64. Elsewhere, you may expect slightly or considerably different results. Ah, if only programming was easy. But then I guess programmers wouldn't get paid a lot for clicking in front of computers all day.</li>
+<li>Compiler optimizations are, by definition, a multi-layered affair. Each is simple but they enable each other. Inlining enables some additional optimizations (such as moving hot code out of inner loops). Other optimizations may enable inlining (by making the leaf methods smaller).</li>
+<li>CRTP, when implemented correctly, is recognized by the compiler as static dispatch and optimized accordingly.</li>
+<li>CRTP can thus be significantly more efficient than virtual calls, mostly due to inlining. This also means that inlining is <em>crucial</em> to its performance (as it is to many performance features of C++).</li>
+</ul>
+<img class="align-center" src="../../../images/hline.jpg" style="width: 320px; height: 5px;" />
+<table class="docutils footnote" frame="void" id="id3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="the-cost-of-dynamic-virtual-calls-vs-static-crtp-dispatch-in-c.html#id1">[1]</a></td><td>This is a degenerate use of CRTP, for sure. It's not here to be realistic - just to demonstrate the same mechanism used in a simple scenario. See the <a class="reference external" href="../../../2011/05/17/the-curiously-recurring-template-pattern-in-c/index.html">previous article</a> for a more use-focused discussion of CRTP.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="the-cost-of-dynamic-virtual-calls-vs-static-crtp-dispatch-in-c.html#id2">[2]</a></td><td>These numbers depend on the CPU, of course. When I tried the same benchmark on a Xeon E5-2690 (Sandy Bridge) with gcc 4.6.3 (same code generated) the speed difference is just 3x (0.46 vs 1.39 sec).</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="the-cost-of-dynamic-virtual-calls-vs-static-crtp-dispatch-in-c.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

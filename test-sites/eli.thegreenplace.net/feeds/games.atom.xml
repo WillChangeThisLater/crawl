@@ -1,0 +1,544 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"><title>Eli Bendersky's website - Games</title><link href="https://eli.thegreenplace.net/" rel="alternate"></link><link href="https://eli.thegreenplace.net/feeds/games.atom.xml" rel="self"></link><id>https://eli.thegreenplace.net/</id><updated>2024-05-04T19:46:23-07:00</updated><entry><title>Sudoku, Go and WebAssembly</title><link href="https://eli.thegreenplace.net/2022/sudoku-go-and-webassembly/" rel="alternate"></link><published>2022-09-05T06:33:00-07:00</published><updated>2023-04-18T02:58:45-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2022-09-05:/2022/sudoku-go-and-webassembly/</id><summary type="html">&lt;p&gt;Over the summer my family has experienced a brief renaissance of interest in
+Sudoku, particularly as I've tried to get my kids to practice solving some
+non-trivial puzzles (pro tip: YouTube videos help).&lt;/p&gt;
+&lt;object class="align-center" data="https://eli.thegreenplace.net/images/2022/sudoku-puzzle.svg" type="image/svg+xml"&gt;Sudoku puzzle sample&lt;/object&gt;
+&lt;p&gt;Naturally, whenever a programmer encounters Sudoku it's hard to avoid thinking
+about automated solvers …&lt;/p&gt;</summary><content type="html">&lt;p&gt;Over the summer my family has experienced a brief renaissance of interest in
+Sudoku, particularly as I've tried to get my kids to practice solving some
+non-trivial puzzles (pro tip: YouTube videos help).&lt;/p&gt;
+&lt;object class="align-center" data="https://eli.thegreenplace.net/images/2022/sudoku-puzzle.svg" type="image/svg+xml"&gt;Sudoku puzzle sample&lt;/object&gt;
+&lt;p&gt;Naturally, whenever a programmer encounters Sudoku it's hard to avoid thinking
+about automated solvers. In fact, I've already written &lt;a class="reference external" href="https://eli.thegreenplace.net/2007/04/08/sudoku-as-a-sat-problem"&gt;a Sudoku solver many
+years ago&lt;/a&gt;;
+it converts the puzzle into a &lt;a class="reference external" href="https://en.wikipedia.org/wiki/Boolean_satisfiability_problem"&gt;SAT problem&lt;/a&gt; and solves
+that using a standard SAT solver.&lt;/p&gt;
+&lt;p&gt;This time I wanted something more conventional, because I was also interested in
+generating Sudoku puzzles of varying difficulty. In addition, I wanted to
+experiment with running Go code in the browser via WebAssembly. The result is
+the &lt;a class="reference external" href="https://github.com/eliben/go-sudoku"&gt;go-sudoku repository&lt;/a&gt;; this post
+describes what it does and how to use it. The Go package in my repository is
+best seen as a &lt;em&gt;toolkit&lt;/em&gt; for solving, generating and evaluating the difficulty
+of Sudoku puzzles.&lt;/p&gt;
+&lt;div class="section" id="solving-puzzles"&gt;
+&lt;h2&gt;Solving puzzles&lt;/h2&gt;
+&lt;p&gt;I started from Peter Norvig's fantastic &lt;a class="reference external" href="https://norvig.com/sudoku.html"&gt;Solving Every Sudoku Puzzle&lt;/a&gt;, where he describes a
+constraint-satisfaction solver written in Python. The solver only employs basic
+row/column/block elimination as a solution strategy and then runs a recursive
+search when stuck. This approach is very fast for solving Sudoku puzzles that
+have a single solution.&lt;/p&gt;
+&lt;p&gt;Norvig's solver in Python is already quick, but my Go code is &lt;em&gt;far&lt;/em&gt; faster still
+- around 100x faster in some informal measurements. One reason for this is that
+Go - in general - is more efficient than Python. Another is a key optimization
+to the core data structure; Norvig's code uses a string to represent the
+possible digits in a Sudoku square; e.g. if some square can have any value
+except 2, it's represented as the string &amp;quot;13456789&amp;quot;. So there's a lot of string
+allocation, deallocation and linear scanning. I've replaced this by a single
+&lt;tt class="docutils literal"&gt;uint16&lt;/tt&gt; in Go with bitwise operations to add/remove/test digits. My solver
+burns through Norvig's list of &amp;quot;hard&amp;quot; Sudoku puzzles taking less than a &lt;em&gt;quarter
+of a millisecond&lt;/em&gt; per puzzle on average.&lt;/p&gt;
+&lt;p&gt;I've also added a &lt;tt class="docutils literal"&gt;SolveAll&lt;/tt&gt; function that finds &lt;em&gt;all&lt;/em&gt; solutions of a given
+Sudoku puzzle; careful - do not run this on an empty board :-)&lt;/p&gt;
+&lt;p&gt;In the repository, you can try the solver by running the &lt;tt class="docutils literal"&gt;cmd/solver&lt;/tt&gt; command.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="more-powerful-sudoku-solving-strategies"&gt;
+&lt;h2&gt;More powerful Sudoku solving strategies&lt;/h2&gt;
+&lt;p&gt;As mentioned above, my solver follows Norvig's in that it only applies the basic
+&amp;quot;first-order&amp;quot; constraint propagation technique to Sudoku - elimination. Expert
+human Sudoku solvers have many higher-order techniques at their disposal. For
+my solver, I experimented with implementing one of them - &lt;a class="reference external" href="https://www.sudokuoftheday.com/techniques/naked-pairs-triples"&gt;Naked Pairs&lt;/a&gt;
+(alternatively known as &amp;quot;Naked Twins&amp;quot;).&lt;/p&gt;
+&lt;p&gt;While the implementation works (check out the &lt;tt class="docutils literal"&gt;ApplyTwinsStrategy&lt;/tt&gt; function),
+I found that it's not very helpful for the automated solver. The backtracking
+search is so fast that burdening it with additional strategies makes
+it &lt;em&gt;slower&lt;/em&gt;, not faster. YMMV.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="generating-puzzles"&gt;
+&lt;h2&gt;Generating puzzles&lt;/h2&gt;
+&lt;p&gt;Solving puzzles was just the warmump - I've done this before and just wanted
+the infrastructure set up. What I was really after is &lt;em&gt;generating&lt;/em&gt; interesting
+Sudoku puzzles.&lt;/p&gt;
+&lt;p&gt;The approach Norvig uses is:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;Start from an empty board&lt;/li&gt;
+&lt;li&gt;Assign random digits to random squares until a contradiction is reached
+(the puzzle becomes unsolvable), or a minimum count of assigned squares
+is reached.&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;Unfortunately, most puzzles produced this way will have multiple solutions; if
+you've done a bit of manual Sudoku-ing, you'll know that puzzles with multiple
+solutions suck - no one likes them.&lt;/p&gt;
+&lt;p&gt;Instead, we can start with an empty board:&lt;/p&gt;
+&lt;object class="align-center" data="https://eli.thegreenplace.net/images/2022/sudoku-empty.svg" type="image/svg+xml"&gt;Empty Sudoku board&lt;/object&gt;
+&lt;p&gt;Then, we solve the board using a randomized solver (a solver which randomizes
+the order of guessed digits it tries to assign to empty squares); this is a very
+quick process (tens of micro-seconds) that produces a random &lt;em&gt;valid&lt;/em&gt; solution:&lt;/p&gt;
+&lt;object class="align-center" data="https://eli.thegreenplace.net/images/2022/sudoku-solved.svg" type="image/svg+xml"&gt;Random solved sudoku&lt;/object&gt;
+&lt;p&gt;Now, we remove numbers from squares on the board one by one (in random order).
+At each step, we make sure that the resulting board still has a single solution.
+We stop when some pre-set threshold is reached - number of remaining hints,
+some difficulty estimate, etc.&lt;/p&gt;
+&lt;p&gt;Compared to the method used by Norvig, this approach has a powerful advantage:
+the produced puzzle is guaranteed to have a single solution. It also has a
+limitation: it's challenging to generate extremely hard puzzles with very low
+hint counts. That said, the puzzles it generates can certainly be hard enough
+for non-experts, so it's not a huge problem in practice &lt;a class="footnote-reference" href="#footnote-1" id="footnote-reference-1"&gt;[1]&lt;/a&gt;.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="estimating-puzzle-difficulty"&gt;
+&lt;h2&gt;Estimating puzzle difficulty&lt;/h2&gt;
+&lt;p&gt;Estimating the difficulty of Sudoku puzzles is important if you want to generate
+puzzles for others to solve. The most enjoyable puzzles are just
+at the right level of difficulty - not too easy and not too hard. The estimation
+process itself is fairly complicated and heuristic, and there are academic
+papers written on the subject.&lt;/p&gt;
+&lt;p&gt;In the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;go-sudoku&lt;/span&gt;&lt;/tt&gt; package the evaluation (&lt;tt class="docutils literal"&gt;EvaluateDifficulty&lt;/tt&gt;) is inspired
+by the paper &amp;quot;Sudoku Puzzles Generating: from Easy to Evil&amp;quot; by Xiang-Sun ZHANG's
+research group, with some tweaks. The difficulty score is provided on a scale
+from 1.0 (easiest) to 5.0 (hardest). Generally, I find that puzzles with
+difficulty 3 or above are pretty hard!&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="web-interface"&gt;
+&lt;h2&gt;Web interface&lt;/h2&gt;
+&lt;p&gt;Since my ultimate goal was to generate printable Sudoku puzzles for my family, I
+wanted a simple graphical interface one could use to generate puzzles and print
+those that look good. Instead of mucking with GUIs or PDFs, I decided to embrace
+the web! This is achieved in two steps:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;The &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;go-sudoku&lt;/span&gt;&lt;/tt&gt; package can emit any Sudoku board into a SVG image.&lt;/li&gt;
+&lt;li&gt;Using Go's &lt;tt class="docutils literal"&gt;wasm&lt;/tt&gt; backend, the package is compiled to WebAssembly and
+attached to a simple JS/HTML frontend.&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;The result is quite pleasing - &lt;a class="reference external" href="https://eliben.github.io/go-sudoku/"&gt;you can check it out online&lt;/a&gt; &lt;a class="footnote-reference" href="#footnote-2" id="footnote-reference-2"&gt;[2]&lt;/a&gt;; here's a screenshot:&lt;/p&gt;
+&lt;img alt="Screenshot from web interface" class="align-center" src="https://eli.thegreenplace.net/images/2022/sudoku-web-browser.png" /&gt;
+&lt;p&gt;The &amp;quot;Hint count&amp;quot; box tells the generator how many hints (non-empty squares) to
+leave on the board. For low counts (lower than 25 or so) it should be treated
+as a lower bound; the generator will often generate puzzles with slightly more
+hints. Also, the lower the hint count, the longer it might take to run.&lt;/p&gt;
+&lt;p&gt;Compiling my Go code to WebAssembly turned out to be surprisingly easy! If
+you're interested in seeing how it works, take a look at the
+&lt;a class="reference external" href="https://github.com/eliben/go-sudoku/tree/main/cmd/wasm"&gt;cmd/wasm directory&lt;/a&gt;
+in the repository.&lt;/p&gt;
+&lt;hr class="docutils" /&gt;
+&lt;table class="docutils footnote" frame="void" id="footnote-1" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#footnote-reference-1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;&lt;p class="first"&gt;Generating truly hard Sudoku puzzles with a single solution is a bit of
+an art. Typically, a long time is spent in computational search to
+generate a single very hard puzzle.&lt;/p&gt;
+&lt;p class="last"&gt;Once we have a single puzzle with a single solution, we can transform it
+in many ways, keeping it valid but with a completely different &amp;quot;look and
+feel&amp;quot;. For example, we can transpose rows and columns (within the same
+block); we can rotate the puzzle by 90, 180 and 270 degrees; we can
+permute its digits arbitrarily, and so on. In the end, a huge number of
+variations can be produced - all of the same difficulty.&lt;/p&gt;
+&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="footnote-2" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#footnote-reference-2"&gt;[2]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;Making this interface available through GitHub pages was pleasantly
+simple thanks to deployment via GitHub actions. Take a look in the
+&lt;tt class="docutils literal"&gt;.github/worflows&lt;/tt&gt; directory, if you're interested in the details.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;/div&gt;
+</content><category term="misc"></category><category term="Go"></category><category term="Games"></category><category term="Javascript"></category><category term="WebAssembly"></category></entry><entry><title>A simple canvas-based Javascript game, with a Django back-end</title><link href="https://eli.thegreenplace.net/2010/02/24/a-simple-canvas-based-javascript-game-with-a-django-back-end" rel="alternate"></link><published>2010-02-24T19:17:37-08:00</published><updated>2023-02-04T13:41:52-08:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2010-02-24:/2010/02/24/a-simple-canvas-based-javascript-game-with-a-django-back-end</id><summary type="html">
+        &lt;p&gt;A &lt;a class="reference external" href="https://eli.thegreenplace.net/2003/05/30/perlines/"&gt;few years
+        ago&lt;/a&gt; I've released a clone of the &amp;quot;Colorful lines&amp;quot; game
+      (called &lt;em&gt;GLines&lt;/em&gt; on Gnome), named Perlines. It still works quite
+      well.&lt;/p&gt;
+&lt;p&gt;In the past couple of weeks I've implemented a web-based version the game, using Javascript and the HTML5 canvas element for the game itself, and a …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;A &lt;a class="reference external" href="https://eli.thegreenplace.net/2003/05/30/perlines/"&gt;few years
+        ago&lt;/a&gt; I've released a clone of the &amp;quot;Colorful lines&amp;quot; game
+      (called &lt;em&gt;GLines&lt;/em&gt; on Gnome), named Perlines. It still works quite
+      well.&lt;/p&gt;
+&lt;p&gt;In the past couple of weeks I've implemented a web-based version the game, using Javascript and the HTML5 canvas element for the game itself, and a Django back-end server for storing high-scores in a centralized manner.&lt;/p&gt;
+&lt;p&gt;Here's a screenshot:&lt;/p&gt;
+&lt;div align="center" class="align-center"&gt;
+&lt;img src="https://eli.thegreenplace.net/images/2010/02/linesshot.png" /&gt;
+&lt;/div&gt;
+&lt;p&gt;Some observations on the development of the game:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;It's really the first time I've written a large amount of Javascript code. It was an interesting experience about which I have mixed feelings - so I think it deserves a separate post.&lt;/li&gt;
+&lt;li&gt;The HTML5 canvas element is really nice and works just like any other canvas / graphical device context in a GUI framework. It has nice performance and an intuitive API.&lt;/li&gt;
+&lt;li&gt;It's also the first time I've actually done any serious AJAX. It turned out to be pretty straightforward on the client, with the generous help of jQuery. On the server side it's even simpler.&lt;/li&gt;
+&lt;li&gt;I was surprised how easy it is to craft a simple DB-backed server for storing the high-scores using Django. It was probably the most effortless part of the project - Django really does make server development in Python ridiculously simple.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;I will play with it myself for a few more days and then release all its source code to the public domain. Naturally, the client-side code is accessible even now by viewing the source of the page in your browser.&lt;/p&gt;
+&lt;p&gt;P.S. There seems to be at least &lt;a class="reference external" href="http://www.mclean.net.nz/jslines/index.html"&gt;one other&lt;/a&gt; Javascript clone of the lines game online, but it doesn't use &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;canvas&lt;/span&gt;&lt;/tt&gt; and doesn't have a global high-scores table.&lt;/p&gt;
+
+    </content><category term="misc"></category><category term="Django"></category><category term="Games"></category><category term="Javascript"></category></entry><entry><title>Tetris implemented in PyQt</title><link href="https://eli.thegreenplace.net/2009/12/12/tetris-implemented-in-pyqt" rel="alternate"></link><published>2009-12-12T16:10:20-08:00</published><updated>2024-05-04T19:46:23-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2009-12-12:/2009/12/12/tetris-implemented-in-pyqt</id><summary type="html">
+        &lt;p&gt;A while ago, to learn wxPython, &lt;a class="reference external" href="https://eli.thegreenplace.net/2008/05/31/a-tetris-clone-in-python-wxpython/"&gt;I've written wxPytris&lt;/a&gt;. Since then, I've &lt;a class="reference external" href="https://eli.thegreenplace.net/2009/01/19/moving-to-pyqt/"&gt;switched&lt;/a&gt; to PyQt for my Python GUI coding and don't even bother to install wxPython on my machines any more.&lt;/p&gt;
+&lt;p&gt;Therefore, I've rewritten the tetris game with PyQt. PyQtris is the name of the new game (am I …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;A while ago, to learn wxPython, &lt;a class="reference external" href="https://eli.thegreenplace.net/2008/05/31/a-tetris-clone-in-python-wxpython/"&gt;I've written wxPytris&lt;/a&gt;. Since then, I've &lt;a class="reference external" href="https://eli.thegreenplace.net/2009/01/19/moving-to-pyqt/"&gt;switched&lt;/a&gt; to PyQt for my Python GUI coding and don't even bother to install wxPython on my machines any more.&lt;/p&gt;
+&lt;p&gt;Therefore, I've rewritten the tetris game with PyQt. PyQtris is the name of the new game (am I original or what?). It's an exact clone appearance-wise, and works with the same high-scores file, so it can be just plugged in for wxPytris.&lt;/p&gt;
+&lt;p&gt;Here's the mandatory screenshot:&lt;/p&gt;
+&lt;img class="align-center" src="https://eli.thegreenplace.net/images/2009/12/pyqtris_screenshot.png" /&gt;
+&lt;p&gt;The porting process was easy, although a bit boring. Most of the GUI code maps 1-to-1 between wxPython and PyQt, and there are only some quirks to be handled differently. The built-in double-buffering of widgets in Qt4 helps make it a cleaner code in the drawing part.&lt;/p&gt;
+&lt;p&gt;Get the source code &lt;a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2009/pyqtris/pyqtris_src"&gt;here&lt;/a&gt;. 
+You can run it with Python 2.6 and the latest PyQt. 
+If you're on Windows, you can also download &lt;a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2009/pyqtris/pyqtris_v1_01_exe.zip"&gt;this 6MB executable&lt;/a&gt; that has no dependencies whatsoever (created with PyInstaller).&lt;/p&gt;
+
+    </content><category term="misc"></category><category term="Games"></category><category term="Python"></category><category term="Qt"></category></entry><entry><title>Book review: "Beginning game development with Python and Pygame" by Will McGugan</title><link href="https://eli.thegreenplace.net/2008/12/06/book-review-beginning-game-development-with-python-and-pygame-by-will-mcgugan" rel="alternate"></link><published>2008-12-06T12:32:59-08:00</published><updated>2023-02-04T15:35:51-08:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2008-12-06:/2008/12/06/book-review-beginning-game-development-with-python-and-pygame-by-will-mcgugan</id><summary type="html">
+
+      &lt;p&gt;
+This is a small book (280 pages of core material (Appendices excluded) with lots
+of source code listings and images taking up space) that aims to teach basic
+game programming using the popular Python library Pygame, which is wraps the
+cross platform SDL C gaming library.
+      &lt;/p&gt;&lt;p&gt;
+
+The book is very …&lt;/p&gt;</summary><content type="html">
+
+      &lt;p&gt;
+This is a small book (280 pages of core material (Appendices excluded) with lots
+of source code listings and images taking up space) that aims to teach basic
+game programming using the popular Python library Pygame, which is wraps the
+cross platform SDL C gaming library.
+      &lt;/p&gt;&lt;p&gt;
+
+The book is very easy going and quick to read, and serves as a nice introduction
+to the subject, although I definitely don't agree with the subtitle - &lt;em&gt;From
+novice to professional&lt;/em&gt;, because this book will take you very far from a
+professional, as it's basic at best.
+      &lt;/p&gt;&lt;p&gt;
+
+Frankly, I would expect a bit more from a book. It only covers the material on a
+basic tutorial level and rarely goes deeper, which is a shame. The decision to
+teach Python and Pygame in the same book is questionable. It's hard to believe a
+novice will learn Python from the first two introductory chapters, so perhaps
+aiming the book at Python programmers would be a better idea.
+      &lt;/p&gt;&lt;p&gt;
+
+Other cons:
+      &lt;/p&gt;&lt;p&gt;
+
+&lt;ul&gt;
+  &lt;li&gt;I don't like the author's using his own mathematical library for
+    manipulating vectors and matrices as opposed to using something like
+    Numpy.&lt;/li&gt;
+
+ &lt;li&gt;the author ignores the Sprite class of Pygame and develops his own GameEntity instead. I don't see much justification for this.&lt;/li&gt;
+
+	&lt;li&gt;I felt that events were presented in a superficial way. This is probably one of the most important core topics of game programming, and it deserved more attention&lt;/li&gt;
+
+&lt;/ul&gt;
+
+      &lt;/p&gt;&lt;p&gt;
+On the positive side, the book really is a nice tutorial. If you are familiar
+with Python and basic math you can actually code a simple game based on this
+book very quickly, as it contains all the elements you need (at least for 2D
+games). There's a lot of code in it, and the code is reasonably well written.
+This code can be used as a jumpstart for your own game.
+      &lt;/p&gt;
+
+    </content><category term="misc"></category><category term="Book reviews"></category><category term="Games"></category><category term="Programming"></category></entry><entry><title>SimCity 4</title><link href="https://eli.thegreenplace.net/2007/04/01/simcity-4" rel="alternate"></link><published>2007-04-01T17:17:35-07:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2007-04-01:/2007/04/01/simcity-4</id><summary type="html">
+&lt;p&gt;
+A few days after we came back from the vacation I bought SimCity 4 Deluxe, and
+spent a long time playing it.
+&lt;/p&gt;&lt;p&gt;
+
+Graphically, it is even better than the previous versions. Everything is very
+detailed and realistic. Lots of improvements have been made that make the game
+less irritating - larger …&lt;/p&gt;</summary><content type="html">
+&lt;p&gt;
+A few days after we came back from the vacation I bought SimCity 4 Deluxe, and
+spent a long time playing it.
+&lt;/p&gt;&lt;p&gt;
+
+Graphically, it is even better than the previous versions. Everything is very
+detailed and realistic. Lots of improvements have been made that make the game
+less irritating - larger schools, police and fire stations (a city no longer
+needs the 3 for every few blocks), a huge amount of transportation options and
+the biggest boon of all - regional play, which allows to build several
+inter-communicating cities in a region, and specialize each one.
+&lt;/p&gt;&lt;p&gt;
+
+There are drawbacks too, however. The game is very complicated and difficult to
+play right. I can't imagine a new player (who've never played the previous
+versions of SimCity) getting around the game, since the tutorials are very
+superficial and there's no "encyclopedia" (like in Civilization) to explain
+everything. Seasoned players won't find it easy, for instance managing the
+traffic is just nightmare - so much, as a matter of fact, that dedicated fans
+have developed several add-ons (and "mods") that alleviate the problem.
+&lt;/p&gt;&lt;p&gt;
+
+All in all it's a fun game to play. And time consuming :-)
+&lt;/p&gt;
+
+    </content><category term="misc"></category><category term="Games"></category></entry><entry><title>Civilization 4</title><link href="https://eli.thegreenplace.net/2005/12/27/civilization-4" rel="alternate"></link><published>2005-12-27T10:11:00-08:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2005-12-27:/2005/12/27/civilization-4</id><summary type="html">
+        &lt;p&gt;From what I've seen so far (going through the tutorial and playing for another couple of hours myself) Civilization 4 is a terrific game. I still haven't fully adapted for the things that changed since Civ 3, but some initial impressions are now formed.&lt;/p&gt;
+&lt;p&gt;First and foremost, the graphics. When …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;From what I've seen so far (going through the tutorial and playing for another couple of hours myself) Civilization 4 is a terrific game. I still haven't fully adapted for the things that changed since Civ 3, but some initial impressions are now formed.&lt;/p&gt;
+&lt;p&gt;First and foremost, the graphics. When the first news of Civ 4 started coming, I joined the sceptist train, thinking that a game like Civ doesn't need good graphics. Well, I must admit I was wrong. The beautiful full-3D world (with zooms and camera rotations) of Civ 4 is amazing, and adds a lot to the gameplay. Everything is more realistic, and for a change you feel creating something *real* and not just tiled icons on a tilted map.&lt;/p&gt;
+&lt;p&gt;The user interface is very well-thought and convenient to use. Everything is accessible in a single click / keyboard shortcut, and the quick city view is very useful.&lt;/p&gt;
+&lt;p&gt;Also, I must say that the "civics" are cool and IMHO preferable to several hard-coded goverment types. If goverment would be that simple, political science wouldn't be a University degree. A goverment is an amalgalm of "civics" - approaches to issues like economics, population, religion, research, etc.&lt;/p&gt;
+&lt;p&gt;From reading in the manual a bit I see that Civ 4 has a lot of advanced features I haven't come to need yet (I didn't complete a game yet, my first game is now in year 920 BC) but I'll love in the later stages - normally designed city build queues, many options for worker automation, unit stacks / group orders, etc.&lt;/p&gt;
+
+    </content><category term="misc"></category><category term="Games"></category></entry><entry><title>nostalgic gaming</title><link href="https://eli.thegreenplace.net/2005/12/24/nostalgic-gaming" rel="alternate"></link><published>2005-12-24T11:21:00-08:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2005-12-24:/2005/12/24/nostalgic-gaming</id><summary type="html">
+        &lt;p&gt;If you feel nostalgic about PC games you've played 8+ years ago, visit www.abandonia.com&lt;/p&gt;
+&lt;p&gt;That site has a great collection of "abandonware" - old software (games) that have their copyrights expired and are available for free download.&lt;/p&gt;
+&lt;p&gt;I downloaded Colonization, Settlers II and now am enjoying a flashback into …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;If you feel nostalgic about PC games you've played 8+ years ago, visit www.abandonia.com&lt;/p&gt;
+&lt;p&gt;That site has a great collection of "abandonware" - old software (games) that have their copyrights expired and are available for free download.&lt;/p&gt;
+&lt;p&gt;I downloaded Colonization, Settlers II and now am enjoying a flashback into my early teenagerhood by playing Dune 2. Gosh, how primitive this game is, how unconvenient the controls (no grouping, no convenient right button) but it's still lots of fun !
+&lt;/p&gt;
+
+    </content><category term="misc"></category><category term="Games"></category></entry><entry><title>The Jotto word game - analysis and a Perl implementation</title><link href="https://eli.thegreenplace.net/2004/01/19/the-jotto-word-game-analysis-and-a-perl-implementation" rel="alternate"></link><published>2004-01-19T14:42:04-08:00</published><updated>2023-06-30T23:16:27-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2004-01-19:/2004/01/19/the-jotto-word-game-analysis-and-a-perl-implementation</id><summary type="html">
+        &lt;h3&gt;What is Jotto ?&lt;/h3&gt;
+Jotto is a two-player game where each player attempts to guess the other's secret five letter word. A player scores a guess based on the number of letters it has in common with the secret word. This is best shown with an example:
+
+Lets say Bob thought …</summary><content type="html">
+        &lt;h3&gt;What is Jotto ?&lt;/h3&gt;
+Jotto is a two-player game where each player attempts to guess the other's secret five letter word. A player scores a guess based on the number of letters it has in common with the secret word. This is best shown with an example:
+
+Lets say Bob thought of a 5 letter word - &lt;code&gt;stamp&lt;/code&gt;, and Sam should guess it. Sam's first guess is &lt;code&gt;woman&lt;/code&gt;. There are 2 letters in common between the words (m and a), so Bob gives this guess the score 2. Sam gained some information from this, and he can now make more educated guesses. The game ends when the guess is correct, and the goal is to do it with minimal amount of guesses.
+
+Here is a transcript from my game against the computer (the script I'm demonstrating in this article). The word I thought of is &lt;code&gt;woman &lt;/code&gt;and the computer is guessing it (the scores are entered by me, everything else is printed by the script): 
+&lt;pre&gt;
+If I guess correctly, please enter 999 as the score
+Specify dictionary file: easy.txt
+My guess is: feats
+Score: 1
+Legal words left: 1380
+My guess is: rumps
+Score: 1
+Legal words left: 610
+My guess is: bribe
+Score: 0
+Legal words left: 142
+My guess is: coons
+Score: 2
+Legal words left: 31
+My guess is: donut
+Score: 2
+Legal words left: 8
+My guess is: mango
+Score: 4
+Legal words left: 1
+My guess is: woman
+Score: 999
+
+Yay, I won !!
+&lt;/pre&gt;
+This game is very easy to grasp conceptually, but to play it well one needs to have a very good knowledge of English words and the ability to count letters (gaining valuable information from the given scores). 
+
+&lt;h3&gt;How did you get to Jotto, anyway ?&lt;/h3&gt;
+I was inspired by an article of Kevin Jackson-Mead in The Perl Review, Vol 0 Issue 7. Kevin explained the rules of the game and presented his Perl implementation. I decided to write an implementation of my own, as it would allow me to understand the game and do some interesting Perl hacking. I'm also interested in the search algorithms involved in such a game (simply put - how to make the computer play the best possible game). 
+
+&lt;h3&gt;The 5 letter dictionary&lt;/h3&gt;
+Jotto doesn't necessarily have to be played with 5 letter words, and my implementation inposes no restrictions on this. However, I needed a good dictionary, so I used Kevin's easy.txt wordlist, which consists of about 4000 5-letter words. 
+
+&lt;h3&gt;Lets us code a Jotto player !&lt;/h3&gt;
+If you still didn't understand what the Jotto game is about, read Kevin's article in The Perl Review, or just hang on - you'll probably get it when I explain the implementation. First of all, we need a routine to score a guess. Recall that the score is the number of letters common to the two words. I tried a few implementations of this score routine - my goal was efficiency. This routine is called a helluva lot of times during the search, hence it must be as swift as possible. After running a lot of timing tests (the Benchmark module has been very helpful), I finally adopted the following implementation: 
+&lt;pre&gt;&lt;code&gt;
+# Compute the "score" of two words - how many 
+# characters
+# they have in common.
+#
+# Returns $words_equal if the given words are 
+# equal, otherwise returns the number of common 
+# characters
+#
+sub score
+{
+    my ($word1, $word2) = @_;
+    my %bag;
+    my $score = 0;
+
+    return $words_equal if ($word1 eq $word2);
+
+    foreach (split '', $word1) 
+    {
+        $bag{$_}++;
+    }
+
+    foreach (split '', $word2) 
+    {
+        if ($bag{$_}) 
+        {
+            $bag{$_}--;
+            $score++;
+        }
+    }
+    return $score;
+}
+&lt;/code&gt;&lt;/pre&gt;
+For simplicity, $words_equal is just a constant defined globally as: 
+&lt;pre&gt;&lt;code&gt;
+my $words_equal = 999;
+&lt;/code&gt;&lt;/pre&gt;
+
+This &lt;code&gt;score &lt;/code&gt;cleverly uses a hash, and runs in linear time in the words length. First, all letters in $word1 are recorded in the hash. Then, the second word is traversed, and $score is increased only if this word's counter in the hash is positive (the counter is reduced each time a match is found). The whole procedure may seem overly complex, but it has a good reasoning behind it.
+
+Consider the (artificial) words abcde and aaxyz. They have only 1 letter in common, not 2, as a is only counted once (it only appears once in the first word). aaxyz and aaghj, on the other hand, have 2 letters in common - twice a, as it appears twice in both words. This is why the hash counter is needed.
+
+Note that the definition of &lt;code&gt;count &lt;/code&gt;is commutative - it should give the same score for two words no matter in what order it sees them. Think about it for a minute - it makes sense (because "in common" is commutative). 
+
+I will first implement a "human game" - a game in which the computer picks a word and lets the user guess it, printing the score of each attempt. 
+
+&lt;pre&gt;&lt;code&gt;
+# Returns a random element from a given array
+#
+sub random_arr_elem
+{
+    my @arr = @{$_[0]};
+    
+    return $arr[rand() * ($#arr + 1)];
+}
+
+
+# Given the name of a dictionary file, picks a 
+# random 
+# word from it
+#
+sub pick_random_word_from_file
+{
+    my $filename = $_[0];
+
+    open(FH, $filename) 
+        or die "Can't open $filename: $!\n";
+    my @words = ;
+    my $the_word = random_arr_elem(\@words);
+    chomp $the_word;
+
+    return $the_word;
+}
+&lt;/code&gt;&lt;/pre&gt;
+These routines should be pretty straightforward. Now, everything is set to code the human_guess_game routine: 
+&lt;pre&gt;&lt;code&gt;
+# Play a human guess game - the human tries to 
+# guess a word
+#
+# Asks for a dictionary file. Picks a random word 
+# from this
+# file, and lets the human guess
+#
+sub human_guess_game
+{
+    print "Specify dictionary file: ";
+    my $dict_file = &lt;&gt;;
+    chomp $dict_file;
+
+    my $word = 
+        pick_random_word_from_file($dict_file);
+
+    while (1)
+    {
+        print "\nEnter a guess: ";
+        my $guess = &lt;&gt;;
+        chomp $guess;
+    
+        if (score($word, $guess) == $words_equal)
+        {
+            print "\nCongrats, you guessed it !\n";
+            last;
+        }
+        else
+        {
+            print score($word, $guess);
+        }
+    }
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+First, it asks for a dictionary file. Given a file name, a word is picked randomly and the game begins. On each iteration, the user is prompted for a guess. If the guess is correct, the game ends. Otherwise, the score for this guess is printed and the user is prompted for the next guess. Simple, eh...
+
+Now, the more interesting part - implementing a computer "agent" that plays Jotto, guessing and improving its guesses based on scores given by the user. Think for a moment how you'd incorporate the information supplied by a score to make better guesses later. If the score is 0, for example, you know that neither of the letters in your guess appear in the target word. If the score is 5 you know that the letters are the same - and your guess is just a permutation of the target word. But these are the simple cases. How do you take into account information gained from different guesses / scores ?
+
+The best tactic would be, given a guess and its score, go over the dictionary and remove all words that don't fit - wouldn't yield the same score with the guess.
+For a human it's a long, tedious job and one has to be very experienced to do it well in his head. For the computer it's piece of cake ! Going over a long list of words, removing the ones that don't fit a given criteria - this is just what computers love doing !
+This brings us to the refine_words_array routine: 
+&lt;pre&gt;&lt;code&gt;
+# Given an array of words, a guess, and the score 
+# of that guess, removes all array elements that 
+# don't get the same score with the guess
+#
+sub refine_words_array
+{
+    my @arr = @{$_[0]};
+    my $guess = $_[1];
+    my $score = $_[2];
+
+    my @res_arr;
+
+    foreach (@arr)
+    {
+        push(@res_arr, $_) 
+            if ($score == score($guess, $_));
+    }
+
+    return \@res_arr;
+}
+&lt;/code&gt;&lt;/pre&gt;
+Say you have a list of words, a guess - apple and a score - 2. refine_words_array goes over the list of words, and removes all words that don't score 2 with apple. So, for example, stamp will be removed (it scores 1), but plant will stay (it scores 2).
+
+It is important to understand that after going over the list, this routine returns a list with ALL legal words and ONLY the legal words (if we define "legal" as a word scoring the given score with the guess). By ALL, I mean that there are no legal words that will be removed. By ONLY, I mean that there are no illegal words that won't be removed. In fact, from the resulting list, one and only one word is the guess (granted that the list is unique).
+
+Now we have everything we need to code the &lt;code&gt;computer_guess_game&lt;/code&gt; routine: 
+&lt;pre&gt;&lt;code&gt;
+# Play a computer guess game - the computer 
+# tries to guess a work
+#
+# Asks for a dictionary file and starts guessing 
+# words. The user must supply the score for 
+# each guess
+#
+sub computer_guess_game
+{
+    print "If I guess correctly, please enter 
+            $words_equal as the score\n";
+    print "Specify dictionary file: ";
+    my $dict_file = &lt;&gt;;
+    chomp $dict_file;
+
+    # Get a list of words from the dictionary file
+    #
+    open(FH, $dict_file) 
+        or die "Can't open $dict_file: $!\n";
+    my @words = ;
+    chomp(@words);
+
+    my $guess = random_arr_elem(\@words);
+
+    while (1)
+    {
+        print "My guess is: $guess\n";
+        print "Score: ";
+        my $score = &lt;&gt;;
+        chomp $score;
+
+        if ($score == $words_equal)
+        {
+            print "\nYay, I won !!\n";
+            last;
+        }
+
+        my $ref = refine_words_array(
+                         \@words, $guess, $score);
+        @words = @$ref;
+
+        if (scalar(@words) == 0)
+        {
+            print "\nNo suitable word in the given 
+                    dictionary !!\n";
+            last;
+        }
+
+        print "Legal words left: " . 
+               scalar(@words) . "\n";
+
+        $guess = random_arr_elem(\@words);
+    }
+}
+&lt;/code&gt;&lt;/pre&gt;
+
+First, the routine asks for a dictionary file. At this point, it expects the user to think of a word (from the given file) and be ready to score guesses. The first guess is randomly picked from the full list. On each iteration, the guess is printed and the user is prompted for a score. Given the score, refine_words_array is used to remove all illegal words from the list, and a new guess is randomly picked from the refined list.
+
+That's it... Putting all of these routines together and calling either computer_guess_game or human_guess_game you can have an interactive game against the computer, either guessing the computer's word or letting it guess your word. For your convenience, you can find the full script here.
+
+&lt;h3&gt;Acknowledgements&lt;/h3&gt;
+Big thanks to Kevin Jackson-Mead, for the article that made me interested in Jotto and his great dictionary file. Thanks also to the Perl gurus at perlmonks.org, for helping me write a robust and efficient score routine.
+
+    </content><category term="misc"></category><category term="Games"></category><category term="Perl"></category></entry></feed>

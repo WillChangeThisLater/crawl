@@ -1,0 +1,868 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>On Recursion, Continuations and Trampolines - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to On Recursion, Continuations and Trampolines">
+                        On Recursion, Continuations and Trampolines
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> April 11, 2017 at 05:50</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/python.html">Python</a>
+        ,
+    <a href="../../tag/clojure.html">Clojure</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>How is tail recursion different from regular recursion? What do continuations
+have to do with this, what is CPS, and how do trampolines help? This article
+provides an introduction, with code samples in Python and Clojure.</p>
+<div class="section" id="recursion-and-tail-recursion">
+<h2>Recursion and Tail Recursion</h2>
+<p>Here's a textbook version of a recursive factorial implementation in Python:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">fact_rec</span><span class="p">(</span><span class="n">n</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">n</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">return</span> <span class="mi">1</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">n</span> <span class="o">*</span> <span class="n">fact_rec</span><span class="p">(</span><span class="n">n</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span>
+</pre></div>
+<p><em>Tail</em> recursion is when the recursive call happens in <em>tail position</em>, meaning
+that it is the last thing the function does before returning its own result.
+Here's a tail-recursive version of factorial:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">fact_tailrec</span><span class="p">(</span><span class="n">n</span><span class="p">,</span> <span class="n">result</span><span class="o">=</span><span class="mi">1</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">n</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">result</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">fact_tailrec</span><span class="p">(</span><span class="n">n</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="n">result</span> <span class="o">*</span> <span class="n">n</span><span class="p">)</span>
+</pre></div>
+<p>The tail call doesn't have to be directly recursive. It can call another
+function as well, implementing mutual recursion or some more complex scheme.
+Here's a canonical example of mutual recursion - a silly way to tell whether a
+number is odd or even:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">is_even</span><span class="p">(</span><span class="n">n</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">n</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">True</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">is_odd</span><span class="p">(</span><span class="n">n</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">is_odd</span><span class="p">(</span><span class="n">n</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">n</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">return</span> <span class="kc">False</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">is_even</span><span class="p">(</span><span class="n">n</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span>
+</pre></div>
+<p>All the function calls here are in tail position.</p>
+<p>Both these examples are simple in a way, because they only contain a single
+call within each function. When functions make multiple calls, things become
+more challenging. Computing the Fibonacci sequence is a good example:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">fib_rec</span><span class="p">(</span><span class="n">n</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">n</span> <span class="o">&lt;</span> <span class="mi">2</span><span class="p">:</span>
+        <span class="k">return</span> <span class="mi">1</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">fib_rec</span><span class="p">(</span><span class="n">n</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span> <span class="o">+</span> <span class="n">fib_rec</span><span class="p">(</span><span class="n">n</span> <span class="o">-</span> <span class="mi">2</span><span class="p">)</span>
+</pre></div>
+<p>Here we have two recursive calls to <tt class="docutils literal">fib_rec</tt> within itself. Converting this
+function to a tail-call variant will be more challenging. How about this
+attempt:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">fib_almost_tail</span><span class="p">(</span><span class="n">n</span><span class="p">,</span> <span class="n">result</span><span class="o">=</span><span class="mi">1</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">n</span> <span class="o">&lt;</span> <span class="mi">2</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">result</span>
+    <span class="n">prev2</span> <span class="o">=</span> <span class="n">fib_almost_tail</span><span class="p">(</span><span class="n">n</span> <span class="o">-</span> <span class="mi">2</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">fib_almost_tail</span><span class="p">(</span><span class="n">n</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="n">prev2</span> <span class="o">+</span> <span class="n">result</span><span class="p">)</span>
+</pre></div>
+<p>The last thing <tt class="docutils literal">fib_almost_tail</tt> does is call itself; so is this function
+tail-recursive? No, because there's another call to <tt class="docutils literal">fib_almost_tail</tt>, and
+that one is <em>not</em> in tail position. Here's a more thorough attempt:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">fib_tail</span><span class="p">(</span><span class="n">n</span><span class="p">,</span> <span class="n">accum1</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">accum2</span><span class="o">=</span><span class="mi">1</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">n</span> <span class="o">&lt;</span> <span class="mi">2</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">accum1</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">fib_tail</span><span class="p">(</span><span class="n">n</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="n">accum1</span> <span class="o">+</span> <span class="n">accum2</span><span class="p">,</span> <span class="n">accum1</span><span class="p">)</span>
+</pre></div>
+<p>Note that this conversion wasn't as simple as for the factorial; it's much less
+obvious how to come up with the algorithm, and we even changed the number of
+calls - there's only one recursive call here, while the original <tt class="docutils literal">fib_rec</tt> had
+two. Obviously, it's challenging to have no calls outside a tail position in a
+function that calls multiple functions.</p>
+</div>
+<div class="section" id="blowing-up-the-stack">
+<h2>Blowing up the stack</h2>
+<p>Recursive solutions tend to be succinct and elegant; however, they carry a
+dangerous burden - the possibility of blowing up the runtime stack. In Python
+<a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>, the <a class="reference external" href="https://docs.python.org/3/library/sys.html#sys.getrecursionlimit">default call stack depth</a> is 1000. If
+we try the <tt class="docutils literal">fact_rec</tt> function shown above in a terminal, we'll get:</p>
+<div class="highlight"><pre><span></span>&gt;&gt;&gt; fact_rec(900)
+... some uselessly huge number
+
+&gt;&gt;&gt; fact_rec(1000)
+... spew ...
+RecursionError: maximum recursion depth exceeded in comparison
+</pre></div>
+<p>You may say - who needs to compute a factorial of 1000? And that may be true;
+however, with multiple recursion the problems start much earlier. If you try to
+compute the 50th Fibonacci number using <tt class="docutils literal">fib_rec</tt> as shown above, you'll end
+up waiting for a <em>very</em> long time, even though the request seems modest at first
+glance. The reason is the <a class="reference external" href="http://stackoverflow.com/questions/7547133/why-is-the-complexity-of-computing-the-fibonacci-series-2n-and-not-n2">exponential complexity of the naive implementation</a>.</p>
+<p>Note that <tt class="docutils literal">fib_tail</tt> doesn't suffer from this problem because there's no
+exponential tree of calls, but it will also happily blow the stack when run with
+a sufficiently large number. The same is true for <tt class="docutils literal">fact_tail</tt>, by the way.
+Tail recursion itself doesn't solve the stack issue; another ingredient is
+required and we'll cover it shortly.</p>
+</div>
+<div class="section" id="solutions-tco-or-manual-conversion-to-iteration">
+<h2>Solutions: TCO or manual conversion to iteration</h2>
+<p>The problems described in the previous section help motivate the discussion of
+tail calls. Why convert to tail calls at all? Because then, in some languages,
+the compiler can automatically elide the stack buildup by converting the tail
+call to a jump. This trick is called <em>tail-call optimization</em> (TCO) <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>. Scheme
+has been doing it since the 1970s - indeed, since Scheme encourages programmers
+to write recursive algorithms, TCO is at the core of the language. More modern
+languages are catching up too - Lua supports TCO and JavaScript will too, once
+ES6 becomes the de-facto universal version.</p>
+<p>Some languages do not support TCO, however. Python is one of those - Guido
+explicitly states that <a class="reference external" href="http://neopythonic.blogspot.com/2009/04/tail-recursion-elimination.html">TCO is unpythonic</a> and
+he doesn't want it in the language. In the end of this post I'll explain why I
+think it's not a big deal for Python. For other languages, it's a much bigger
+problem.</p>
+<p>Take Clojure for example. Since Clojure is built on top of the JVM, it has to
+use JVM semantics for calls (if it wants any speed at all). The JVM doesn't have
+full support for TCO; so Clojure - a Lisp, mind you - ends up without TCO <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>
+Clojure takes a pragmatic approach and faces this problem with valor - it
+encourages a manual TCO conversion using the <tt class="docutils literal"><span class="pre">loop...recur</span></tt> pair:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">fib_iterative</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">loop </span><span class="p">[</span><span class="nv">n</span><span class="w"> </span><span class="nv">n</span><span class="w"></span>
+<span class="w">         </span><span class="nv">accum1</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+<span class="w">         </span><span class="nv">accum2</span><span class="w"> </span><span class="mi">1</span><span class="p">]</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="k">if </span><span class="p">(</span><span class="nb">&lt; </span><span class="nv">n</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="nv">accum1</span><span class="w"></span>
+<span class="w">      </span><span class="p">(</span><span class="nf">recur</span><span class="w"> </span><span class="p">(</span><span class="nb">- </span><span class="nv">n</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nb">+ </span><span class="nv">accum1</span><span class="w"> </span><span class="nv">accum2</span><span class="p">)</span><span class="w"> </span><span class="nv">accum1</span><span class="p">))))</span><span class="w"></span>
+</pre></div>
+<p>Note the similarity between this code and the Python <tt class="docutils literal">fib_tail</tt> shown
+earlier. This is not a coincidence! Once the algorithm is expressed in tail
+form, it's pretty easy to convert it to an iteration pattern manually; if it
+wasn't easy, compilers wouldn't be able to do it automatically for the past 40
+years!</p>
+<p>Just as a point of reference, here's <tt class="docutils literal">fib_iterative</tt> in Python:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">fib_iterative</span><span class="p">(</span><span class="n">n</span><span class="p">):</span>
+    <span class="n">accum1</span><span class="p">,</span> <span class="n">accum2</span> <span class="o">=</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span>
+    <span class="k">while</span> <span class="n">n</span> <span class="o">&gt;=</span> <span class="mi">2</span><span class="p">:</span>
+        <span class="n">n</span> <span class="o">-=</span> <span class="mi">1</span>
+        <span class="n">accum1</span><span class="p">,</span> <span class="n">accum2</span> <span class="o">=</span> <span class="n">accum1</span> <span class="o">+</span> <span class="n">accum2</span><span class="p">,</span> <span class="n">accum1</span>
+    <span class="k">return</span> <span class="n">accum1</span>
+</pre></div>
+<p>Only slightly more awkward than the Clojure version - but it's essentially the
+same approach. Since the tail call carries the whole state around in arguments,
+we just imitate this using an explicit loop and state variables.</p>
+<p>The iterative solution is what we <em>really</em> want here - it avoids the exponential
+algorithm <em>and</em> the stack explosion. It also doesn't incur the costs of a
+function call and return for every iteration. The only problem is that we have
+to do this manually in languages that don't support TCO. The beauty of automatic
+TCO is that you can write your algorithm recursively, and get the performance &amp;
+runtime characteristics of an iterative solution.</p>
+<p>At this point you may wonder how to convert indirect / mutual recursion to an
+iterative pattern - for example the even / odd pair above. While this doesn't
+present a problem for the compiler <a class="footnote-reference" href="index.html#footnote-4" id="footnote-reference-4">[4]</a>, to do it manually is indeed more
+challenging. We'll be covering this topic later in the article when we get to
+trampolines.</p>
+</div>
+<div class="section" id="more-realistic-examples">
+<h2>More realistic examples</h2>
+<p>Before we get to the more advanced topics, I'd like to present a few more
+realistic functions with an elegant recursive formulation that would be
+challenging to rewrite iteratively.</p>
+<p>Let's start with merge sorting. Here's a straightforward Python implementation:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">merge_sort</span><span class="p">(</span><span class="n">lst</span><span class="p">):</span>
+    <span class="n">n</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">lst</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">n</span> <span class="o">&lt;=</span> <span class="mi">1</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">lst</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">mid</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">n</span> <span class="o">/</span> <span class="mi">2</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">merge</span><span class="p">(</span><span class="n">merge_sort</span><span class="p">(</span><span class="n">lst</span><span class="p">[:</span><span class="n">mid</span><span class="p">]),</span> <span class="n">merge_sort</span><span class="p">(</span><span class="n">lst</span><span class="p">[</span><span class="n">mid</span><span class="p">:]))</span>
+
+<span class="k">def</span> <span class="nf">merge</span><span class="p">(</span><span class="n">lst1</span><span class="p">,</span> <span class="n">lst2</span><span class="p">):</span>
+    <span class="sd">&quot;&quot;&quot;Merges two sorted lists into a single sorted list.</span>
+
+<span class="sd">    Returns new list. lst1 and lst2 are destroyed in the process.&quot;&quot;&quot;</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">while</span> <span class="n">lst1</span> <span class="ow">or</span> <span class="n">lst2</span><span class="p">:</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">lst1</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">result</span> <span class="o">+</span> <span class="n">lst2</span>
+        <span class="k">elif</span> <span class="ow">not</span> <span class="n">lst2</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">result</span> <span class="o">+</span> <span class="n">lst1</span>
+        <span class="k">if</span> <span class="n">lst1</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&lt;</span> <span class="n">lst2</span><span class="p">[</span><span class="mi">0</span><span class="p">]:</span>
+            <span class="c1"># Note: pop(0) may be slow -- this isn&#39;t optimized code.</span>
+            <span class="n">result</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">lst1</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="mi">0</span><span class="p">))</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">result</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">lst2</span><span class="o">.</span><span class="n">pop</span><span class="p">(</span><span class="mi">0</span><span class="p">))</span>
+    <span class="k">return</span> <span class="n">result</span>
+</pre></div>
+<p>In a way, merge sort always reminds me of <em>postorder</em> tree traversal - we
+recurse to the left, then recurse to the right, then combine the results. Such
+algorithms are fairly tricky to convert to non-recursive code. Try it! Chances
+are you'll end up emulating a stack, or coming up with an <a class="reference external" href="http://stackoverflow.com/questions/1557894/non-recursive-merge-sort">entirely different
+algorithm</a>.</p>
+<p>Merge sort is an example of multiple recursion, which as we've seen even for the
+simple Fibonacci, presents a challenge for TCO. Another common problem is
+indirect recursion. We've seen the trivial case of even / odd. For something
+more realistic consider a recursive-descent parser for this grammar:</p>
+<div class="highlight"><pre><span></span>&lt;expr&gt;    : &lt;term&gt; + &lt;expr&gt;
+            &lt;term&gt;
+&lt;term&gt;    : &lt;factor&gt; * &lt;factor&gt;
+            &lt;factor&gt;
+&lt;factor&gt;  : &lt;number&gt;
+          | &#39;(&#39; &lt;expr&gt; &#39;)&#39;
+&lt;number&gt;  : \d+
+</pre></div>
+<p>The full Python code is <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/continuations-trampolines/rdparser.py">here</a>;
+<tt class="docutils literal">parse_expr</tt> calls <tt class="docutils literal">parse_term</tt>; <tt class="docutils literal">parse_term</tt> calls <tt class="docutils literal">parse_factor</tt>;
+<tt class="docutils literal">parse_factor</tt>, in term, calls <tt class="docutils literal">parse_expr</tt>. For a complex expression, the
+call stack will end up containing multiple instances of each function, and at
+least in theory it's unbounded.</p>
+</div>
+<div class="section" id="continuations-and-cps">
+<h2>Continuations and CPS</h2>
+<p>Continuations are a cool concept in computer science, hailing from the earliest
+days of functional programming. There's tons of information online about
+continuations; my modest attempt to explain them here is just the beginning! If
+this looks interesting, make sure to google for more information.</p>
+<p>Consider the following expression:</p>
+<div class="highlight"><pre><span></span>2 * (3 + 4)
+</pre></div>
+<p>One way to reason about its evaluation is:</p>
+<ol class="arabic simple">
+<li>Compute <tt class="docutils literal">value = 3 + 4</tt></li>
+<li>Then compute <tt class="docutils literal">2 * value</tt></li>
+</ol>
+<p>We can view <tt class="docutils literal">2 * value</tt> to be the <em>continuation</em> of <tt class="docutils literal">value = 3 + 4</tt>.
+Similarly, if the expression above is part of the bigger expression:</p>
+<div class="highlight"><pre><span></span>2 * (3 + 4) + 100
+</pre></div>
+<p>We can say that <tt class="docutils literal">value + 100</tt> is the continuation of <tt class="docutils literal">2 * (3 + 4)</tt>. This may
+seem a bit abstract, so let's convert it to Lisp-y syntax <a class="footnote-reference" href="index.html#footnote-5" id="footnote-reference-5">[5]</a> to bring it back
+to the domain of programming. Here is one way to compute <tt class="docutils literal">2 * (3 + 4)</tt>:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">expr</span><span class="w"></span>
+<span class="w">  </span><span class="p">[]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="nb">* </span><span class="mi">2</span><span class="w"> </span><span class="p">(</span><span class="nb">+ </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="p">)))</span><span class="w"></span>
+</pre></div>
+<p>Now we can call <tt class="docutils literal">(expr)</tt> and get 14 back. Another way to express the same
+computation is:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">end-cont</span><span class="w"> </span><span class="p">[</span><span class="nv">value</span><span class="p">]</span><span class="w"> </span><span class="p">(</span><span class="nb">print </span><span class="nv">value</span><span class="p">))</span><span class="w"></span>
+
+<span class="p">(</span><span class="kd">defn </span><span class="nv">apply-cont</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">cont</span><span class="w"> </span><span class="nv">value</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="nf">cont</span><span class="w"> </span><span class="nv">value</span><span class="p">))</span><span class="w"></span>
+
+<span class="p">(</span><span class="kd">defn </span><span class="nv">expr-cps</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">cont</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="nf">apply-cont</span><span class="w"> </span><span class="nv">cont</span><span class="w"> </span><span class="p">(</span><span class="nb">+ </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="p">)))</span><span class="w"></span>
+
+<span class="p">(</span><span class="kd">defn </span><span class="nv">make-double-cont</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">saved-cont</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">fn </span><span class="p">[</span><span class="nv">value</span><span class="p">]</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">apply-cont</span><span class="w"> </span><span class="nv">saved-cont</span><span class="w"> </span><span class="p">(</span><span class="nb">* </span><span class="mi">2</span><span class="w"> </span><span class="nv">value</span><span class="p">))))</span><span class="w"></span>
+
+<span class="p">(</span><span class="nf">expr-cps</span><span class="w"> </span><span class="p">(</span><span class="nf">make-double-cont</span><span class="w"> </span><span class="nv">end-cont</span><span class="p">))</span><span class="w"></span>
+</pre></div>
+<p>We represent continuations as functions taking a single argument <tt class="docutils literal">value</tt>. We
+also abstract away the concept of <em>applying a continuation</em> with <tt class="docutils literal"><span class="pre">apply-cont</span></tt>.
+The final continuation <tt class="docutils literal"><span class="pre">end-cont</span></tt> consumes the result of the whole computation
+and prints it out. Note how continuations are composed here: we invoke
+<tt class="docutils literal"><span class="pre">expr-cps</span></tt>, which expects a continuation. We use the <tt class="docutils literal"><span class="pre">make-double-cont</span></tt>
+constructor to create a continuation that doubles its value. Note how this
+doubling continuation works: it knows what its own continuation is, and applies
+it to <tt class="docutils literal">(* 2 value)</tt>. In fact, <tt class="docutils literal"><span class="pre">make-double-cont</span></tt> is just syntactic sugar; we
+could do without it:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="nf">expr-cps</span><span class="w"> </span><span class="p">(</span><span class="k">fn </span><span class="p">[</span><span class="nv">value</span><span class="p">]</span><span class="w"> </span><span class="p">(</span><span class="nf">apply-cont</span><span class="w"> </span><span class="nv">end-cont</span><span class="w"> </span><span class="p">(</span><span class="nb">* </span><span class="mi">2</span><span class="w"> </span><span class="nv">value</span><span class="p">))))</span><span class="w"></span>
+</pre></div>
+<p>Now let's see how to do this for the longer expression. We keep the utilities
+defined earlier and add:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">make-plus100-cont</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">saved-cont</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">fn </span><span class="p">[</span><span class="nv">value</span><span class="p">]</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">apply-cont</span><span class="w"> </span><span class="nv">saved-cont</span><span class="w"> </span><span class="p">(</span><span class="nb">+ </span><span class="nv">value</span><span class="w"> </span><span class="mi">100</span><span class="p">))))</span><span class="w"></span>
+
+<span class="p">(</span><span class="nf">expr-cps</span><span class="w"> </span><span class="p">(</span><span class="nf">make-double-cont</span><span class="w"> </span><span class="p">(</span><span class="nf">make-plus100-cont</span><span class="w"> </span><span class="nv">end-cont</span><span class="p">)))</span><span class="w"></span>
+</pre></div>
+<p>What happens in this last invocation?</p>
+<ol class="arabic simple">
+<li><tt class="docutils literal"><span class="pre">expr-cps</span></tt> gets called with some continuation. It computes <tt class="docutils literal">3 + 4</tt> and
+passes the result into the continuation.</li>
+<li>This continuation happens to be the doubling continuation, which applies
+<tt class="docutils literal">2 * value</tt> to its <tt class="docutils literal">value</tt> and passes this result to its own
+continuation.</li>
+<li>That continuation, in turn, is a &quot;plus 100&quot; continuation: it applies <tt class="docutils literal">value
++ 100</tt> to its <tt class="docutils literal">value</tt> and passes the result to its own continuation.</li>
+<li>The last continuation in the chain happens to be <tt class="docutils literal"><span class="pre">end-cont</span></tt>, which prints
+the overall result: 114</li>
+</ol>
+<p>If all of this looks like a masochistic exercise in inverting the call stack
+(note how the continuations are composed - from the inside out), just a bit more
+patience - it will all start making sense soon. The <tt class="docutils literal"><span class="pre">-cps</span></tt> suffix of
+<tt class="docutils literal"><span class="pre">expr-cps</span></tt> stands for Continuation Passing Style, by the way, which is the
+style of programming we're seeing here; converting &quot;normal&quot; code into this
+style is called <em>CPS-transform</em> (or <em>CPS conversion</em>).</p>
+<p>The lightbulb should go on when you make the following observation: all the
+expressions computed in this CPS approach are in tail position. Wait, what
+does it mean? The original function computing the full expression is:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">expr</span><span class="w"></span>
+<span class="w">  </span><span class="p">[]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="nb">+ </span><span class="p">(</span><span class="nb">* </span><span class="mi">2</span><span class="w"> </span><span class="p">(</span><span class="nb">+ </span><span class="mi">3</span><span class="w"> </span><span class="mi">4</span><span class="p">)))</span><span class="w"> </span><span class="mi">100</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>The only tail call here is to the outermost <tt class="docutils literal">+</tt>. Both the <tt class="docutils literal">*</tt> and the inner
+<tt class="docutils literal">+</tt> are not in tail position. However, if you carefully examine the CPS
+approach, <em>all</em> the operator calls are in tail positions - their results are
+passed directly into the relevant continuations, without any changes. For this
+purpose we do not count the continuation application as a function call. We're
+going to be using this wonderful feature of CPS very soon to great benefit. But
+first, a brief dip into theory.</p>
+</div>
+<div class="section" id="undelimited-and-delimited-continuations">
+<h2>Undelimited and delimited continuations</h2>
+<p>The formulation of <tt class="docutils literal"><span class="pre">end-cont</span></tt> I'm using in the example above may appear
+peculiar. It <tt class="docutils literal">print</tt>s its value - but what if we want to do something else
+with it? The strange <tt class="docutils literal">print</tt> is a trick to emulate <em>real</em>, or <em>unbounded</em>
+continuations in a language that doesn't support them <a class="footnote-reference" href="index.html#footnote-6" id="footnote-reference-6">[6]</a>. Applying unbounded
+continuations is not just calling a function - it's passing control without hope
+of return. Just like coroutines, or <tt class="docutils literal">longjmp</tt> in C.</p>
+<p>Unbounded continuations <em>do not return to their caller</em>. They express a flow of
+computation where results flow in one direction, without ever returning.
+This is getting beyond the scope of the article, but when unbounded
+continuations can be treated as first-class values in a language, they become so
+powerful that they can be used to implement pretty much any control-flow feature
+you can imagine - exceptions, threads, coroutines and so on. This is precisely
+what continuations are sometimes used for in the implementation of functional
+languages, where CPS-transform is one of the compilation stages.</p>
+<p>I'd love to expound more on the topic, but I'll have to leave it to another day.
+If you're interested, read some information online and play with a language
+that supports real continuations - like Scheme with <tt class="docutils literal">call/cc</tt>. It's fun and
+scary at the same time.</p>
+<p>Even though most programming languages don't support real, <em>unbounded</em>
+continuations, <em>bounded</em> continuations is another deal. A <em>bounded</em> continuation
+is just a function that returns to its caller. We can still use CPS but just
+have to be realistic about our expectations. Applying a bounded continuation
+simply means calling a function - so the stack <em>will</em> grow.</p>
+<p>If we cycle back to our expression, we can stop pretending our continuations are
+anything except a simulation, and just define:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">end-cont</span><span class="w"> </span><span class="p">[</span><span class="nv">value</span><span class="p">]</span><span class="w"> </span><span class="nv">value</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>In fact, we don't even have to pretend <tt class="docutils literal"><span class="pre">(apply-cont</span> cont value)</tt> is any
+different from simply calling <tt class="docutils literal">(cont value)</tt>, so now we can rewrite our
+CPS expression much more succinctly:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">real-end-cont</span><span class="w"> </span><span class="p">[</span><span class="nv">value</span><span class="p">]</span><span class="w"> </span><span class="nv">value</span><span class="p">)</span><span class="w"></span>
+
+<span class="p">(</span><span class="nf">expr-cps</span><span class="w"> </span><span class="p">(</span><span class="k">fn </span><span class="p">[</span><span class="nv">value</span><span class="p">]</span><span class="w"></span>
+<span class="w">            </span><span class="p">((</span><span class="k">fn </span><span class="p">[</span><span class="nv">value</span><span class="p">]</span><span class="w"> </span><span class="p">(</span><span class="nf">real-end-cont</span><span class="w"> </span><span class="p">(</span><span class="nb">+ </span><span class="nv">value</span><span class="w"> </span><span class="mi">100</span><span class="p">)))</span><span class="w"> </span><span class="p">(</span><span class="nb">* </span><span class="mi">2</span><span class="w"> </span><span class="nv">value</span><span class="p">))))</span><span class="w"></span>
+</pre></div>
+<p>It looks a bit weird because we could just inline the <tt class="docutils literal">(* 2 value)</tt> into
+the internal call, but keeping them separate will help us later.</p>
+</div>
+<div class="section" id="synthesizing-tail-calls-with-cps-transform">
+<h2>Synthesizing tail calls with CPS-transform</h2>
+<p>Armed with this new tool, let's revisit some of the Python functions from the
+beginning of the article. For the factorial, we used an extra parameter to get a
+tail-call version; for Fibonacci we needed two; for more advanced examples (like
+merge sort) it wasn't very clear how to do the conversion. CPS-transform to the
+rescue!</p>
+<p>It turns out we can convert any function to use tail calls instead of recursion
+(direct or indirect) by applying the following recipe:</p>
+<ol class="arabic simple">
+<li>Pass each function an extra parameter - <tt class="docutils literal">cont</tt>.</li>
+<li>Whenever the function returns an expression that doesn't contain function
+calls, send that expression to the continuation <tt class="docutils literal">cont</tt> instead.</li>
+<li>Whenever a function call occurs in a tail position, call the function with
+the same continuation - <tt class="docutils literal">cont</tt>.</li>
+<li>Whenever a function call occurs in an operand (non-tail) position, instead
+perform this call in a new continuation that gives a name to the result and
+continues with the expression.</li>
+</ol>
+<p>This may not make much sense without examples. Let's review the recursive
+factorial first:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">fact_rec</span><span class="p">(</span><span class="n">n</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">n</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">return</span> <span class="mi">1</span>                       <span class="c1"># (1)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">n</span> <span class="o">*</span> <span class="n">fact_rec</span><span class="p">(</span><span class="n">n</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span>     <span class="c1"># (2)</span>
+</pre></div>
+<p>The line marked with (1) hits step 2 of the recipe; the line marked with (2)
+hits step 4, since a function call (to <tt class="docutils literal">fact_rec</tt> itself) occurs in an operand
+position. Here is how we transform this function to CPS:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">fact_cps</span><span class="p">(</span><span class="n">n</span><span class="p">,</span> <span class="n">cont</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">n</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">cont</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">fact_cps</span><span class="p">(</span><span class="n">n</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span> <span class="k">lambda</span> <span class="n">value</span><span class="p">:</span> <span class="n">cont</span><span class="p">(</span><span class="n">n</span> <span class="o">*</span> <span class="n">value</span><span class="p">))</span>
+</pre></div>
+<p>The application of steps 1 and 2 is straightforward. Step 4 requires a bit more
+explanation. Since the call <tt class="docutils literal">fact_rec(n - 1)</tt> is the one occurring in operand
+position, we extract it out and perform it in a new continuation. This
+continuation then passes <tt class="docutils literal">n * value</tt> to the original continuation of
+<tt class="docutils literal">fact_cps</tt>. Take a moment to convince yourself that this code does, in fact,
+compute the factorial. We have to run it with the &quot;end continuation&quot; discussed
+before:</p>
+<div class="highlight"><pre><span></span>&gt;&gt;&gt; end_cont = lambda value: value
+&gt;&gt;&gt; fact_cps(6, end_cont)
+720
+</pre></div>
+<p>Now let's do the same thing for Fibonacci, which demonstrates a more complex
+recursion pattern:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">fib_rec</span><span class="p">(</span><span class="n">n</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">n</span> <span class="o">&lt;</span> <span class="mi">2</span><span class="p">:</span>
+        <span class="k">return</span> <span class="mi">1</span>                                 <span class="c1"># (1)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">fib_rec</span><span class="p">(</span><span class="n">n</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span> <span class="o">+</span> <span class="n">fib_rec</span><span class="p">(</span><span class="n">n</span> <span class="o">-</span> <span class="mi">2</span><span class="p">)</span>   <span class="c1"># (2)</span>
+</pre></div>
+<p>Once again, applying steps 1 and 2 is trivial. Step 4 will have to applied on
+line marked with (2), but twice, since we have two function calls in operand
+positions. Let's handle the <tt class="docutils literal">fib_rec(n - 1)</tt> first, similarly to what we
+did for the factorial:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">fib_cps_partial</span><span class="p">(</span><span class="n">n</span><span class="p">,</span> <span class="n">cont</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">n</span> <span class="o">&lt;</span> <span class="mi">2</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">cont</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">fib_cps_partial</span><span class="p">(</span>
+                <span class="n">n</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span>
+                <span class="k">lambda</span> <span class="n">value</span><span class="p">:</span> <span class="n">value</span> <span class="o">+</span> <span class="n">fib_cps_partial</span><span class="p">(</span><span class="n">n</span> <span class="o">-</span> <span class="mi">2</span><span class="p">,</span> <span class="n">cont</span><span class="p">))</span>
+</pre></div>
+<p>All calls in <tt class="docutils literal">fib_cps_partial</tt> are in tail position now, but there's a
+problem. The continuation we crafted for the recursive call... itself has a call
+not in tail position. We'll have to apply CPS-transform once again, recursively.
+We'll treat the expression inside the <tt class="docutils literal">lambda</tt> as just another function
+definition to transform. Here's the final version, which is fully transformed:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">fib_cps</span><span class="p">(</span><span class="n">n</span><span class="p">,</span> <span class="n">cont</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">n</span> <span class="o">&lt;</span> <span class="mi">2</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">cont</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">fib_cps</span><span class="p">(</span>
+                 <span class="n">n</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span>
+                 <span class="k">lambda</span> <span class="n">value</span><span class="p">:</span> <span class="n">fib_cps</span><span class="p">(</span>
+                                 <span class="n">n</span> <span class="o">-</span> <span class="mi">2</span><span class="p">,</span>
+                                 <span class="k">lambda</span> <span class="n">value2</span><span class="p">:</span> <span class="n">cont</span><span class="p">(</span><span class="n">value</span> <span class="o">+</span> <span class="n">value2</span><span class="p">)))</span>
+</pre></div>
+<p>And once again, it's easy to see this version contains no calls that aren't
+in tail position. As opposed to the conversions shown in the beginning of the
+article, this one is much less ad-hoc and follows a clear recipe. In fact, it
+can be performed automatically by a compiler or a source transformation tool!</p>
+<p>Just to show this is actually helpful in more general cases, let's tackle merge
+sort again. We have the recursive implementation at the top of this post, with
+the tricky part in the line:</p>
+<div class="highlight"><pre><span></span><span class="k">return</span> <span class="n">merge</span><span class="p">(</span><span class="n">merge_sort</span><span class="p">(</span><span class="n">lst</span><span class="p">[:</span><span class="n">mid</span><span class="p">]),</span> <span class="n">merge_sort</span><span class="p">(</span><span class="n">lst</span><span class="p">[</span><span class="n">mid</span><span class="p">:]))</span>
+</pre></div>
+<p>But transforming merge sort to CPS turns out not much different from
+transforming Fibonacci. I won't go through the partial stage for this now, and
+will just present the final answer:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">merge_sort_cps</span><span class="p">(</span><span class="n">lst</span><span class="p">,</span> <span class="n">cont</span><span class="p">):</span>
+    <span class="n">n</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">lst</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">n</span> <span class="o">&lt;=</span> <span class="mi">1</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">cont</span><span class="p">(</span><span class="n">lst</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">mid</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">n</span> <span class="o">/</span> <span class="mi">2</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">merge_sort_cps</span><span class="p">(</span>
+                <span class="n">lst</span><span class="p">[:</span><span class="n">mid</span><span class="p">],</span>
+                <span class="k">lambda</span> <span class="n">v1</span><span class="p">:</span> <span class="n">merge_sort_cps</span><span class="p">(</span><span class="n">lst</span><span class="p">[</span><span class="n">mid</span><span class="p">:],</span>
+                                          <span class="k">lambda</span> <span class="n">v2</span><span class="p">:</span> <span class="n">cont</span><span class="p">(</span><span class="n">merge</span><span class="p">(</span><span class="n">v1</span><span class="p">,</span> <span class="n">v2</span><span class="p">))))</span>
+</pre></div>
+<p>The <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/continuations-trampolines/rdparser.py">recursive-descent parser sample</a>
+has an example of a more complex CPS-transform applied to realistic code, if
+you're interested.</p>
+</div>
+<div class="section" id="trampolines-to-avoid-stack-growth-in-tail-recursive-calls">
+<h2>Trampolines to avoid stack growth in tail-recursive calls</h2>
+<p>Now we're ready to discuss why we want to place all calls in tail position, even
+if our language doesn't support TCO. The final tool that ties things together
+is <em>trampolines</em>.</p>
+<img alt="A blue jumpy trampoline" class="align-center" src="../../images/2017/trampolineblue.jpg" />
+<p>... not this kind!</p>
+<p>Let's borrow a definition from Wikipedia:</p>
+<blockquote>
+As used in some Lisp implementations, a trampoline is a loop that iteratively
+invokes thunk-returning functions (continuation-passing style). A single
+trampoline suffices to express all control transfers of a program; a program
+so expressed is trampolined, or in trampolined style; converting a program to
+trampolined style is trampolining. Programmers can use trampolined functions
+to implement tail-recursive function calls in stack-oriented programming
+languages.</blockquote>
+<p>But wait, what's a &quot;thunk-returning function&quot;?</p>
+<p>A thunk, in programming language jargon, is simply some expression wrapped in an
+argument-less function. This wrapping <em>delays</em> the evaluation of the expression
+until the point at which the function is called:</p>
+<div class="highlight"><pre><span></span><span class="o">&gt;&gt;&gt;</span> <span class="mi">2</span> <span class="o">*</span> <span class="p">(</span><span class="mi">3</span> <span class="o">+</span> <span class="mi">4</span><span class="p">)</span>
+<span class="mi">14</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">thunk</span> <span class="o">=</span> <span class="k">lambda</span><span class="p">:</span> <span class="mi">2</span> <span class="o">*</span> <span class="p">(</span><span class="mi">3</span> <span class="o">+</span> <span class="mi">4</span><span class="p">)</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">thunk</span>
+<span class="o">&lt;</span><span class="n">function</span> <span class="o">&lt;</span><span class="k">lambda</span><span class="o">&gt;</span> <span class="n">at</span> <span class="mh">0x7f2c2977c510</span><span class="o">&gt;</span>
+<span class="o">&gt;&gt;&gt;</span> <span class="n">thunk</span><span class="p">()</span>
+<span class="mi">14</span>
+</pre></div>
+<p>This example shows how we ask the interpreter to evaluate an expression. Then,
+we wrap it in a thunk: in Python simply a <tt class="docutils literal">lambda</tt> with no arguments. The
+thunk itself is just a function. But when we call the thunk, the expression is
+actually evaluated. Thunks can be used to emulate <a class="reference external" href="https://en.wikipedia.org/wiki/Lazy_evaluation">Lazy Evaluation</a> in languages that don't
+support it by default (like Python, or Clojure). But for our uses in this post,
+thunks are an essential part of the solution to the stack explosion problem.</p>
+<p>The missing part of the puzzle is this:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">trampoline</span><span class="p">(</span><span class="n">f</span><span class="p">,</span> <span class="o">*</span><span class="n">args</span><span class="p">):</span>
+    <span class="n">v</span> <span class="o">=</span> <span class="n">f</span><span class="p">(</span><span class="o">*</span><span class="n">args</span><span class="p">)</span>
+    <span class="k">while</span> <span class="n">callable</span><span class="p">(</span><span class="n">v</span><span class="p">):</span>
+        <span class="n">v</span> <span class="o">=</span> <span class="n">v</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">v</span>
+</pre></div>
+<p>The <em>trampoline</em> is a Python function. It takes a function and a sequence of
+arguments, and applies the function to the arguments. Nothing more exciting than
+delayed evaluation so far. But there's more. If the function returns a callable,
+the trampoline assumes it's a thunk and calls it. And so on, until the function
+returns somethings that's no longer callable <a class="footnote-reference" href="index.html#footnote-7" id="footnote-reference-7">[7]</a>.</p>
+<p>Remember how I said, when discussing unbounded continuations, that in &quot;regular&quot;
+languages like Python we're just cheating and simulating continuations with
+function calls? Trampolines is what make this viable without blowing the stack.
+Let's see how. Here's our CPS version of factorial, transformed once again to
+return a thunk:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">fact_cps_thunked</span><span class="p">(</span><span class="n">n</span><span class="p">,</span> <span class="n">cont</span><span class="p">):</span>
+    <span class="k">if</span> <span class="n">n</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">cont</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">return</span> <span class="k">lambda</span><span class="p">:</span> <span class="n">fact_cps_thunked</span><span class="p">(</span>
+                         <span class="n">n</span> <span class="o">-</span> <span class="mi">1</span><span class="p">,</span>
+                         <span class="k">lambda</span> <span class="n">value</span><span class="p">:</span> <span class="k">lambda</span><span class="p">:</span> <span class="n">cont</span><span class="p">(</span><span class="n">n</span> <span class="o">*</span> <span class="n">value</span><span class="p">))</span>
+</pre></div>
+<p>In this case the transformation is straightforward: we just wrap the tail calls
+in an argument-less <tt class="docutils literal">lambda</tt> <a class="footnote-reference" href="index.html#footnote-8" id="footnote-reference-8">[8]</a>. To invoke this function properly, we have
+to use a trampoline. So, to compute the factorial of 6, we'll do:</p>
+<div class="highlight"><pre><span></span><span class="o">&gt;&gt;&gt;</span> <span class="n">trampoline</span><span class="p">(</span><span class="n">fact_cps_thunked</span><span class="p">,</span> <span class="mi">6</span><span class="p">,</span> <span class="n">end_cont</span><span class="p">)</span>
+<span class="mi">720</span>
+</pre></div>
+<p>Now comes the bang! If you carefully trace the execution of this trampoline,
+you'll immediately note that <em>the stack doesn't grow</em>! Instead of calling
+itself, <tt class="docutils literal">fact_cps_thunked</tt> returns a thunk, so the call is done by the
+trampoline. Indeed, if we trace the function calls for the recursive factorial
+we get:</p>
+<div class="highlight"><pre><span></span>fact_rec(6)
+  fact_rec(5)
+    fact_rec(4)
+      fact_rec(3)
+        fact_rec(2)
+          fact_rec(1)
+            fact_rec(0)
+</pre></div>
+<p>But if we do the same for the thunked version, we get:</p>
+<div class="highlight"><pre><span></span>trampoline(&lt;callable&gt;, 6, &lt;callable&gt;)
+  fact_cps_thunked(6, &lt;callable&gt;)
+  fact_cps_thunked(5, &lt;callable&gt;)
+  fact_cps_thunked(4, &lt;callable&gt;)
+  fact_cps_thunked(3, &lt;callable&gt;)
+  fact_cps_thunked(2, &lt;callable&gt;)
+  fact_cps_thunked(1, &lt;callable&gt;)
+  fact_cps_thunked(0, &lt;callable&gt;)
+</pre></div>
+<p>Remember how, earlier in the post, we've discovered the maximum stack depth of
+Python by invoking <tt class="docutils literal">fact_rec(1000)</tt> and observing it blow up? No such problem
+with the thunked version:</p>
+<div class="highlight"><pre><span></span>&gt;&gt;&gt; trampoline(fact_cps_thunked, 1000, end_cont)
+... number with 2568 digits
+
+&gt;&gt;&gt; trampoline(fact_cps_thunked, 2000, end_cont)
+... number with 5736 digits
+</pre></div>
+<p>The <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/continuations-trampolines/fib.py">full Fibonacci sample</a>
+shows how to use thunks and trampolines to compute the Fibonacci sequence
+without growing the stack.</p>
+<p>I hope the pieces have fallen into place by now. By using a combination of CPS
+and trampolines, we've taken arbitrary recusive functions and converted them
+to tail-recursive versions that consume only a bounded number of stack frames.
+All of this <em>in a language without TCO support</em>.</p>
+</div>
+<div class="section" id="trampolines-for-mutual-recursion">
+<h2>Trampolines for mutual recursion</h2>
+<p>If you're left wondering how realistic this is, let's go back to the topic of
+mutual recursion. As I've mentioned before, Clojure doesn't support TCO, even
+though it's a Lisp. To overcome this, the recommended programming style in
+Clojure is explicit <tt class="docutils literal"><span class="pre">loop...recur</span></tt> iteration, which makes tail-recursive
+algorithms relatively easy (and efficient) to express. But this still leaves
+Clojure with the problem of mutual or indirect recursion, where <tt class="docutils literal"><span class="pre">loop...recur</span></tt>
+doesn't help.</p>
+<p>Here's that silly even/odd example again, this time in Clojure:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">declare </span><span class="nv">is-even?</span><span class="p">)</span><span class="w"></span>
+
+<span class="p">(</span><span class="kd">defn </span><span class="nv">is-odd?</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">if </span><span class="p">(</span><span class="nb">= </span><span class="nv">n</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nv">false</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">is-even?</span><span class="w"> </span><span class="p">(</span><span class="nb">- </span><span class="nv">n</span><span class="w"> </span><span class="mi">1</span><span class="p">))))</span><span class="w"></span>
+
+<span class="p">(</span><span class="kd">defn </span><span class="nv">is-even?</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">if </span><span class="p">(</span><span class="nb">= </span><span class="nv">n</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nv">true</span><span class="w"></span>
+<span class="w">    </span><span class="p">(</span><span class="nf">is-odd?</span><span class="w"> </span><span class="p">(</span><span class="nb">- </span><span class="nv">n</span><span class="w"> </span><span class="mi">1</span><span class="p">))))</span><span class="w"></span>
+</pre></div>
+<p>We can't get rid of the tail recursion here with <tt class="docutils literal"><span class="pre">loop...recur</span></tt>. But Clojure
+solves the problem by offering <tt class="docutils literal">trampoline</tt> in the <a class="reference external" href="https://clojuredocs.org/clojure.core/trampoline">language core</a>! Here's a thunked version:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">declare </span><span class="nv">is-even-thunked?</span><span class="p">)</span><span class="w"></span>
+
+<span class="p">(</span><span class="kd">defn </span><span class="nv">is-odd-thunked?</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">if </span><span class="p">(</span><span class="nb">= </span><span class="nv">n</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nv">false</span><span class="w"></span>
+<span class="w">    </span><span class="o">#</span><span class="p">(</span><span class="nf">is-even-thunked?</span><span class="w"> </span><span class="p">(</span><span class="nb">- </span><span class="nv">n</span><span class="w"> </span><span class="mi">1</span><span class="p">))))</span><span class="w"></span>
+
+<span class="p">(</span><span class="kd">defn </span><span class="nv">is-even-thunked?</span><span class="w"></span>
+<span class="w">  </span><span class="p">[</span><span class="nv">n</span><span class="p">]</span><span class="w"></span>
+<span class="w">  </span><span class="p">(</span><span class="k">if </span><span class="p">(</span><span class="nb">= </span><span class="nv">n</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nv">true</span><span class="w"></span>
+<span class="w">    </span><span class="o">#</span><span class="p">(</span><span class="nf">is-odd-thunked?</span><span class="w"> </span><span class="p">(</span><span class="nb">- </span><span class="nv">n</span><span class="w"> </span><span class="mi">1</span><span class="p">))))</span><span class="w"></span>
+</pre></div>
+<p>To invoke it:</p>
+<div class="highlight"><pre><span></span>=&gt; (trampoline is-even-thunked? 3)
+false
+</pre></div>
+<p>Note how small the difference from the non-thunked version is. This is due to
+Clojure's awesome syntax for anonymous functions, where a thunk is simply
+<tt class="docutils literal"><span class="pre">#(...)</span></tt>.</p>
+<p>Clojure's own implementation of <tt class="docutils literal">trampoline</tt> is about what we'd expect. Here
+it is, pasted in full, including its educational docstring:</p>
+<div class="highlight"><pre><span></span><span class="p">(</span><span class="kd">defn </span><span class="nv">trampoline</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;trampoline can be used to convert algorithms requiring mutual</span>
+<span class="s">  recursion without stack consumption. Calls f with supplied args, if</span>
+<span class="s">  any. If f returns a fn, calls that fn with no arguments, and</span>
+<span class="s">  continues to repeat, until the return value is not a fn, then</span>
+<span class="s">  returns that non-fn value. Note that if you want to return a fn as a</span>
+<span class="s">  final value, you must wrap it in some data structure and unpack it</span>
+<span class="s">  after trampoline returns.&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="p">{</span><span class="ss">:added</span><span class="w"> </span><span class="s">&quot;1.0&quot;</span><span class="w"></span>
+<span class="w">   </span><span class="ss">:static</span><span class="w"> </span><span class="nv">true</span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">([</span><span class="nv">f</span><span class="p">]</span><span class="w"></span>
+<span class="w">     </span><span class="p">(</span><span class="k">let </span><span class="p">[</span><span class="nv">ret</span><span class="w"> </span><span class="p">(</span><span class="nf">f</span><span class="p">)]</span><span class="w"></span>
+<span class="w">       </span><span class="p">(</span><span class="k">if </span><span class="p">(</span><span class="nf">fn?</span><span class="w"> </span><span class="nv">ret</span><span class="p">)</span><span class="w"></span>
+<span class="w">         </span><span class="p">(</span><span class="nf">recur</span><span class="w"> </span><span class="nv">ret</span><span class="p">)</span><span class="w"></span>
+<span class="w">         </span><span class="nv">ret</span><span class="p">)))</span><span class="w"></span>
+<span class="w">  </span><span class="p">([</span><span class="nv">f</span><span class="w"> </span><span class="o">&amp;</span><span class="w"> </span><span class="nv">args</span><span class="p">]</span><span class="w"></span>
+<span class="p">(</span><span class="nf">trampoline</span><span class="w"> </span><span class="o">#</span><span class="p">(</span><span class="nb">apply </span><span class="nv">f</span><span class="w"> </span><span class="nv">args</span><span class="p">))))</span><span class="w"></span>
+</pre></div>
+</div>
+<div class="section" id="back-to-reality">
+<h2>Back to reality</h2>
+<p>While the tools described in this post can (and do) serve as building blocks for
+some compilers of functional languages, how relevant are they to day-to-day
+programming in languages like Python and Clojure?</p>
+<p>The answer is, IMHO, not <em>very</em>, but they're still worth knowing about. For
+Clojure, quite obviously Rich Hickey found trampolines important enough to
+include them in the language. Since Clojure is not TCO'd and <tt class="docutils literal"><span class="pre">loop...recur</span></tt> is
+only good for direct recursion, some solution had to be offered for
+mutual/indirect recursion. But how often would you use it anyway?</p>
+<p>Algorithms like merge-sort, or any tree-like traversal, tend to be fine just
+with regular recursion because the supported depth is more than sufficient.
+Because of the logarithmic nature of depth vs. total problem size, you're
+unlikely to recurse into merge-sort more than a few dozen times. An array
+needing just 30 divisions has to contain about a billion items.</p>
+<p>The same is true for recursive-descent parsing, since realistic expressions get
+only so large. However, with some algorithms like graph traversals we definitely
+have to be more careful.</p>
+<p>Another important use case is state machines, which may be conveniently
+expressed with indirect recursive calls for state transitions. Here's a <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/continuations-trampolines/statemachine.py">code
+sample</a>.
+Guido mentions this problem in <a class="reference external" href="http://neopythonic.blogspot.com/2009/04/final-words-on-tail-calls.html">his post on TCO in Python</a>, and
+actually suggests trampolined tail-calls as a possible solution.</p>
+</div>
+<div class="section" id="python-generators-and-coroutines-as-an-alternative">
+<h2>Python generators and coroutines as an alternative</h2>
+<p>That said, I personally believe that Python offers better ways to solve these
+problems. I've <a class="reference external" href="../../2009/08/29/co-routines-as-an-alternative-to-state-machines.html">written before</a>
+about using coroutines for modeling state machines. Since then, Python grew more
+supportive features - I've written about using <tt class="docutils literal">yield from</tt> to <a class="reference external" href="../../2012/08/09/using-sub-generators-for-lexical-scanning-in-python/index.html">implement
+lexical scanning</a>,
+for example, and similar techniques can be adapted for parsing.</p>
+<p>In Python 3.5, <a class="reference external" href="https://docs.python.org/3/library/asyncio-task.html">even more features</a> were added to support
+coroutines. I plan to find some time to dig in these and write more about them.</p>
+<p>All of this is to say that I wouldn't find much use for direct expression of CPS
+and trampolines in Python code these days. But I may be wrong! Please feel free
+to make suggestions in the comments or by email - I'll be really curious to know
+about realistic use cases where these techniques could be employed in modern
+Python.</p>
+<p>Regardless of their usefulness in modern Python, these topics are fascinating
+and I feel they improve my understanding of how some programming languages work
+under the hood.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>For this post I'm using Python 3.5 to run and test all the code, on an
+Ubuntu Linux machine; for a different version of Python or environment,
+the recursion limit may be different.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>Alternatively you may see TRE (Tail Recursion Elimination). TCO is more
+general because tail calls don't necessarily have to be directly
+recursive (as the <tt class="docutils literal">is_even / is_odd</tt> example demonstrates).</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>AFAIU, some JVM languages emulate TCO by using trampolines, but Clojure
+doesn't since it prefers to be compatible with Java and retain high
+performance. My information may be out of date here, so please feel free
+to comment if I'm wrong.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-4">[4]</a></td><td>The compiler can cheat by emitting constructs not accessible from the
+source language. What happens in practice, on the lowest level of emitted
+machine code, is that instead of a <tt class="docutils literal">call</tt> the compiler just prepares
+a stack frame for the called function and jumps to it. Since the results
+of the called function will not be used in the caller (except returning
+them further up the chain), the compiler doesn't have to save any caller
+state.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-5">[5]</a></td><td>I'm using a Lisp (Clojure) here because it unifies the syntax
+of mathematical operations with function calls, which makes the
+explanation less convoluted.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-6" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-6">[6]</a></td><td>Clojure in this case, but Python doesn't support them either.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-7" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-7">[7]</a></td><td>Astute readers will note this is problematic when our code makes heavy
+use of first-class functions and we may legitimately return a function
+from another function call. This is true, and in this case it should be
+easy to make a thunk something more explicit than simply a <tt class="docutils literal">lambda</tt>.
+We could, for example, encapsulate it in a type - <tt class="docutils literal">Thunk</tt>, that we
+would check with <tt class="docutils literal">isinstance</tt> inside <tt class="docutils literal">trampoline</tt>, instead of just
+<tt class="docutils literal">callable</tt>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-8" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-8">[8]</a></td><td>Note that the new continuation constructed for the recursive call also
+returns a thunk. Figuring out why this is necessary is a good exercise!</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

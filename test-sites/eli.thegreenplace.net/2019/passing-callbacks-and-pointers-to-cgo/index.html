@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Passing callbacks and pointers to Cgo - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Passing callbacks and pointers to Cgo">
+                        Passing callbacks and pointers to Cgo
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> July 15, 2019 at 05:39</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/c-c.html">C & C++</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p><a class="reference external" href="https://blog.golang.org/c-go-cgo">Cgo</a> enables Go programs to invoke C
+libraries or any other library that exposes a C API. As such, it's a important
+part of a Go programmer's toolbox.</p>
+<p>Using Cgo can be tricky, however, especially when passing pointers and callback
+functions between Go and C code. This post discusses an end-to-end
+example that covers:</p>
+<ul class="simple">
+<li>Basic usage of Cgo, including linking a custom C library into the Go binary.</li>
+<li>Passing structs from Go to C.</li>
+<li>Passing Go functions to C and arranging C to call them back later.</li>
+<li>Safely passing arbitrary Go data to C code, which can later
+pass it back to the Go callbacks it invokes.</li>
+</ul>
+<p>This is not a tutorial for Cgo - before reading, you're expected to have some
+familiarity with its simpler use cases. Several useful tutorials and reference
+pages are listed at the end of the post. The full source code for this example
+is <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2019/cgo-callback">available on GitHub</a>.</p>
+<div class="section" id="the-problem-a-c-library-that-invokes-multiple-go-callbacks">
+<h2>The problem - a C library that invokes multiple Go callbacks</h2>
+<p>Here is the header file of a fictional C library that works through some data
+and invokes callbacks based on events:</p>
+<div class="highlight"><pre><span></span><span class="k">typedef</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">StartCallbackFn</span><span class="p">)(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">user_data</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="p">);</span><span class="w"></span>
+<span class="k">typedef</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">EndCallbackFn</span><span class="p">)(</span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">user_data</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">a</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">b</span><span class="p">);</span><span class="w"></span>
+
+<span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">StartCallbackFn</span><span class="w"> </span><span class="n">start</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">EndCallbackFn</span><span class="w"> </span><span class="n">end</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"> </span><span class="n">Callbacks</span><span class="p">;</span><span class="w"></span>
+
+
+<span class="c1">// Processes the file and invokes callbacks from cbs on events found in the</span>
+<span class="c1">// file, each with its own relevant data. user_data is passed through to the</span>
+<span class="c1">// callbacks.</span>
+<span class="kt">void</span><span class="w"> </span><span class="nf">traverse</span><span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">filename</span><span class="p">,</span><span class="w"> </span><span class="n">Callbacks</span><span class="w"> </span><span class="n">cbs</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">user_data</span><span class="p">);</span><span class="w"></span>
+</pre></div>
+<p>The callback signatures are made up, but demonstrate several important patterns
+that are common in reality:</p>
+<ul class="simple">
+<li>Every callback has its own type signature; here we're using <tt class="docutils literal">int</tt> parameters
+for simplicity, but it could be anything else.</li>
+<li>When only a small number of callbacks is involved, they could be passed into
+<tt class="docutils literal">traverse</tt> as separate parameters; however, often the number of callbacks
+is large (say, more than 3) and then almost always a <tt class="docutils literal">struct</tt> collecting
+them is passed along. It's common to allow the user to set some of the
+callbacks to <tt class="docutils literal">NULL</tt> to convey to the library that this particular event is
+not interesting and no user code should be invoked for it.</li>
+<li>Every callback gets an opaque <tt class="docutils literal">user_data</tt> pointer passed through from
+the call to <tt class="docutils literal">traverse</tt>. It's used to distinguish different traversals from
+each other, and pass along user-specific state. <tt class="docutils literal">traverse</tt> typically
+passes <tt class="docutils literal">user_data</tt> through without even trying to access it; since it's
+<tt class="docutils literal">void*</tt>, it's completely opaque to the library and the user code will cast
+it to some concrete type inside the callback.</li>
+</ul>
+<p>Our implementation of <tt class="docutils literal">traverse</tt> is just a trivial simulation:</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">traverse</span><span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">filename</span><span class="p">,</span><span class="w"> </span><span class="n">Callbacks</span><span class="w"> </span><span class="n">cbs</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="o">*</span><span class="w"> </span><span class="n">user_data</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Simulate some traversal that calls the start callback and then the end</span>
+<span class="w">  </span><span class="c1">// callback, if they are defined.</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">cbs</span><span class="p">.</span><span class="n">start</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">cbs</span><span class="p">.</span><span class="n">start</span><span class="p">(</span><span class="n">user_data</span><span class="p">,</span><span class="w"> </span><span class="mi">100</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">cbs</span><span class="p">.</span><span class="n">end</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="nb">NULL</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">cbs</span><span class="p">.</span><span class="n">end</span><span class="p">(</span><span class="n">user_data</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Our task is to wrap this library for usage from Go code. We'll want to invoke Go
+callbacks on traversal, without having to write any additional C code.</p>
+</div>
+<div class="section" id="the-go-interface">
+<h2>The Go interface</h2>
+<p>Let's start by sketching how our interface would look like in Go. Here is
+one way:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">Visitor</span><span class="w"> </span><span class="kd">interface</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Start</span><span class="p">(</span><span class="kt">int</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">End</span><span class="p">(</span><span class="kt">int</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">GoTraverse</span><span class="p">(</span><span class="nx">filename</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">v</span><span class="w"> </span><span class="nx">Visitor</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// ... implementation</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The rest of the post shows a complete implementation using this approach.
+However, it has some drawbacks:</p>
+<ul class="simple">
+<li>When the number of callbacks we need to provide is large, writing
+implementations of <tt class="docutils literal">Visitor</tt> may be tedious if we're only interested
+in a couple of callbacks. This can be mitigated by providing a struct to
+implement the complete interface with some defaults (say, no-ops) and user
+structs can then embed this default struct and not have to implement every
+single method. Still, interfaces with many methods are often not a good Go
+practice.</li>
+<li>A more serious limitation is that it's hard to convey to the C <tt class="docutils literal">traverse</tt>
+that we're not interested in some callback. The object implementing
+<tt class="docutils literal">Visitor</tt> will - by definition - have an implementation for all the methods,
+so there's no easy way to tell if we're not interested in invoking some of
+them. This can have serious performance implications.</li>
+</ul>
+<p>An alternative approach is to mimic what we have in C; that is, create a struct
+collecting function objects:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">GoStartCallback</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="kt">int</span><span class="p">)</span><span class="w"></span>
+<span class="kd">type</span><span class="w"> </span><span class="nx">GoEndCallback</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="kt">int</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="w"></span>
+
+<span class="kd">type</span><span class="w"> </span><span class="nx">GoCallbacks</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">startCb</span><span class="w"> </span><span class="nx">GoStartCallback</span><span class="w"></span>
+<span class="w">  </span><span class="nx">endCb</span><span class="w">   </span><span class="nx">GoEndCallback</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">GoTraverse</span><span class="p">(</span><span class="nx">filename</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">cbs</span><span class="w"> </span><span class="o">*</span><span class="nx">GoCallbacks</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// ... implementation</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This solves both drawbacks immediately: the default value of a function object
+is <tt class="docutils literal">nil</tt>, which can be interpreted by <tt class="docutils literal">GoTraverse</tt> as &quot;not interested in
+this event&quot;, wherein it can set the corresponding C callback to <tt class="docutils literal">NULL</tt>. Since
+Go function objects can be closures or bound methods, there's no difficulty in
+preserving state between the different callbacks.</p>
+<p>The accompanying code sample has this alternative implementation available in a
+<a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2019/cgo-callback/alt-interface">separate directory</a>,
+but in the rest of the post we're going to proceed with the more idiomatic
+approach that uses a Go <tt class="docutils literal">interface</tt>. For the implementation, it doesn't really
+matter which approach is chosen.</p>
+</div>
+<div class="section" id="implementing-the-cgo-wrapper">
+<h2>Implementing the Cgo wrapper</h2>
+<p>Cgo <a class="reference external" href="https://golang.org/cmd/cgo/#hdr-Passing_pointers">pointer passing rules</a>
+disallow passing Go function values directly to C, so to register callbacks we
+need to create wrapper functions in C.</p>
+<p>Moreover, we also can't pass pointers allocated in Go to C directly, because the
+Go concurrent garbage collector may move data around. The <a class="reference external" href="https://github.com/golang/go/wiki/cgo#function-variables">Cgo Wiki page</a> offers a workaround
+using indirection. Here I'm going to use the
+<a class="reference external" href="https://github.com/mattn/go-pointer">go-pointer package</a> which
+accomplishes the same in a slightly more convenient and general way.</p>
+<p>With this in mind, let's get straight to the implementation. The code may appear
+obscure at first, but it will all make sense soon. Here's the code for
+<tt class="docutils literal">GoTraverse</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nx">gopointer</span><span class="w"> </span><span class="s">&quot;github.com/mattn/go-pointer&quot;</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">GoTraverse</span><span class="p">(</span><span class="nx">filename</span><span class="w"> </span><span class="kt">string</span><span class="p">,</span><span class="w"> </span><span class="nx">v</span><span class="w"> </span><span class="nx">Visitor</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cCallbacks</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">C</span><span class="p">.</span><span class="nx">Callbacks</span><span class="p">{}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">cCallbacks</span><span class="p">.</span><span class="nx">start</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">C</span><span class="p">.</span><span class="nx">StartCallbackFn</span><span class="p">(</span><span class="nx">C</span><span class="p">.</span><span class="nx">startCgo</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">cCallbacks</span><span class="p">.</span><span class="nx">end</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">C</span><span class="p">.</span><span class="nx">EndCallbackFn</span><span class="p">(</span><span class="nx">C</span><span class="p">.</span><span class="nx">endCgo</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">cfilename</span><span class="w"> </span><span class="o">*</span><span class="nx">C</span><span class="p">.</span><span class="nx">char</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">C</span><span class="p">.</span><span class="nx">CString</span><span class="p">(</span><span class="nx">filename</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">C</span><span class="p">.</span><span class="nx">free</span><span class="p">(</span><span class="nx">unsafe</span><span class="p">.</span><span class="nx">Pointer</span><span class="p">(</span><span class="nx">cfilename</span><span class="p">))</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">p</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">gopointer</span><span class="p">.</span><span class="nx">Save</span><span class="p">(</span><span class="nx">v</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">gopointer</span><span class="p">.</span><span class="nx">Unref</span><span class="p">(</span><span class="nx">p</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">C</span><span class="p">.</span><span class="nx">traverse</span><span class="p">(</span><span class="nx">cfilename</span><span class="p">,</span><span class="w"> </span><span class="nx">cCallbacks</span><span class="p">,</span><span class="w"> </span><span class="nx">p</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>We start by creating the C <tt class="docutils literal">Callbacks</tt> struct in Go code, and populating it.
+Since we can't assign Go functions to C function pointers, we'll have these
+wrappers, defined in a separate Go file <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>:</p>
+<div class="highlight"><pre><span></span><span class="cm">/*</span>
+<span class="cm">extern void goStart(void*, int);</span>
+<span class="cm">extern void goEnd(void*, int, int);</span>
+
+<span class="cm">void startCgo(void* user_data, int i) {</span>
+<span class="cm">  goStart(user_data, i);</span>
+<span class="cm">}</span>
+
+<span class="cm">void endCgo(void* user_data, int a, int b) {</span>
+<span class="cm">  goEnd(user_data, a, b);</span>
+<span class="cm">}</span>
+<span class="cm">*/</span><span class="w"></span>
+<span class="kn">import</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"></span>
+</pre></div>
+<p>These are very thin wrappers that invoke Go functions - and we'll have to write
+one such C function per callback kind. We'll see the Go functions <tt class="docutils literal">goStart</tt>
+and <tt class="docutils literal">goEnd</tt> shortly.</p>
+<p>After populating the C callback struct, <tt class="docutils literal">GoTraverse</tt> converts the file name
+from a Go string to a C string (<a class="reference external" href="https://github.com/golang/go/wiki/cgo#go-strings-and-c-strings">the wiki</a> has the
+details). It then creates a value representing the Go visitor and that we
+can pass to C using the <tt class="docutils literal"><span class="pre">go-pointer</span></tt> package. Finally, it calls <tt class="docutils literal">traverse</tt>.</p>
+<p>To complete the implementation, the code for <tt class="docutils literal">goStart</tt> and <tt class="docutils literal">goEnd</tt> is:</p>
+<div class="highlight"><pre><span></span><span class="c1">//export goStart</span><span class="w"></span>
+<span class="kd">func</span><span class="w"> </span><span class="nx">goStart</span><span class="p">(</span><span class="nx">user_data</span><span class="w"> </span><span class="nx">unsafe</span><span class="p">.</span><span class="nx">Pointer</span><span class="p">,</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="nx">C</span><span class="p">.</span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">v</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">gopointer</span><span class="p">.</span><span class="nx">Restore</span><span class="p">(</span><span class="nx">user_data</span><span class="p">).(</span><span class="nx">Visitor</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">v</span><span class="p">.</span><span class="nx">Start</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="nx">i</span><span class="p">))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="c1">//export goEnd</span><span class="w"></span>
+<span class="kd">func</span><span class="w"> </span><span class="nx">goEnd</span><span class="p">(</span><span class="nx">user_data</span><span class="w"> </span><span class="nx">unsafe</span><span class="p">.</span><span class="nx">Pointer</span><span class="p">,</span><span class="w"> </span><span class="nx">a</span><span class="w"> </span><span class="nx">C</span><span class="p">.</span><span class="kt">int</span><span class="p">,</span><span class="w"> </span><span class="nx">b</span><span class="w"> </span><span class="nx">C</span><span class="p">.</span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">v</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">gopointer</span><span class="p">.</span><span class="nx">Restore</span><span class="p">(</span><span class="nx">user_data</span><span class="p">).(</span><span class="nx">Visitor</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">v</span><span class="p">.</span><span class="nx">End</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="nx">a</span><span class="p">),</span><span class="w"> </span><span class="nb">int</span><span class="p">(</span><span class="nx">b</span><span class="p">))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>The <tt class="docutils literal">export</tt> directives means these functions are visible to C code; their
+signature should have C types or types convertible to C types. They act
+similarly:</p>
+<ol class="arabic simple">
+<li>Unpack the visitor object from <tt class="docutils literal">user_data</tt></li>
+<li>Invoke the appropriate method on the visitor</li>
+</ol>
+</div>
+<div class="section" id="callback-flow-in-detail">
+<h2>Callback flow in detail</h2>
+<p>Let's examine the flow of callback calls for a &quot;start&quot; event to get a better
+understanding of how the pieces are connected together.</p>
+<p><tt class="docutils literal">GoTraverse</tt> assigns <tt class="docutils literal">startCgo</tt> to the <tt class="docutils literal">start</tt> pointer in the
+<tt class="docutils literal">Callbacks</tt> structure passed to <tt class="docutils literal">traverse</tt>. Therefore, when <tt class="docutils literal">traverse</tt>
+encounteres a start event, it will invoke <tt class="docutils literal">startCgo</tt>. The parameters are
+the <tt class="docutils literal">user_data</tt> pointer passed in to <tt class="docutils literal">traverse</tt> and the event-specific
+parameters (a single <tt class="docutils literal">int</tt> in this case).</p>
+<p><tt class="docutils literal">startCgo</tt> is a shim around <tt class="docutils literal">goStart</tt>, and calls it with the same
+parameters.</p>
+<p><tt class="docutils literal">goStart</tt> unpacks the <tt class="docutils literal">Visitor</tt> implementation that was packed into
+<tt class="docutils literal">user_data</tt> by <tt class="docutils literal">GoTraverse</tt> and calls the <tt class="docutils literal">Start</tt> method from there,
+passing it the event-specific parameters. All the code until this point is
+provided by the Go library wrapping <tt class="docutils literal">traverse</tt>; from here, we get to the
+custom code written by the user of the API.</p>
+</div>
+<div class="section" id="tunneling-go-pointers-through-c-code">
+<h2>Tunneling Go pointers through C code</h2>
+<p>Another critical detail of this implementation is the trick we used to pack
+a <tt class="docutils literal">Visitor</tt> inside a <tt class="docutils literal">void* user_data</tt> passed around to and from C
+callbacks.</p>
+<p>The <a class="reference external" href="https://golang.org/cmd/cgo/#hdr-Passing_pointers">Cgo documentation</a>
+states that:</p>
+<blockquote>
+Go code may pass a Go pointer to C provided the Go memory to which it points
+does not contain any Go pointers.</blockquote>
+<p>But of course we can't guarantee that arbitrary Go objects don't contain any
+pointers. Besides the obvious uses of pointers, function values, slices,
+strings, interfaces and many other objects contain implicit pointers.</p>
+<p>The limitation stems from the nature of the Go garbage collector, which runs
+concurrently to other code and is allowed to move data around, invalidating
+pointers from the point of view of C.</p>
+<p>So what can we do? As mentioned above, the solution is indirection and the Cgo
+Wiki offers a simple example. Instead of passing a pointer to C directly, we
+keep the pointer in Go-land and find a way to refer to it indirectly; we could
+use some numeric index, for example. This guarantees that all pointers remain
+visible to the Go GC, yet we can keep some unique identifier in C-land that will
+let us access them later.</p>
+<p>This is what the <tt class="docutils literal"><span class="pre">go-pointer</span></tt> package does, by creating a map between
+<tt class="docutils literal">unsafe.Pointer</tt> (which maps to directly <tt class="docutils literal">void*</tt> in Cgo calls to C) and
+<tt class="docutils literal">interface{}</tt>, essentially letting us store arbitrary Go data and providing a
+unique ID (the <tt class="docutils literal">unsafe.Pointer</tt>) to refer to it later. Why is
+<tt class="docutils literal">unsafe.Pointer</tt> used instead of an <tt class="docutils literal">int</tt> as in the Wiki example? Because
+opaque data is often represented with <tt class="docutils literal">void*</tt> in C, so <tt class="docutils literal">unsafe.Pointer</tt> is
+something that maps to it naturally. With an <tt class="docutils literal">int</tt> we'd have to worry about
+casting in several additional places.</p>
+</div>
+<div class="section" id="what-if-there-is-no-user-data">
+<h2>What if there is no <tt class="docutils literal">user_data</tt>?</h2>
+<p>Seeing how we use <tt class="docutils literal">user_data</tt> to tunnel the user-specific <tt class="docutils literal">Visitor</tt>
+implementation through C code back to our generic callback, one may wonder -
+what if there's no <tt class="docutils literal">user_data</tt> available?</p>
+<p>It turns out, in most cases there <em>is</em> something like <tt class="docutils literal">user_data</tt>, because
+without it the original C API is flawed. Consider our <tt class="docutils literal">traverse</tt> example
+again, but this itme without <tt class="docutils literal">user_data</tt>:</p>
+<div class="highlight"><pre><span></span><span class="k">typedef</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">StartCallbackFn</span><span class="p">)(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="p">);</span><span class="w"></span>
+<span class="k">typedef</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">EndCallbackFn</span><span class="p">)(</span><span class="kt">int</span><span class="w"> </span><span class="n">a</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">b</span><span class="p">);</span><span class="w"></span>
+
+<span class="k">typedef</span><span class="w"> </span><span class="k">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">StartCallbackFn</span><span class="w"> </span><span class="n">start</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="n">EndCallbackFn</span><span class="w"> </span><span class="n">end</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"> </span><span class="n">Callbacks</span><span class="p">;</span><span class="w"></span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">traverse</span><span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="w"> </span><span class="n">filename</span><span class="p">,</span><span class="w"> </span><span class="n">Callbacks</span><span class="w"> </span><span class="n">cbs</span><span class="p">);</span><span class="w"></span>
+</pre></div>
+<p>Suppose we provide a callback as <tt class="docutils literal">start</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">myStart</span><span class="p">(</span><span class="kt">int</span><span class="w"> </span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// ...</span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Within <tt class="docutils literal">myStart</tt>, we're somewhat lost. We don't know <em>which</em> traversal we
+were invoked for - there could be many different traversals of different files
+and data structures for different needs. We also don't know where to record
+the results of the event. The only recourse here is using global data; this
+is a bad API!</p>
+<p>Given such an API, we're not really much worse off in Go-land. We can also rely
+on global data to find the information relevant to <em>this specific</em> traversal,
+and we can use the same <tt class="docutils literal"><span class="pre">go-pointer</span></tt> trick to store arbitrary Go objects in
+this global data. But again, this situation is unlikely because the C API is
+unlikely to omit this critical detail.</p>
+</div>
+<div class="section" id="links-to-additional-resources">
+<h2>Links to additional resources</h2>
+<p>There's a lot of information about using Cgo out there, some of it dated (before
+the <a class="reference external" href="https://github.com/golang/proposal/blob/master/design/12416-cgo-pointers.md">rules for passing pointers</a>
+were defined explicitly). Here's a collection of links I found particularly
+useful in preparing this post:</p>
+<ul class="simple">
+<li><a class="reference external" href="https://golang.org/cmd/cgo/">The official Cgo documentation</a> is the source
+of truth.</li>
+<li><a class="reference external" href="https://github.com/golang/go/wiki/cgo">The Cgo page on the Wiki</a> is
+extremely useful.</li>
+<li><a class="reference external" href="https://blog.golang.org/go15gc">Some details about the concurrent GC in Go</a>.</li>
+<li>Yasuhiro Matsumoto's <a class="reference external" href="https://dev.to/mattn/call-go-function-from-c-function-1n3">post on calling Go from C</a>.</li>
+<li><a class="reference external" href="https://github.com/golang/proposal/blob/master/design/12416-cgo-pointers.md">More details</a>
+on the pointer passing rules.</li>
+</ul>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>They are in a separate file because of a peculiarity of how Cgo
+generates and compiles C code - more details <a class="reference external" href="https://github.com/golang/go/wiki/cgo#export-and-definition-in-preamble">on the Wiki</a>.
+The reason I'm not using the <tt class="docutils literal">static inline</tt> trick for these functions
+is that we have to take their address.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

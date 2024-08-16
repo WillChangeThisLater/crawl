@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Reading Google Sheets from a Go program - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Reading Google Sheets from a Go program">
+                        Reading Google Sheets from a Go program
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> May 31, 2024 at 18:07</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/internet.html">Internet</a>
+        ,
+    <a href="../../tag/network-programming.html">Network Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>I recently needed to process some data from a Google Sheet in a Go program, and
+was looking for the most straightforward way to do so on my local machine.
+This post lists some approaches that I found to work, with full source code.</p>
+<p>To access the Sheets API, you'll need a GCP project, and would typically have
+the <tt class="docutils literal">gcloud</tt> command-line tool installed. To enable the sheets API for your
+project, run:</p>
+<div class="highlight"><pre><span></span>$ gcloud services enable sheets.googleapis.com --project=&lt;PROJECT-NAME&gt;
+</pre></div>
+<p>If you want to list which APIs are already enabled, you can do:</p>
+<div class="highlight"><pre><span></span>$ gcloud services list --enabled --project=&lt;PROJECT-NAME&gt;
+</pre></div>
+<p>The simplest approach I found to work was using a <em>service account</em>. This post
+demonstrates this approach, as well as a (slightly) more involved approach
+that uses Oauth 2.0</p>
+<div class="section" id="service-account">
+<h2>Service account</h2>
+<p>A <a class="reference external" href="https://cloud.google.com/iam/docs/service-account-overview">service account on GCP</a>
+can be thought of as a virtual account, along with its own email address,
+attached to a project. These accounts have their own auth, permissions, etc.
+This is very useful for running on a VM - you typically don't want the VM to
+be logged in with your primary Google account, and this service account can be
+specific to a given VM (or a group thereof).</p>
+<p>Start by creating a new service account <a class="reference external" href="https://console.cloud.google.com/iam-admin/serviceaccounts">on this page</a>.
+Once created, select <em>Manage Keys</em> in the Actions menu, and add a new key. This
+will download a private key to your machine; keep it safe! The following program
+expects this key file to be provided with the <tt class="docutils literal"><span class="pre">-keyfile</span></tt> flag:</p>
+<div class="highlight"><pre><span></span><span class="kn">package</span><span class="w"> </span><span class="nx">main</span><span class="w"></span>
+
+<span class="kn">import</span><span class="w"> </span><span class="p">(</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;context&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;flag&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;fmt&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;io/ioutil&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;log&quot;</span><span class="w"></span>
+
+<span class="w">  </span><span class="s">&quot;golang.org/x/oauth2/google&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;google.golang.org/api/option&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;google.golang.org/api/sheets/v4&quot;</span><span class="w"></span>
+<span class="p">)</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">keyFilePath</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;keyfile&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;path to the credentials file&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Parse</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">ctx</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">context</span><span class="p">.</span><span class="nx">Background</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">credentials</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">ioutil</span><span class="p">.</span><span class="nx">ReadFile</span><span class="p">(</span><span class="o">*</span><span class="nx">keyFilePath</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;unable to read key file:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">scopes</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="p">[]</span><span class="kt">string</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="s">&quot;https://www.googleapis.com/auth/spreadsheets.readonly&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">config</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">google</span><span class="p">.</span><span class="nx">JWTConfigFromJSON</span><span class="p">(</span><span class="nx">credentials</span><span class="p">,</span><span class="w"> </span><span class="nx">scopes</span><span class="o">...</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;unable to create JWT configuration:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">srv</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">sheets</span><span class="p">.</span><span class="nx">NewService</span><span class="p">(</span><span class="nx">ctx</span><span class="p">,</span><span class="w"> </span><span class="nx">option</span><span class="p">.</span><span class="nx">WithHTTPClient</span><span class="p">(</span><span class="nx">config</span><span class="p">.</span><span class="nx">Client</span><span class="p">(</span><span class="nx">ctx</span><span class="p">)))</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatalf</span><span class="p">(</span><span class="s">&quot;unable to retrieve sheets service: %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// ...</span><span class="w"></span>
+</pre></div>
+<p>We can specify the requested scopes (permissions) when creating an auth config.
+Here we're asking for read-only access to the Google Sheets.</p>
+<p>Once auth succeeds (<tt class="docutils literal">sheets.NewService</tt> returns w/o an error), we can use the
+<a class="reference external" href="https://pkg.go.dev/google.golang.org/api/sheets/v4">sheets package</a> to
+read and analyze the sheet; the code below simply prints the document's title
+and emits all the values from columns A and B in <tt class="docutils literal">Sheet1</tt>.</p>
+<div class="highlight"><pre><span></span><span class="w">  </span><span class="nx">docId</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="s">&quot;1qsNWsZuw98r9HEl01vwxCO5O1sIsI-fr0bJ4KGVvWsU&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="nx">doc</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">srv</span><span class="p">.</span><span class="nx">Spreadsheets</span><span class="p">.</span><span class="nx">Get</span><span class="p">(</span><span class="nx">docId</span><span class="p">).</span><span class="nx">Do</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatalf</span><span class="p">(</span><span class="s">&quot;unable to retrieve data from document: %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;The title of the doc is: %s\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">doc</span><span class="p">.</span><span class="nx">Properties</span><span class="p">.</span><span class="nx">Title</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">val</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">srv</span><span class="p">.</span><span class="nx">Spreadsheets</span><span class="p">.</span><span class="nx">Values</span><span class="p">.</span><span class="nx">Get</span><span class="p">(</span><span class="nx">docId</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Sheet1!A:B&quot;</span><span class="p">).</span><span class="nx">Do</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatalf</span><span class="p">(</span><span class="s">&quot;unable to retrieve range from document: %v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;Selected major dimension=%v, range=%v\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">val</span><span class="p">.</span><span class="nx">MajorDimension</span><span class="p">,</span><span class="w"> </span><span class="nx">val</span><span class="p">.</span><span class="nx">Range</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">row</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">val</span><span class="p">.</span><span class="nx">Values</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nx">row</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Note the <tt class="docutils literal">docId</tt> passed to the <tt class="docutils literal">sheets</tt> package; this is the path
+segment in your spreadsheet's URL following the <tt class="docutils literal">/d/</tt>. In this example, I'm
+using a <a class="reference external" href="https://docs.google.com/spreadsheets/d/1qsNWsZuw98r9HEl01vwxCO5O1sIsI-fr0bJ4KGVvWsU/">test sheet I've created</a>.</p>
+<p>Important: unless your sheet is world-readable, your service account won't be
+able to access it. Here the account's email comes in handy; you can
+take it from the service account's GCP IAM page (<em>Details</em> tab), and give this
+email permissions to the sheet. This way you can have the program processing
+a private sheet that only you have access to.</p>
+</div>
+<div class="section" id="oauth">
+<h2>OAuth</h2>
+<p>Another way to achieve what we want is with OAuth. This also requires a bit
+of setup in your project's GCP console. Follow the <a class="reference external" href="https://developers.google.com/docs/api/quickstart/go">Go quickstart docs</a>
+for that. Our sample assumes you've saved the <tt class="docutils literal">credentials.json</tt>
+file somewhere locally and will pass it through the <tt class="docutils literal"><span class="pre">-credfile</span></tt> flag.
+Unlike the quickstart, it handles all the token exchange process automatically
+without having to ask you to copy a code from a web page. You still have to
+authenticate the first time you run it, of course.</p>
+<p><a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2024/go-docs-sheets-auth">The full code of the sample is available on GitHub</a>;
+while the auth part is different, the actual sheets processing code is identical
+to the service account sample.</p>
+<p>For an overview of the OAuth protocol, see <a class="reference external" href="../../2023/sign-in-with-github-in-go/index.html">my earlier post</a>.</p>
+</div>
+<div class="section" id="p-s-adc">
+<h2>P.S. ADC</h2>
+<p>Initially, I had trouble accessing the sheet using ADC (Application Default
+Credentials), but following a <a class="reference external" href="https://news.ycombinator.com/item?id=40556174">HN comment on this post</a>,
+I was motivated to try again and it worked. I may have mixed up my auth JSON
+files previously, because the code is identical to what I've originally tried.
+In any case, <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2024/go-docs-sheets-auth">the code is available on GitHub</a>
+along with the other options. Depending on the exact use case, ADC may be
+simpler than using a service account (though IMHO the service account is a more
+&quot;reliable&quot; method across machines because its configuration is more explicit -
+less is happening under the hood).</p>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

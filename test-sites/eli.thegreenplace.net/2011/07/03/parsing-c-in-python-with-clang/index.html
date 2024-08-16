@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Parsing C++ in Python with Clang - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../../index.html" class="navbar-brand">
+                <img src="../../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="../parsing-c-in-python-with-clang.html"
+                       rel="bookmark"
+                       title="Permalink to Parsing C++ in Python with Clang">
+                        Parsing C++ in Python with Clang
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> July 03, 2011 at 05:15</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../../../tag/compilation.html">Compilation</a>
+        ,
+    <a href="../../../../tag/llvm-clang.html">LLVM & Clang</a>
+        ,
+    <a href="../../../../tag/python.html">Python</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <strong>Note (31.05.2014):</strong> Clang's APIs evolve quickly, and this includes libclang and the Python bindings. Therefore, the samples in this post may no longer work. For working samples that are kept up-to-date with upstream Clang, check out my <a href="https://github.com/eliben/llvm-clang-samples">llvm-clang-samples repository on Github</a>.
+
+<p>People that need to parse and analyze C code in Python are usually really excited to run into <a class="reference external" href="https://github.com/eliben/pycparser">pycparser</a>. However, when the task is to parse C++, <tt class="docutils literal">pycparser</tt> is not the solution. When I get asked about plans to support C++ in <tt class="docutils literal">pycparser</tt>, my usual answer is - there are no such plans <a class="footnote-reference" href="index.html#id6" id="id1">[1]</a>, you should look elsewhere. Specifically, at <a class="reference external" href="http://clang.llvm.org/">Clang</a>.</p>
+<p>Clang is a front-end compiler for C, C++ and Objective C. It's a liberally licensed open-source project backed by Apple, which uses it for its own tools. Along with its parent project - the LLVM compiler backend, Clang starts to become a formidable alternative to <tt class="docutils literal">gcc</tt> itself these days. The dev team behind Clang (and LLVM) is top-notch and its source is one of the best designed bodies of C++ code in the wild. Clang's development is very active, closely following the latest C++ standards.</p>
+<p>So what I point people to when I'm asked about C++ parsing is Clang. There's a slight problem with that, however. People like <tt class="docutils literal">pycparser</tt> <em>because it's Python</em>, and Clang's API is C++ - which is not the most high-level hacking friendly language out there, to say the least.</p>
+<div class="section" id="libclang">
+<h3>libclang</h3>
+<p>Enter <tt class="docutils literal">libclang</tt>. Not so long ago, the Clang team wisely recognized that Clang can be used not only as a compiler proper, but also as a tool for analyzing C/C++/ObjC code. In fact, Apple's own Xcode development tools use Clang as a library under the hood for code completion, cross-referencing, and so on.</p>
+<p>The component through which Clang enables such usage is called <tt class="docutils literal">libclang</tt>. It's a C API <a class="footnote-reference" href="index.html#id7" id="id2">[2]</a> that the Clang team vows to keep relatively stable, allowing the user to examine parsed code at the level of an abstract syntax tree (AST) <a class="footnote-reference" href="index.html#id8" id="id3">[3]</a>.</p>
+<p>More technically, <tt class="docutils literal">libclang</tt> is a shared library that packages Clang with a public-facing API defined in a single C header file: <tt class="docutils literal"><span class="pre">clang/include/clang-c/Index.h</span></tt>.</p>
+</div>
+<div class="section" id="python-bindings-to-libclang">
+<h3>Python bindings to libclang</h3>
+<p><tt class="docutils literal">libclang</tt> comes with Python bindings, which reside in <tt class="docutils literal">clang/bindings/python</tt>, in module <tt class="docutils literal">clang.cindex</tt>. This module relies on <tt class="docutils literal">ctypes</tt> to load the dynamic <tt class="docutils literal">libclang</tt> library and tries to wrap as much of <tt class="docutils literal">libclang</tt> as possible with a Pythonic API.</p>
+</div>
+<div class="section" id="documentation">
+<h3>Documentation?</h3>
+<p>Unfortunately, the state of documentation for <tt class="docutils literal">libclang</tt> and its Python bindings is dire. The official documentation according to the devs is the source (and auto-generated Doxygen HTML). In addition, all I could find online is a  <a class="reference external" href="http://llvm.org/devmtg/2010-11/Gregor-libclang.pdf">presentation</a> and a couple of outdated email messages from the Clang dev mailing list.</p>
+<p>On the bright side, if you just skim the <tt class="docutils literal">Index.h</tt> header file keeping in mind what it's trying to achieve, the API isn't hard to understand (and neither is the implementation, especially if you're a bit familiar with Clang's internals). Another place to look things up is the <tt class="docutils literal"><span class="pre">clang/tools/c-index-test</span></tt> tool, which is used to test the API and demonstrates its usage.</p>
+<p>For the Python bindings, there is absolutely no documentation as well, except the source plus a couple of examples that are distributed alongside it. So I hope this article will be helpful!</p>
+</div>
+<div class="section" id="setting-up">
+<h3>Setting up</h3>
+<p>Setting up usage of the Python bindings is very easy:</p>
+<ul class="simple">
+<li>Your script needs to be able to find the <tt class="docutils literal">clang.cindex</tt> module. So either copy it appropriately or set up <tt class="docutils literal">PYTHONPATH</tt> to point to it <a class="footnote-reference" href="index.html#id9" id="id4">[4]</a>.</li>
+<li><tt class="docutils literal">clang.cindex</tt> needs to be able to find the <tt class="docutils literal">libclang.so</tt> shared library. Depending on how you build/install Clang, you will need to copy it appropriately or set up <tt class="docutils literal">LD_LIBRARY_PATH</tt> to point to its location. On Windows, this is <tt class="docutils literal">libclang.dll</tt> and it should be on <tt class="docutils literal">PATH</tt>.</li>
+</ul>
+<p>That arranged, you're ready to <tt class="docutils literal">import clang.cindex</tt> and start rolling.</p>
+</div>
+<div class="section" id="simple-example">
+<h3>Simple example</h3>
+<p>Let's start with a simple example. The following script uses the Python bindings of <tt class="docutils literal">libclang</tt> to find all references to some type in a given file:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">#!/usr/bin/env python</span>
+<span style="color: #7f007f">&quot;&quot;&quot; Usage: call with &lt;filename&gt; &lt;typename&gt;</span>
+<span style="color: #7f007f">&quot;&quot;&quot;</span>
+
+<span style="color: #00007f; font-weight: bold">import</span> <span style="color: #00007f">sys</span>
+<span style="color: #00007f; font-weight: bold">import</span> <span style="color: #00007f">clang.cindex</span>
+
+<span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">find_typerefs</span>(node, typename):
+    <span style="color: #7f007f">&quot;&quot;&quot; Find all references to the type named &#39;typename&#39;</span>
+<span style="color: #7f007f">    &quot;&quot;&quot;</span>
+    <span style="color: #00007f; font-weight: bold">if</span> node.kind.is_reference():
+        ref_node = clang.cindex.Cursor_ref(node)
+        <span style="color: #00007f; font-weight: bold">if</span> ref_node.spelling == typename:
+            <span style="color: #00007f; font-weight: bold">print</span> <span style="color: #7f007f">&#39;Found %s [line=%s, col=%s]&#39;</span> % (
+                typename, node.location.line, node.location.column)
+    <span style="color: #007f00"># Recurse for children of this node</span>
+    <span style="color: #00007f; font-weight: bold">for</span> c <span style="color: #0000aa">in</span> node.get_children():
+        find_typerefs(c, typename)
+
+index = clang.cindex.Index.create()
+tu = index.parse(sys.argv[<span style="color: #007f7f">1</span>])
+<span style="color: #00007f; font-weight: bold">print</span> <span style="color: #7f007f">&#39;Translation unit:&#39;</span>, tu.spelling
+find_typerefs(tu.cursor, sys.argv[<span style="color: #007f7f">2</span>])
+</pre></div>
+<p>Suppose we invoke it on this dummy C++ code:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">Person</span> {
+};
+
+
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">Room</span> {
+<span style="color: #00007f; font-weight: bold">public</span>:
+    <span style="color: #00007f; font-weight: bold">void</span> add_person(Person person)
+    {
+        <span style="color: #007f00">// do stuff</span>
+    }
+
+<span style="color: #00007f; font-weight: bold">private</span>:
+    Person* people_in_room;
+};
+
+
+<span style="color: #00007f; font-weight: bold">template</span> &lt;<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">T</span>, <span style="color: #00007f; font-weight: bold">int</span> N&gt;
+<span style="color: #00007f; font-weight: bold">class</span> <span style="color: #00007f">Bag</span>&lt;T, N&gt; {
+};
+
+
+<span style="color: #00007f; font-weight: bold">int</span> main()
+{
+    Person* p = <span style="color: #00007f; font-weight: bold">new</span> Person();
+    Bag&lt;Person, <span style="color: #007f7f">42</span>&gt; bagofpersons;
+
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">0</span>;
+}
+</pre></div>
+<p>Executing to find referenced to type <tt class="docutils literal">Person</tt>, we get:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">Translation unit: simple_demo_src.cpp
+Found Person [line=7, col=21]
+Found Person [line=13, col=5]
+Found Person [line=24, col=5]
+Found Person [line=24, col=21]
+Found Person [line=25, col=9]
+</pre></div>
+</div>
+<div class="section" id="understanding-how-it-works">
+<h3>Understanding how it works</h3>
+<p>To see what the example does, we need to understand its inner workings on 3 levels:</p>
+<ul class="simple">
+<li>Conceptual level - what is the information we're trying to pull from the parsed source and how it's stored</li>
+<li><tt class="docutils literal">libclang</tt> level - the formal C API of <tt class="docutils literal">libclang</tt>, since it's much better documented (albeit only in comments in the source) than the Python bindings</li>
+<li>The Python bindings, since this is what we directly invoke</li>
+</ul>
+<div class="section" id="creating-the-index-and-parsing-the-source">
+<h4>Creating the index and parsing the source</h4>
+<p>We'll start at the beginning, with these lines:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">index = clang.cindex.Index.create()
+tu = index.parse(sys.argv[<span style="color: #007f7f">1</span>])
+</pre></div>
+<p>An &quot;index&quot; represents a set of translation units compiled and linked together. We need some way of grouping several translation units if we want to reason across them. For example, we may want to find references to some type defined in a header file, in a set of other source files. <tt class="docutils literal">Index.create()</tt> invokes the C API function <tt class="docutils literal">clang_createIndex</tt>.</p>
+<p>Next, we use <tt class="docutils literal">Index</tt>'s <tt class="docutils literal">parse</tt> method to parse a single translation unit from a file. This invokes <tt class="docutils literal">clang_parseTranslationUnit</tt>, which is a key function in the C API. Its comment says:</p>
+<blockquote>
+This routine is the main entry point for the Clang C API, providing the ability to parse a source file into a translation unit that can then be queried by other functions in the API.</blockquote>
+<p>This is a powerful function - it can optionally accept the full set of flags normally passed to the command-line compiler. It returns an opaque <tt class="docutils literal">CXTranslationUnit</tt> object, which is encapsulated in the Python bindings as <tt class="docutils literal">TranslationUnit</tt>. This <tt class="docutils literal">TranslationUnit</tt> can be queried, for example the name of the translation unit is available in the <tt class="docutils literal">spelling</tt> property:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">print</span> <span style="color: #7f007f">&#39;Translation unit:&#39;</span>, tu.spelling
+</pre></div>
+<p>Its most important property is, however, <tt class="docutils literal">cursor</tt>. A <em>cursor</em> is a key abstraction in <tt class="docutils literal">libclang</tt>, it represents some node in the AST of a parsed translation unit. The cursor unifies the different kinds of entities in a program under a single abstraction, providing a common set of operations, such as getting its location and children cursors. <tt class="docutils literal">TranslationUnit.cursor</tt> returns the top-level cursor of the translation unit, which serves as the stating point for exploring its AST. I will use the terms <em>cursor</em> and <em>node</em> interchangeably from this point on.</p>
+</div>
+<div class="section" id="working-with-cursors">
+<h4>Working with cursors</h4>
+<p>The Python bindings encapsulate the <tt class="docutils literal">libclang</tt> cursor in the <tt class="docutils literal">Cursor</tt> object. It has many attributes, the most interesting of which are:</p>
+<ul class="simple">
+<li><tt class="docutils literal">kind</tt> - an enumeration specifying the kind of AST node this cursor points at</li>
+<li><tt class="docutils literal">spelling</tt> - the source-code name of the node</li>
+<li><tt class="docutils literal">location</tt> - the source-code location from which the node was parsed</li>
+<li><tt class="docutils literal">get_children</tt> - its children nodes</li>
+</ul>
+<p><tt class="docutils literal">get_children</tt> requires special explanation, because this is a particular point at which the C and Python APIs diverge.</p>
+<p>The <tt class="docutils literal">libclang</tt> C API is based on the idea of <em>visitors</em>. To walk the AST from a given cursor, the user code provides a callback function to <tt class="docutils literal">clang_visitChildren</tt>. This function is then invoked on all descendants of a given AST node.</p>
+<p>The Python bindings, on the other hand, encapsulate visiting internally, and provide a more Pythonic iteration API via <tt class="docutils literal">Cursor.get_children</tt>, which returns the children nodes (cursors) of a given cursor. It's still possible to access the original visitation APIs directly through Python, but using <tt class="docutils literal">get_children</tt> is much more convenient. In our example, we use <tt class="docutils literal">get_children</tt> to recursively visit all the children of a given node:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">for</span> c <span style="color: #0000aa">in</span> node.get_children():
+    find_typerefs(c, typename)
+</pre></div>
+</div>
+</div>
+<div class="section" id="some-limitations-of-the-python-bindings">
+<h3>Some limitations of the Python bindings</h3>
+<p>Unfortunately, the Python bindings aren't complete and still have some bugs, because it is a work in progress. As an example, suppose we want to find and report all the function calls in this file:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">bool</span> foo()
+{
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #00007f; font-weight: bold">true</span>;
+}
+
+<span style="color: #00007f; font-weight: bold">void</span> bar()
+{
+    foo();
+    <span style="color: #00007f; font-weight: bold">for</span> (<span style="color: #00007f; font-weight: bold">int</span> i = <span style="color: #007f7f">0</span>; i &lt; <span style="color: #007f7f">10</span>; ++i)
+        foo();
+}
+
+<span style="color: #00007f; font-weight: bold">int</span> main()
+{
+    bar();
+    <span style="color: #00007f; font-weight: bold">if</span> (foo())
+        bar();
+}
+</pre></div>
+<p>Let's write this code:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">import</span> <span style="color: #00007f">sys</span>
+<span style="color: #00007f; font-weight: bold">import</span> <span style="color: #00007f">clang.cindex</span>
+
+<span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">callexpr_visitor</span>(node, parent, userdata):
+    <span style="color: #00007f; font-weight: bold">if</span> node.kind == clang.cindex.CursorKind.CALL_EXPR:
+        <span style="color: #00007f; font-weight: bold">print</span> <span style="color: #7f007f">&#39;Found %s [line=%s, col=%s]&#39;</span> % (
+                node.spelling, node.location.line, node.location.column)
+    <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">2</span> <span style="color: #007f00"># means continue visiting recursively</span>
+
+index = clang.cindex.Index.create()
+tu = index.parse(sys.argv[<span style="color: #007f7f">1</span>])
+clang.cindex.Cursor_visit(
+        tu.cursor,
+        clang.cindex.Cursor_visit_callback(callexpr_visitor),
+        <span style="color: #00007f">None</span>)
+</pre></div>
+<p>This time we're using the <tt class="docutils literal">libclang</tt> visitation API directly. The result is:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">Found None [line=8, col=5]
+Found None [line=10, col=9]
+Found None [line=15, col=5]
+Found None [line=16, col=9]
+Found None [line=17, col=9]
+</pre></div>
+<p>While the reported locations are fine, why is the node name <tt class="docutils literal">None</tt>? After some perusal of <tt class="docutils literal">libclang</tt>'s code, it turns out that for expressions, we shouldn't be printing the <em>spelling</em>, but rather the <em>display name</em>. In the C API it means <tt class="docutils literal">clang_getCursorDisplayName</tt> and not <tt class="docutils literal">clang_getCursorSpelling</tt>. But, alas, the Python bindings don't have <tt class="docutils literal">clang_getCursorDisplayName</tt> exposed!</p>
+<p>We won't let this stop us, however. The source code of the Python bindings is quite straightforward, and simply uses <tt class="docutils literal">ctypes</tt> to expose additional functions from the C API. Adding these lines to <tt class="docutils literal">bindings/python/clang/cindex.py</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">Cursor_displayname = lib.clang_getCursorDisplayName
+Cursor_displayname.argtypes = [Cursor]
+Cursor_displayname.restype = _CXString
+Cursor_displayname.errcheck = _CXString.from_result
+</pre></div>
+<p>And we can now use <tt class="docutils literal">Cursor_displayname</tt>. Replacing <tt class="docutils literal">node.spelling</tt> by <tt class="docutils literal">clang.cindex.Cursor_displayname(node)</tt> in the script, we now get the desired output:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">Found foo [line=8, col=5]
+Found foo [line=10, col=9]
+Found bar [line=15, col=5]
+Found foo [line=16, col=9]
+Found bar [line=17, col=9]
+</pre></div>
+<p><em>Update (06.07.2011):</em> Inspired by this article, I submitted a patch to the Clang project to expose <tt class="docutils literal">Cursor_displayname</tt>, as well as to fix a few other problems with the Python bindings. It was committed by Clang's core devs in revision 134460 and should now be available from trunk.</p>
+</div>
+<div class="section" id="some-limitations-of-libclang">
+<h3>Some limitations of <tt class="docutils literal">libclang</tt></h3>
+<p>As we have seen above, limitations in the Python bindings are relatively easy to overcome. Since <tt class="docutils literal">libclang</tt> provides a straightforward C API, it's just a matter of exposing additional functionality with appropriate <tt class="docutils literal">ctypes</tt> constructs. To anyone even moderately experienced with Python, this isn't a big problem.</p>
+<p>Some limitations are in <tt class="docutils literal">libclang</tt> itself, however. For example, suppose we wanted to find all the return statements in a chunk of code. Turns out this isn't possible through the current API of <tt class="docutils literal">libclang</tt>. A cursory look at the <tt class="docutils literal">Index.h</tt> header file reveals why.</p>
+<p><tt class="docutils literal">enum CXCursorKind</tt> enumerates the kinds of cursors (nodes) we may encounter via <tt class="docutils literal">libclang</tt>. This is the portion related to statements:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #007f00">/* Statements */</span>
+CXCursor_FirstStmt                     = <span style="color: #007f7f">200</span>,
+<span style="color: #007f00">/**</span>
+<span style="color: #007f00"> * \brief A statement whose specific kind is not exposed via this</span>
+<span style="color: #007f00"> * interface.</span>
+<span style="color: #007f00"> *</span>
+<span style="color: #007f00"> * Unexposed statements have the same operations as any other kind of</span>
+<span style="color: #007f00"> * statement; one can extract their location information, spelling,</span>
+<span style="color: #007f00"> * children, etc. However, the specific kind of the statement is not</span>
+<span style="color: #007f00"> * reported.</span>
+<span style="color: #007f00"> */</span>
+CXCursor_UnexposedStmt                 = <span style="color: #007f7f">200</span>,
+
+<span style="color: #007f00">/** \brief A labelled statement in a function.</span>
+<span style="color: #007f00"> *</span>
+<span style="color: #007f00"> * This cursor kind is used to describe the &quot;start_over:&quot; label statement in</span>
+<span style="color: #007f00"> * the following example:</span>
+<span style="color: #007f00"> *</span>
+<span style="color: #007f00"> * \code</span>
+<span style="color: #007f00"> *   start_over:</span>
+<span style="color: #007f00"> *     ++counter;</span>
+<span style="color: #007f00"> * \endcode</span>
+<span style="color: #007f00"> *</span>
+<span style="color: #007f00"> */</span>
+CXCursor_LabelStmt                     = <span style="color: #007f7f">201</span>,
+
+CXCursor_LastStmt                      = CXCursor_LabelStmt,
+</pre></div>
+<p>Ignoring the placeholders <tt class="docutils literal">CXCursor_FirstStmt</tt> and <tt class="docutils literal">CXCursor_LastStmt</tt> which are used for validity testing, the only statement recognized here is the label statement. All other statements are going to be represented with <tt class="docutils literal">CXCursor_UnexposedStmt</tt>.</p>
+<p>To understand the reason for this limitation, it's constructive to ponder the main goal of <tt class="docutils literal">libclang</tt>. Currently, this API's main use is in IDEs, where we want to know everything about types and references to symbols, but don't particularly care what kind of statement or expression we see <a class="footnote-reference" href="index.html#id10" id="id5">[5]</a>.</p>
+<p>Forgunately, from discussions in the Clang dev mailing lists it can be gathered that these limitations aren't really intentional. Things get added to <tt class="docutils literal">libclang</tt> on a per-need basis. Apparently no one needed to discern different statement kinds through <tt class="docutils literal">libclang</tt> yet, so no one added this feature. If it's important enough for someone, he can feel free to suggest a patch to the mailing list. In particular, this specific limitation (lack of statement kinds) is especially easy to overcome. Looking at <tt class="docutils literal"><span class="pre">cxcursor::MakeCXCursor</span></tt> in <tt class="docutils literal">libclang/CXCursor.cpp</tt>, it's obvious how these &quot;kinds&quot; are generated (comments are mine):</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">CXCursor cxcursor::MakeCXCursor(Stmt *S, Decl *Parent,
+                                CXTranslationUnit TU) {
+  assert(S &amp;&amp; TU &amp;&amp; <span style="color: #7f007f">&quot;Invalid arguments!&quot;</span>);
+  CXCursorKind K = CXCursor_NotImplemented;
+
+  <span style="color: #00007f; font-weight: bold">switch</span> (S-&gt;getStmtClass()) {
+  <span style="color: #00007f; font-weight: bold">case</span> Stmt::NoStmtClass:
+    <span style="color: #00007f; font-weight: bold">break</span>;
+
+  <span style="color: #00007f; font-weight: bold">case</span> Stmt::NullStmtClass:
+  <span style="color: #00007f; font-weight: bold">case</span> Stmt::CompoundStmtClass:
+  <span style="color: #00007f; font-weight: bold">case</span> Stmt::CaseStmtClass:
+
+  ... <span style="color: #007f00">// many other statement classes</span>
+
+  <span style="color: #00007f; font-weight: bold">case</span> Stmt::MaterializeTemporaryExprClass:
+    K = CXCursor_UnexposedStmt;
+    <span style="color: #00007f; font-weight: bold">break</span>;
+
+  <span style="color: #00007f; font-weight: bold">case</span> Stmt::LabelStmtClass:
+    K = CXCursor_LabelStmt;
+    <span style="color: #00007f; font-weight: bold">break</span>;
+
+  <span style="color: #00007f; font-weight: bold">case</span> Stmt::PredefinedExprClass:
+
+  .. <span style="color: #007f00">//  many other statement classes</span>
+
+  <span style="color: #00007f; font-weight: bold">case</span> Stmt::AsTypeExprClass:
+    K = CXCursor_UnexposedExpr;
+    <span style="color: #00007f; font-weight: bold">break</span>;
+
+  .. <span style="color: #007f00">// more code</span>
+</pre></div>
+<p>This is simply a mega-switch on <tt class="docutils literal">Stmt.getStmtClass()</tt> (which is Clang's <em>internal</em> statement class), and only for <tt class="docutils literal"><span class="pre">Stmt::LabelStmtClass</span></tt> there is a kind that isn't <tt class="docutils literal">CXCursor_UnexposedStmt</tt>. So recognizing additional &quot;kinds&quot; is trivial:</p>
+<ol class="arabic simple">
+<li>Add another enum value to <tt class="docutils literal">CXCursorKind</tt>, between <tt class="docutils literal">CXCursor_FirstStmt</tt> and <tt class="docutils literal">CXCursor_LastStmt</tt></li>
+<li>Add another case to the switch in <tt class="docutils literal"><span class="pre">cxcursor::MakeCXCursor</span></tt> to recognize the appropriate class and return this kind</li>
+<li>Expose the enumeration value in (1) to the Python bindings</li>
+</ol>
+</div>
+<div class="section" id="conclusion">
+<h3>Conclusion</h3>
+<p>Hopefully this article has been a useful introduction to <tt class="docutils literal">libclang</tt>'s Python bindings (and <tt class="docutils literal">libclang</tt> itself along the way). Although there is a dearth of external documentation for these components, they are well written and commented, and their source code is thus straightforward enough to be reasonably self-documenting.</p>
+<p>It's very important to keep in mind that these APIs wrap an extremely powerful C/C++/ObjC parser engine that is being very actively developed. In my personal opinion, Clang is one's best bet for an up-to-date open-source C++ parsing library these days. Nothing else comes even close.</p>
+<p>A small fly in the ointment is some limitations in <tt class="docutils literal">libclang</tt> itself and its Python bindings. These are a by-product of <tt class="docutils literal">libclang</tt> being a relatively recent addition to Clang, which itself is a very young project.</p>
+<p>Fortunately, as I hope this article demonstrated, these limitations aren't terribly difficult to work around. Only a small amount of Python and C expertise is required to extend the Python bindings, while a bit of understanding of Clang lays the path to enhancements to <tt class="docutils literal">libclang</tt> itself. In addition, since <tt class="docutils literal">libclang</tt> is still being actively developed, I'm quite confident that this API will keep improving over time, so it will have less and less limitations and omissions as time goes by.</p>
+<img class="align-center" src="../../../../images/hline.jpg" style="width: 320px; height: 5px;" />
+<table class="docutils footnote" frame="void" id="id6" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id1">[1]</a></td><td>For me, there are a few reasons for not wanting to get into C++ parsing. First, I like my projects being born from a need. I needed to parse C, so <tt class="docutils literal">pycparser</tt> was created. I have no need parsing C++. Second, <a class="reference external" href="../../../05/02/the-context-sensitivity-of-cs-grammar-revisited/index.html">as hard</a> as C is to parse, C++ is much harder since its grammar is even more ambiguous. Third, a great tool for parsing C++ already exists - Clang.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id7" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id2">[2]</a></td><td>C for better interoperability with non C/C++ based languages and tools. For example, the Python bindings would be much harder to implement on top of a C++ API.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id8" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id3">[3]</a></td><td>The key word here is <em>stable</em>. While Clang as a whole is designed in a library-based approach and its parts can be used directly, these are internal APIs the development team isn't obliged to keep stable between releases.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id9" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id4">[4]</a></td><td>Note that the Python bindings are part of the <em>source distribution</em> of Clang.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id10" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id5">[5]</a></td><td>Expression kinds are also severely limited in <tt class="docutils literal">libclang</tt>.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../../theme/js/count.js"></script>
+</body>
+</html>

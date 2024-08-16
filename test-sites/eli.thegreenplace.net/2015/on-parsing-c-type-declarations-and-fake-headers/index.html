@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>On parsing C, type declarations and fake headers - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to On parsing C, type declarations and fake headers">
+                        On parsing C, type declarations and fake headers
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> May 18, 2015 at 06:17</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../tag/compilation.html">Compilation</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p><a class="reference external" href="https://github.com/eliben/pycparser">pycparser</a> has become fairly popular in
+the past couple of years (especially following its usage in <a class="reference external" href="https://cffi.readthedocs.org">cffi</a>). This means I get more questions
+by email, which leads me to getting tired of answering the same questions :-)</p>
+<p>So this blog post is a one-stop shop for the (by far) most frequently asked
+question about pycparser - how to handle headers that your code <tt class="docutils literal">#include</tt>s.</p>
+<p>I've certainly <a class="reference external" href="../../2009/05/22/faking-standard-c-header-files-for-pycparser.html">written about this before</a>,
+and it's mentioned <a class="reference external" href="https://github.com/eliben/pycparser#what-about-the-standard-c-library-headers">in the README</a>,
+but I feel that additional details are needed to provide a more complete answer
+to the different variations of this question.</p>
+<p>First, a disclaimer. This post assumes some level of familiarity with the C
+programming language and how it's compiled. You must know about the C
+preprocessor (the thing that handles directives like <tt class="docutils literal">#include</tt> and
+<tt class="docutils literal">#define</tt>), and have a general understanding of how multiple source files
+(most often a <tt class="docutils literal">.c</tt> file and any number of <tt class="docutils literal">.h</tt> files) get combined into a
+single <em>translation unit</em> for compilation. If you don't have a strong grasp of
+these concepts, I would hold off using pycparser until you learn more about
+them.</p>
+<div class="section" id="so-what-s-the-problem">
+<h2>So what's the problem?</h2>
+<p>The problem arises when the code you want to analyze with pycparser
+<tt class="docutils literal">#include</tt>s a header file:</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;someheader.h&gt;</span><span class="cp"></span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">foo</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// my code</span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Since this is true of <em>virtually all real-life</em> code, it's a problem almost
+everyone faces.</p>
+</div>
+<div class="section" id="how-to-handle-headers-with-pycparser">
+<h2>How to handle headers with pycparser</h2>
+<p>In general, pycparser does not concern itself with headers, or C preprocessor
+directives in general. The <tt class="docutils literal">CParser</tt> object expects preprocessed code in its
+<tt class="docutils literal">parse</tt> method, period. So you have two choices:</p>
+<ol class="arabic simple">
+<li>Provide preprocessed code to pycparser. This means you first preprocess the
+code by invoking, say, <tt class="docutils literal">gcc <span class="pre">-E</span></tt> (or <tt class="docutils literal">clang <span class="pre">-E</span></tt>, or <tt class="docutils literal">cpp</tt>, or whatever
+way you have to preprocess code <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>).</li>
+<li>Use pycparser's <tt class="docutils literal">parse_file</tt> convenience function; it will invoke the
+preprocessor for you. <a class="reference external" href="https://github.com/eliben/pycparser/blob/master/examples/using_gcc_E_libc.py">Here's an example</a>.</li>
+</ol>
+<p>Great, so now you can handle headers. However, this is unlikely to solve all
+your problems, because pycparser will have trouble parsing some library headers;
+first and foremost, it will probably have trouble parsing the standard library
+headers.</p>
+<p>Why? Because while pycparser fully supports C99, many library headers are full
+of compiler extensions and other clever tricks for compatibility across multiple
+platforms. While it's entirely possible to parse them with pycparser <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>, this
+requires work. Work that you may not have the skills or the time to do. Work
+that, fortunately, is almost certainly unnecessary.</p>
+<p>Why isn't it necessary? Because, in all likeness, you don't really need
+pycparser to parse those headers at all.</p>
+</div>
+<div class="section" id="what-pycparser-actually-needs-to-parse-headers-for">
+<h2>What pycparser actually needs to parse headers for</h2>
+<p>To understand this bold claim, you must first understand why pycparser needs to
+parse headers. Let's start with a more basic question - why does the <em>C
+compiler</em> need to parse headers your file includes?</p>
+<p>For a number of reasons; some of them syntactic, but most of them semantic.
+Syntactic issues are those that may prevent the compiler from <em>parsing</em> the
+code. <tt class="docutils literal">#define</tt>s are one, types are another.</p>
+<p>For example, the C code:</p>
+<div class="highlight"><pre><span></span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">T</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">x</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Cannot be properly parsed unless we know whether:</p>
+<ol class="arabic simple">
+<li>Either <tt class="docutils literal">T</tt> or <tt class="docutils literal">x</tt> are macros <tt class="docutils literal">#define</tt>d to something.</li>
+<li><tt class="docutils literal">T</tt> is a type that was previously created with a <tt class="docutils literal">typedef</tt>.</li>
+</ol>
+<p>For a thorough explanation of this issue, look at <a class="reference external" href="../../2007/11/24/the-context-sensitivity-of-cs-grammar.html">this article</a>
+and other related postings on my website.</p>
+<p>Semantic reasons are those that won't prevent the compiler from parsing the
+code, but will prevent it from properly understanding and verifying it. For
+example, declarations of functions being used. Full declarations of
+<tt class="docutils literal">struct</tt>s, and so on. These take up the vast majority of real-world header
+files. But as it turns out, since pycparser only cares about <em>parsing</em> the code
+into an AST, and doesn't do any semantic analysis or further processing, it
+doesn't care about these issues. In other words, given the code:</p>
+<div class="highlight"><pre><span></span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">foo</span><span class="p">(</span><span class="n">a</span><span class="p">.</span><span class="n">b</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>pycparser can construct a proper AST (given that none of <tt class="docutils literal">foo</tt>, <tt class="docutils literal">a</tt> or <tt class="docutils literal">b</tt>
+are type names). It doesn't care what the actual declaration of <tt class="docutils literal">foo</tt> is,
+whether <tt class="docutils literal">a</tt> is indeed a variable of <tt class="docutils literal">struct</tt> type, or whether it has a field
+named <tt class="docutils literal">b</tt> <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>.</p>
+<p>So pycparser requires very little from header files. This is how the idea of
+&quot;fake headers&quot; was born.</p>
+</div>
+<div class="section" id="fake-headers">
+<h2>Fake headers</h2>
+<p>Let's get back to this simple code sample:</p>
+<div class="highlight"><pre><span></span><span class="cp">#include</span><span class="w"> </span><span class="cpf">&lt;someheader.h&gt;</span><span class="cp"></span>
+
+<span class="kt">int</span><span class="w"> </span><span class="nf">foo</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// my code</span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>So we've established two key ideas:</p>
+<ol class="arabic simple">
+<li>pycparser needs to know what <tt class="docutils literal">someheader.h</tt> contains so it can properly
+parse the code.</li>
+<li>pycparser needs only a very small subset of <tt class="docutils literal">someheader.h</tt> to perform its
+task.</li>
+</ol>
+<p>The idea of fake headers is simple. Instead of actually parsing <tt class="docutils literal">someheader.h</tt>
+and all the other headers it transitively includes (this probably includes lots
+of system and standard library headers too), why not create a &quot;fake&quot;
+<tt class="docutils literal">someheader.h</tt> that only contains the parts of the original that are necessary
+for parsing - the <tt class="docutils literal">#define</tt>s and the <tt class="docutils literal">typedef</tt>s.</p>
+<p>The cool part about <tt class="docutils literal">typedef</tt>s is that pycparser doesn't actually care what a
+type is defined to be. <tt class="docutils literal">T</tt> may be a pointer to function accepting an array of
+struct types, but all pycparser needs to see is:</p>
+<div class="highlight"><pre><span></span><span class="k">typedef</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">T</span><span class="p">;</span><span class="w"></span>
+</pre></div>
+<p>So it knows that <tt class="docutils literal">T</tt> is a type. It doesn't care <em>what kind of type</em> it is.</p>
+</div>
+<div class="section" id="so-what-do-you-have-to-do-to-parse-your-program">
+<h2>So what do you have to do to parse your program?</h2>
+<p>OK, so now you hopefully have a better understanding of what headers mean for
+pycparser, and how to work around having to parse tons of system headers. What
+does this actually mean for <em>your</em> program, though? Will you now have to scour
+through all your headers, &quot;faking them out&quot;? Unlikely. If your code is
+standards-compliant C, then most likely pycparser will have no issue parsing all
+your headers. But you probably don't want it to parse the system hedaders. In
+addition to being nonstandard, these headers are usually large, which means
+longer parsing time and larger ASTs.</p>
+<p>So my suggestion would be: let pycparser parse <em>your</em> headers, but fake
+out the system headers, and possibly any other large library headers used by
+your code. As far as the standard headers, pycparser already provides you with
+nice fakes in its <tt class="docutils literal">utils</tt> folder. All you need to do is provide this flag to
+the preprocessor <a class="footnote-reference" href="index.html#footnote-4" id="footnote-reference-4">[4]</a>:</p>
+<pre class="literal-block">
+-I&lt;PATH-TO-PYCPARSER&gt;/utils/fake_libc_include
+</pre>
+<p>And it will be able to find header files like <tt class="docutils literal">stdio.h</tt> and <tt class="docutils literal">sys/types.h</tt>
+with the proper types defined.</p>
+<p>I'll repeat: the flag shown above is almost certainly sufficient to parse a C99
+program that only relies on the C runtime (i.e. has no other library
+dependencies).</p>
+</div>
+<div class="section" id="real-world-example">
+<h2>Real-world example</h2>
+<p>OK, enough theory. Now I want to work through an example to help ground these
+suggestions in reality. I'll take some well-known open-source C project and use
+pycparser to parse one of its files, fully showing all the steps taken until a
+successful parse is done. I'll pick <a class="reference external" href="https://github.com/antirez/redis">Redis</a>.</p>
+<p>Let's start at the beginning, by cloning the Redis git repo:</p>
+<pre class="literal-block">
+/tmp$ git clone git&#64;github.com:antirez/redis.git
+</pre>
+<p>I'll be using the latest released pycparser (version 2.13 at the time of
+writing). I'll also clone its repository into <tt class="docutils literal">/tmp</tt> so I can easily access the fake
+headers:</p>
+<pre class="literal-block">
+/tmp$ git clone git&#64;github.com:eliben/pycparser.git
+</pre>
+<p>A word on methodology - when initially exploring how to parse a new project, I'm
+always preprocessing separately. Once I figure out the flags/settings/extra
+faking required to successfully parse the code, it's all very easy to put in a
+script.</p>
+<p>Let's take the main Redis file (<tt class="docutils literal">redis/src/redis.c</tt>) and attempt to preprocess
+it. The first preprocessor invocation simply adds the include paths for Redis's
+own headers (they live in <tt class="docutils literal">redis/src</tt>) and pycparser's fake libc headers:</p>
+<pre class="literal-block">
+/tmp$ gcc -E -Iredis/src -Ipycparser/utils/fake_libc_include redis/src/redis.c &gt; redis_pp.c
+# 48 &quot;redis/src/redis.h&quot; 2
+In file included from redis/src/redis.c:30:0:
+redis/src/redis.h:48:17: fatal error: lua.h: No such file or directory
+ #include &lt;lua.h&gt;
+             ^
+compilation terminated.
+</pre>
+<p>Oops, no good. Redis is looking for Lua headers. Let's see if it carries this
+dependency along:</p>
+<pre class="literal-block">
+/tmp$ find redis -name lua
+redis/deps/lua
+</pre>
+<p>Indeed! We should be able to add the Lua headers to the preprocessor path too:</p>
+<pre class="literal-block">
+/tmp$ gcc -E -Iredis/src -Ipycparser/utils/fake_libc_include \
+             -Iredis/deps/lua/src redis/src/redis.c &gt; redis_pp.c
+</pre>
+<p>Great, no more errors. Now let's try to parse it with pycparser. I'll load
+pycparser in an interactive terminal, but any other technique (such as running
+one of the example scripts will work):</p>
+<div class="highlight"><pre><span></span><span class="p">:</span> <span class="kn">import</span> <span class="nn">pycparser</span>
+<span class="p">:</span> <span class="n">pycparser</span><span class="o">.</span><span class="n">parse_file</span><span class="p">(</span><span class="s1">&#39;/tmp/redis_pp.c&#39;</span><span class="p">)</span>
+<span class="o">...</span> <span class="n">backtrace</span>
+<span class="o">---&gt;</span> <span class="mi">55</span>         <span class="k">raise</span> <span class="n">ParseError</span><span class="p">(</span><span class="s2">&quot;</span><span class="si">%s</span><span class="s2">: </span><span class="si">%s</span><span class="s2">&quot;</span> <span class="o">%</span> <span class="p">(</span><span class="n">coord</span><span class="p">,</span> <span class="n">msg</span><span class="p">))</span>
+
+<span class="n">ParseError</span><span class="p">:</span> <span class="o">/</span><span class="n">usr</span><span class="o">/</span><span class="n">include</span><span class="o">/</span><span class="n">x86_64</span><span class="o">-</span><span class="n">linux</span><span class="o">-</span><span class="n">gnu</span><span class="o">/</span><span class="n">sys</span><span class="o">/</span><span class="n">types</span><span class="o">.</span><span class="n">h</span><span class="p">:</span><span class="mi">194</span><span class="p">:</span><span class="mi">20</span><span class="p">:</span> <span class="n">before</span><span class="p">:</span> <span class="n">__attribute__</span>
+</pre></div>
+<p>This error is strange. Note where it occurs: in a system header included in the
+preprocessed file. But we should have no system headers there - we specified the
+fake headers path. What gives?</p>
+<p>The reason this is happening is that <tt class="docutils literal">gcc</tt> knows about some pre-set system
+header directories and will add them to its search path. We can block this,
+making sure it only looks in the directories we explicitly specify with <tt class="docutils literal"><span class="pre">-I</span></tt>,
+by providing it with the <tt class="docutils literal"><span class="pre">-nostdinc</span></tt> flag. Let's re-run the preprocessor:</p>
+<pre class="literal-block">
+/tmp$ gcc -nostdinc -E -Iredis/src -Ipycparser/utils/fake_libc_include \
+                       -Iredis/deps/lua/src redis/src/redis.c &gt; redis_pp.c
+</pre>
+<p>Now I'll try to parse the preprocessed code again:</p>
+<div class="highlight"><pre><span></span><span class="p">:</span> <span class="n">pycparser</span><span class="o">.</span><span class="n">parse_file</span><span class="p">(</span><span class="s1">&#39;/tmp/redis_pp.c&#39;</span><span class="p">)</span>
+<span class="o">...</span> <span class="n">backtrace</span>
+<span class="o">---&gt;</span> <span class="mi">55</span>         <span class="k">raise</span> <span class="n">ParseError</span><span class="p">(</span><span class="s2">&quot;</span><span class="si">%s</span><span class="s2">: </span><span class="si">%s</span><span class="s2">&quot;</span> <span class="o">%</span> <span class="p">(</span><span class="n">coord</span><span class="p">,</span> <span class="n">msg</span><span class="p">))</span>
+
+<span class="n">ParseError</span><span class="p">:</span> <span class="n">redis</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">sds</span><span class="o">.</span><span class="n">h</span><span class="p">:</span><span class="mi">74</span><span class="p">:</span><span class="mi">5</span><span class="p">:</span> <span class="n">before</span><span class="p">:</span> <span class="n">__attribute__</span>
+</pre></div>
+<p>OK, progress! If we look in the code where this error occurs, we'll note a
+GNU-specific <tt class="docutils literal">__attribute__</tt> pycparser doesn't support. No problem, let's just
+<tt class="docutils literal">#define</tt> it away:</p>
+<pre class="literal-block">
+$ gcc -nostdinc -E -D'__attribute__(x)=' -Iredis/src \
+                   -Ipycparser/utils/fake_libc_include \
+                   -Iredis/deps/lua/src redis/src/redis.c &gt; redis_pp.c
+</pre>
+<p>If I try to parse again, it works:</p>
+<div class="highlight"><pre><span></span><span class="p">:</span> <span class="n">pycparser</span><span class="o">.</span><span class="n">parse_file</span><span class="p">(</span><span class="s1">&#39;/tmp/redis_pp.c&#39;</span><span class="p">)</span>
+<span class="o">&lt;</span><span class="n">pycparser</span><span class="o">.</span><span class="n">c_ast</span><span class="o">.</span><span class="n">FileAST</span> <span class="n">at</span> <span class="mh">0x7f15fc321cf8</span><span class="o">&gt;</span>
+</pre></div>
+<p>I can also run one of the example scripts now to see we can do something more
+interesting with the AST:</p>
+<pre class="literal-block">
+/tmp$ python pycparser/examples/func_defs.py redis_pp.c
+sdslen at redis/src/sds.h:47
+sdsavail at redis/src/sds.h:52
+rioWrite at redis/src/rio.h:93
+rioRead at redis/src/rio.h:106
+rioTell at redis/src/rio.h:119
+rioFlush at redis/src/rio.h:123
+redisLogRaw at redis/src/redis.c:299
+redisLog at redis/src/redis.c:343
+redisLogFromHandler at redis/src/redis.c:362
+ustime at redis/src/redis.c:385
+mstime at redis/src/redis.c:396
+exitFromChild at redis/src/redis.c:404
+dictVanillaFree at redis/src/redis.c:418
+... many more lines
+main at redis/src/redis.c:3733
+</pre>
+<p>This lets us see all the functions defined in <tt class="docutils literal">redis.c</tt> and the headers
+included in it using pycparser.</p>
+<p>This was fairly straightforward - all I had to do is set the right preprocessor
+flags, really. In some cases, it may be a bit more difficult. The most obvious
+problem that you may encounter is a new header you'll need to fake away.
+Luckily, that's very easy - just take a look at the existing ones (say at
+<tt class="docutils literal">stdio.h</tt>). These headers can be copied to other names/directories, to make
+sure the preprocessor will find them properly. If you think there's a <em>standard</em>
+header I forgot to include in the fake headers, please open an issue and I'll
+add it.</p>
+<p>Note that we didn't have to fake out the headers of Redis (or Lua for that
+matter). pycparser handled them just fine. The same has a high chance of being
+true for your C project as well.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>On Linux, at least <tt class="docutils literal">gcc</tt> should be there on the command line. On
+OS X, you'll need to install &quot;command-line developer tools&quot; to get a
+command-line <tt class="docutils literal">clang</tt>. If you're in Microsoft-land, I recommend
+downloading <a class="reference external" href="http://llvm.org/releases/download.html">pre-built clang binaries for Windows</a>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>And this has been done by many folks. pycparser was made to parse the
+standard C library, <tt class="docutils literal">windows.h</tt>, parts of the Linux kernel headers,
+and so on.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>Note that this describes the most common use of pycparser, which is to
+perform simple analyses on the source, or rewrite parts of existing
+source in some way. More complex uses may actually require full parsing
+of type definitions, structs and function declarations. In fact, you can
+certainly create a real C compiler using pycparser as the frontend. These
+uses will require full parsing of headers, so fake headers won't do. As I
+mentioned above, it's possible to make pycparser parse the actual headers
+of libraries and so on; it just takes more work.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-4">[4]</a></td><td>Depending on the exact preprocessor you're using, you may need to provide
+it with another flag telling it to ignore the system headers whose paths
+are hard-coded in it. Read on to the example for more details.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Concurrent Servers: Part 5 - Redis case study - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Concurrent Servers: Part 5 - Redis case study">
+                        Concurrent Servers: Part 5 - Redis case study
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> December 07, 2017 at 05:44</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/concurrency.html">Concurrency</a>
+        ,
+    <a href="../../tag/c-c.html">C & C++</a>
+        ,
+    <a href="../../tag/network-programming.html">Network Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This is part 5 in a series of posts on writing concurrent network servers. After
+discussing techniques for constructing concurrent servers in parts 1-4, this
+time we're going to do a case study of an existing production-quality server -
+<a class="reference external" href="https://redis.io/">Redis</a>.</p>
+<img alt="Redis logo" class="align-center" src="../../images/2017/redis_logo.png" style="width: 320px;" />
+<p>Redis is a fascinating project and I've been following it with interest for a
+while now. One of the things I admire most about Redis is the clarity of its C
+source code. It also happens to be a great example of a high-performance
+concurrent in-memory database server, so the opportunity to use it as a case
+study for this series was too good to ignore.</p>
+<p>Let's see how the ideas discussed in parts 1-4 apply to a real-world
+application.</p>
+<p>All posts in the series:</p>
+<ul class="simple">
+<li><a class="reference external" href="../concurrent-servers-part-1-introduction/index.html">Part 1 - Introduction</a></li>
+<li><a class="reference external" href="../concurrent-servers-part-2-threads/index.html">Part 2 - Threads</a></li>
+<li><a class="reference external" href="../concurrent-servers-part-3-event-driven/index.html">Part 3 - Event-driven</a></li>
+<li><a class="reference external" href="../concurrent-servers-part-4-libuv/index.html">Part 4 - libuv</a></li>
+<li><a class="reference external" href="index.html">Part 5 - Redis case study</a></li>
+<li><a class="reference external" href="../../2018/concurrent-servers-part-6-callbacks-promises-and-asyncawait/index.html">Part 6 - Callbacks, Promises and async/await</a></li>
+</ul>
+<div class="section" id="event-handling-library">
+<h2>Event-handling library</h2>
+<p>One of Redis's main claims to fame around the time of its original release in
+2009 was its <em>speed</em> - the sheer number of concurrent client connections the
+server could handle. It was especially notable that Redis did this all <em>in a
+single thread</em>, without any complex locking and synchronization schemes on the
+data stored in memory.</p>
+<p>This feat was achieved by Redis's own implementation of an event-driven library
+which is wrapping the fastest event loop available on a system (<tt class="docutils literal">epoll</tt> for
+Linux, <tt class="docutils literal">kqueue</tt> for BSD and so on). This library is called <a class="reference external" href="https://redis.io/topics/internals-rediseventlib">ae</a>. <tt class="docutils literal">ae</tt> makes it possible to
+write a fast server as long as none of the internals are blocking, which Redis
+goes to great lengths to guarantee <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>.</p>
+<p>What mainly interests us here is <tt class="docutils literal">ae</tt>'s support of <em>file events</em> - registering
+callbacks to be invoked when file descriptors (like network sockets) have
+something interesting pending. Like <tt class="docutils literal">libuv</tt>, <tt class="docutils literal">ae</tt> supports multiple event
+loops and - having read parts 3 and 4 in this series - the signature of
+<tt class="docutils literal">aeCreateFileEvent</tt> shouldn't be surprising:</p>
+<div class="highlight"><pre><span></span><span class="kt">int</span><span class="w"> </span><span class="nf">aeCreateFileEvent</span><span class="p">(</span><span class="n">aeEventLoop</span><span class="w"> </span><span class="o">*</span><span class="n">eventLoop</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">fd</span><span class="p">,</span><span class="w"> </span><span class="kt">int</span><span class="w"> </span><span class="n">mask</span><span class="p">,</span><span class="w"></span>
+<span class="w">                      </span><span class="n">aeFileProc</span><span class="w"> </span><span class="o">*</span><span class="n">proc</span><span class="p">,</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="o">*</span><span class="n">clientData</span><span class="p">);</span><span class="w"></span>
+</pre></div>
+<p>It registers a callback (<tt class="docutils literal">proc</tt>) for new file events on <tt class="docutils literal">fd</tt>, with the given
+event loop. When using <tt class="docutils literal">epoll</tt>, it will call <tt class="docutils literal">epoll_ctl</tt> to add an event on
+the file descriptor (either <tt class="docutils literal">EPOLLIN</tt>, <tt class="docutils literal">EPOLLOUT</tt> or both, depending on the
+<tt class="docutils literal">mask</tt> parameter). <tt class="docutils literal">ae</tt>'s <tt class="docutils literal">aeProcessEvents</tt> is the &quot;run the event loop and
+dispatch callbacks&quot; function, and it calls <tt class="docutils literal">epoll_wait</tt> under the hood.</p>
+</div>
+<div class="section" id="handling-client-requests">
+<h2>Handling client requests</h2>
+<p>Let's trace through the Redis server code to see how <tt class="docutils literal">ae</tt> is used to register
+callbacks for client events. <tt class="docutils literal">initServer</tt> starts it by registering a callback
+for read events on the socket(s) being listened to, by calling
+<tt class="docutils literal">aeCreateFileEvent</tt> with the callback <tt class="docutils literal">acceptTcpHandler</tt>. This callback is
+invoked when new client connections are available. It calls <tt class="docutils literal">accept</tt> <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a> and
+then <tt class="docutils literal">acceptCommonHandler</tt>, which in turn calls <tt class="docutils literal">createClient</tt> to initialize
+the data structures required to track a new client connection.</p>
+<p><tt class="docutils literal">createClient</tt>'s job is to start listening for data coming in from the client.
+It sets the socket to non-blocking mode (a key ingredient in an asynchronous
+event loop) and registers another file event callback with <tt class="docutils literal">aeCreateFileEvent</tt>
+- for read events - <tt class="docutils literal">readQueryFromClient</tt>. This function will be invoked by
+the event loop every time the client sends some data.</p>
+<p><tt class="docutils literal">readQueryFromClient</tt> does just what we'd expect - parses the client's command
+and acts on it by querying and/or manipulating data and sending a reply back.
+Since the client socket is non-blocking, this function has to be able to handle
+<tt class="docutils literal">EAGAIN</tt>, as well as partial data; data read from the client is accumulated in
+a client-specific buffer, and the full query may be split across multiple
+invocations of the callback.</p>
+</div>
+<div class="section" id="sending-data-back-to-clients">
+<h2>Sending data back to clients</h2>
+<p>In the previous paragraph I said that <tt class="docutils literal">readQueryFromClient</tt> ends up sending
+replies back to clients. This is logically true, because <tt class="docutils literal">readQueryFromClient</tt>
+<em>prepares</em> the reply to be sent, but it doesn't actually do the physical sending
+- since there's no guarantee the client socket is ready for writing/sending
+data. We have to use the event loop machinery for that.</p>
+<p>The way Redis does this is by registering a <tt class="docutils literal">beforeSleep</tt> function to be
+called every time the event loop is about to go sleeping waiting for sockets to
+become available for reading/writing. One of the things <tt class="docutils literal">beforeSleep</tt> does is
+call <tt class="docutils literal">handleClientsWithPendingWrites</tt>. This function tries to send all
+available replies immediately by calling <tt class="docutils literal">writeToClient</tt>; if some of the
+sockets are unavailable, it registers an event-loop callback to invoke
+<tt class="docutils literal">sendReplyToClient</tt> when the socket <em>is</em> ready. This can be seen as a kind of
+optimization - if the socket is immediately ready for sending (which often is
+the case for TCP sockets), there's no need to register the event - just send the
+data. Since sockets are non-blocking, this never actually blocks the loop.</p>
+</div>
+<div class="section" id="why-does-redis-roll-its-own-event-library">
+<h2>Why does Redis roll its own event library?</h2>
+<p>In <a class="reference external" href="../concurrent-servers-part-4-libuv/index.html">part 4</a> we've
+discussed building asynchronous concurrent servers using <tt class="docutils literal">libuv</tt>. It's
+interesting to ponder the fact that Redis doesn't use <tt class="docutils literal">libuv</tt>, or any similar
+event library, and instead implements its own - <tt class="docutils literal">ae</tt>, including wrappers for
+<tt class="docutils literal">epoll</tt>, <tt class="docutils literal">kqueue</tt> and <tt class="docutils literal">select</tt>. In fact, antirez (Redis's creator)
+answered precisely this question <a class="reference external" href="http://oldblog.antirez.com/post/redis-win32-msft-patch.html">in a blog post in 2011</a>. The gist of
+his answer: <tt class="docutils literal">ae</tt> is ~770 lines of code he intimately understands; <tt class="docutils literal">libuv</tt> is
+huge, without providing additional functionality Redis needs.</p>
+<p>Today, <tt class="docutils literal">ae</tt> has grown to ~1300 lines, which is still trivial compared to
+<tt class="docutils literal">libuv</tt>'s 26K (this is <em>without</em> Windows, test, samples, docs). <tt class="docutils literal">libuv</tt> is a
+far more general library, which makes it more complex and more difficult to
+adapt to the particular needs of another project; <tt class="docutils literal">ae</tt>, on the other hand, was
+designed for Redis, co-evolved with Redis and contains only what Redis needs.</p>
+<p>This is another great example of the dependencies in software projects formula I
+mentioned <a class="reference external" href="../benefits-of-dependencies-in-software-projects-as-a-function-of-effort/index.html">in a post earlier this year</a>:</p>
+<blockquote>
+The benefit of dependencies is inversely proportional to the amount of
+effort spent on a software project.</blockquote>
+<p>antirez referred to this, to some extent, in his post. He mentioned that
+dependencies that provide a lot of added value (&quot;foundational&quot; dependencies in
+my post) make more sense (<tt class="docutils literal">jemalloc</tt> and Lua are his examples) than
+dependencies like <tt class="docutils literal">libuv</tt>, whose functionality is fairly easy to implement for
+the particular needs of Redis.</p>
+</div>
+<div class="section" id="multi-threading-in-redis">
+<h2>Multi-threading in Redis</h2>
+<p><a class="reference external" href="http://antirez.com/news/93">For the vast majority of its history</a>, Redis has
+been a purely single-threaded affair. Some people find this surprising, but it
+makes total sense with a bit of thought. Redis is inherently network-bound - as
+long as the database size is reasonable, for any given client request, much more
+time is spent waiting on the network than inside Redis's data structures.</p>
+<p>These days, however, things are not quite that simple. There are several new
+capabilities in Redis that use threads:</p>
+<ol class="arabic simple">
+<li>&quot;Lazy&quot; <a class="reference external" href="http://antirez.com/news/93">freeing of memory</a>.</li>
+<li>Writing a <a class="reference external" href="https://redis.io/topics/persistence">persistence journal</a> with
+<tt class="docutils literal">fsync</tt> calls in a background thread.</li>
+<li>Running user-defined modules that need to perform a long-running operation.</li>
+</ol>
+<p>For the first two features, Redis uses its own simple <tt class="docutils literal">bio</tt> library (the
+acronym stands for &quot;Background I/O&quot;). The library is hard-coded for Redis's
+needs and can't be used outside it - it runs a pre-set number of threads, one
+per background job type Redis needs.</p>
+<p>For the third feature, <a class="reference external" href="https://redis.io/topics/modules-intro">Redis modules</a>
+could define new Redis commands, and thus are held to the same standards as
+regular Redis commands, including not blocking the main thread. If a custom
+Redis command defined in a module wants to perform a long-running operation, it
+has to spin up a thread to run it in the background.
+<tt class="docutils literal">src/modules/helloblock.c</tt> in the Redis tree provides an example.</p>
+<p>With these features, Redis combines an event loop with threading to get both
+speed in the common case and flexibility in the general case, similarly to the
+work queue discussion in <a class="reference external" href="../concurrent-servers-part-4-libuv/index.html">part 4</a> of this
+series.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>A core aspect of Redis is its being an <em>in-memory</em> database; therefore,
+queries should never take too long to execute. There are all kinds of
+complications, however. In case of partitioning, a server may end up
+routing the request to another instance; in this case async I/O is used
+to avoid blocking other clients.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>Through <tt class="docutils literal">anetAccept</tt>; <tt class="docutils literal">anet</tt> is Redis's wrapper for TCP socket code.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Go internals: capturing loop variables in closures - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Go internals: capturing loop variables in closures">
+                        Go internals: capturing loop variables in closures
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> September 16, 2019 at 05:42</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p><strong>Update (2023-09-20):</strong> Go fixes the loop variable capture gotcha in the
+<a class="reference external" href="https://go.dev/blog/loopvar-preview">1.22 release</a>. While the technical
+details of this article remain true, all the examples will produce the
+&quot;expected&quot; output.</p>
+<p>The Go wiki has a page titled <a class="reference external" href="https://github.com/golang/go/wiki/CommonMistakes">CommonMistakes</a>. Amusingly, it only lists a
+single entry at this time - <em>using goroutines on loop iterator variables</em>,
+providing this example:</p>
+<div class="highlight"><pre><span></span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">val</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">values</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">go</span><span class="w"> </span><span class="kd">func</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nx">val</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This will print the <em>last</em> value in <tt class="docutils literal">values</tt>, <tt class="docutils literal">len(values)</tt> times. The fix
+is very simple:</p>
+<div class="highlight"><pre><span></span><span class="c1">// assume the type of each value is string</span><span class="w"></span>
+<span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">val</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">values</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">go</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">val</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nx">val</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}(</span><span class="nx">val</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Being aware of the fix is sufficient to be able to write correct Go programs.
+However, if you find the details of Go's implementation fascinating, this post
+should provide a deeper understanding of the problem and its solution.</p>
+<div class="section" id="basics-passing-by-value-and-by-reference">
+<h2>Basics - passing by value and by reference</h2>
+<p>Go makes the distinction between passing objects <em>by value</em> and <em>by reference</em>
+<a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a> explicit. Let's start with <strong>example 1</strong> <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">foobyval</span><span class="p">(</span><span class="nx">n</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nx">n</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="mi">5</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">go</span><span class="w"> </span><span class="nx">foobyval</span><span class="p">(</span><span class="nx">i</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">time</span><span class="p">.</span><span class="nx">Sleep</span><span class="p">(</span><span class="mi">100</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Millisecond</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It should come as no surprise that this will print out the values 0 to 4, likely
+in some scrambled order. So we'll move on to <strong>example 2</strong>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">foobyref</span><span class="p">(</span><span class="nx">n</span><span class="w"> </span><span class="o">*</span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="o">*</span><span class="nx">n</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="mi">5</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">go</span><span class="w"> </span><span class="nx">foobyref</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">i</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">time</span><span class="p">.</span><span class="nx">Sleep</span><span class="p">(</span><span class="mi">100</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Millisecond</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This code has a data race and will fail the Go race detector (when executed with
+<tt class="docutils literal"><span class="pre">-race</span></tt>). On my machine it prints:</p>
+<div class="highlight"><pre><span></span>5
+5
+5
+5
+5
+</pre></div>
+<p>But it could also print other sequences. Understanding <em>why</em> will take us 80% of
+the way to grokking the main topic of this post, so let's spend some time
+exploring this.</p>
+<p>It turns out that the answer is right there in the <a class="reference external" href="https://golang.org/ref/spec#For_statements">Go spec</a>, which states:</p>
+<blockquote>
+Variables declared by the init statement are re-used in each iteration.</blockquote>
+<p>This means that when the program is running, there's just a single object
+representing <tt class="docutils literal">i</tt>, not a new one for each iteration. This object gets assigned
+a new value on each iteration.</p>
+<p>Let's study the difference in the generated machine code <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a> for the <tt class="docutils literal">for</tt>
+loop between examples 1 and 2. Starting with example 1:</p>
+<div class="highlight"><pre><span></span>0x0021 00033 (go-func-byval.go:13)      MOVQ    AX, &quot;&quot;.i+24(SP)
+0x0026 00038 (go-func-byval.go:14)      MOVL    $8, (SP)
+0x002d 00045 (go-func-byval.go:14)      LEAQ    &quot;&quot;.foobyval·f(SB), CX
+0x0034 00052 (go-func-byval.go:14)      MOVQ    CX, 8(SP)
+0x0039 00057 (go-func-byval.go:14)      MOVQ    AX, 16(SP)
+0x003e 00062 (go-func-byval.go:14)      CALL    runtime.newproc(SB)
+0x0043 00067 (go-func-byval.go:13)      MOVQ    &quot;&quot;.i+24(SP), AX
+0x0048 00072 (go-func-byval.go:13)      INCQ    AX
+0x004b 00075 (go-func-byval.go:13)      CMPQ    AX, $5
+0x004f 00079 (go-func-byval.go:13)      JLT     33
+</pre></div>
+<p>The <tt class="docutils literal">go</tt> statement gets translated to a call to <tt class="docutils literal">runtime.newproc</tt>. While
+this machinery is interesting, we'll leave it for a separate article. What's
+interesting for our needs here is how the loop variable <tt class="docutils literal">i</tt> is lowered. It's
+stored in the <tt class="docutils literal">AX</tt> register, which is then passed <em>by value</em> onto the stack
+as an argument for the call too <tt class="docutils literal">foobyval</tt> <a class="footnote-reference" href="index.html#footnote-4" id="footnote-reference-4">[4]</a>. The <em>by value</em> here manifests
+by simply copying the value of <tt class="docutils literal">AX</tt> onto the stack. Changing <tt class="docutils literal">AX</tt> will
+henceforth not affect the value passed into <tt class="docutils literal">foobyval</tt>.</p>
+<p>On the other hand, the same loop in example 2 looks as follows:</p>
+<div class="highlight"><pre><span></span>0x0039 00057 (go-func-byref.go:14)      MOVL    $8, (SP)
+0x0040 00064 (go-func-byref.go:14)      LEAQ    &quot;&quot;.foobyref·f(SB), CX
+0x0047 00071 (go-func-byref.go:14)      MOVQ    CX, 8(SP)
+0x004c 00076 (go-func-byref.go:14)      MOVQ    AX, 16(SP)
+0x0051 00081 (go-func-byref.go:14)      CALL    runtime.newproc(SB)
+0x0056 00086 (go-func-byref.go:13)      MOVQ    &quot;&quot;.&amp;i+24(SP), AX
+0x005b 00091 (go-func-byref.go:13)      INCQ    (AX)
+0x005e 00094 (go-func-byref.go:13)      CMPQ    (AX), $5
+0x0062 00098 (go-func-byref.go:13)      JLT     57
+</pre></div>
+<p>The code is very similar, with just one critical difference. Now <tt class="docutils literal">AX</tt> holds
+the address of <tt class="docutils literal">i</tt> rather than its value. Note how the increment and
+comparison for the loop condition are made on <tt class="docutils literal">(AX)</tt> instead of <tt class="docutils literal">AX</tt>.
+When we pass <tt class="docutils literal">AX</tt> onto the stack, we're passing the address of <tt class="docutils literal">i</tt>.
+Modifying <tt class="docutils literal">(AX)</tt> will actually affect the value of <tt class="docutils literal">i</tt> observed inside the
+goroutine.</p>
+<p>None of this should be surprising - after all, we're passing a pointer to
+an integer into <tt class="docutils literal">foobyref</tt>.</p>
+<p>What happens at run-time is that, on my machine, the loop finishes running
+<em>before</em> any of the goroutines it launches actually start. Once they do, they
+still hold a reference to the same <tt class="docutils literal">i</tt> - not a copy of it. What's the value of
+<tt class="docutils literal">i</tt> at this point? It's 5, exactly where the loop stops iterating. This is why
+all the goroutines print out 5. But the goroutines could also launch in the
+middle of the loop and a difference sequence would occur - a classical data
+race.</p>
+</div>
+<div class="section" id="methods-with-value-vs-pointer-receivers">
+<h2>Methods with value vs. pointer receivers</h2>
+<p>A similar artifact can be observed when creating goroutines that invoke methods.
+This is even pointed out explicitly on the <a class="reference external" href="https://github.com/golang/go/wiki/CommonMistakes">CommonMistakes</a> page. Consider
+<strong>example 3</strong>:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">MyInt</span><span class="w"> </span><span class="kt">int</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">mi</span><span class="w"> </span><span class="nx">MyInt</span><span class="p">)</span><span class="w"> </span><span class="nx">Show</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nx">mi</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ms</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="p">[]</span><span class="nx">MyInt</span><span class="p">{</span><span class="mi">50</span><span class="p">,</span><span class="w"> </span><span class="mi">60</span><span class="p">,</span><span class="w"> </span><span class="mi">70</span><span class="p">,</span><span class="w"> </span><span class="mi">80</span><span class="p">,</span><span class="w"> </span><span class="mi">90</span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">m</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">ms</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">go</span><span class="w"> </span><span class="nx">m</span><span class="p">.</span><span class="nx">Show</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">time</span><span class="p">.</span><span class="nx">Sleep</span><span class="p">(</span><span class="mi">100</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Millisecond</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This prints the elements of <tt class="docutils literal">ms</tt>, possibly in a scrambled order, as you'd
+expect. A very similar <strong>example 4</strong> uses a pointer receiver for the <tt class="docutils literal">Show</tt>
+method:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">MyInt</span><span class="w"> </span><span class="kt">int</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">mi</span><span class="w"> </span><span class="o">*</span><span class="nx">MyInt</span><span class="p">)</span><span class="w"> </span><span class="nx">Show</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="o">*</span><span class="nx">mi</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">ms</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="p">[]</span><span class="nx">MyInt</span><span class="p">{</span><span class="mi">50</span><span class="p">,</span><span class="w"> </span><span class="mi">60</span><span class="p">,</span><span class="w"> </span><span class="mi">70</span><span class="p">,</span><span class="w"> </span><span class="mi">80</span><span class="p">,</span><span class="w"> </span><span class="mi">90</span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">m</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">ms</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">go</span><span class="w"> </span><span class="nx">m</span><span class="p">.</span><span class="nx">Show</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">time</span><span class="p">.</span><span class="nx">Sleep</span><span class="p">(</span><span class="mi">100</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Millisecond</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Can you guess what the output is going to be? It's 90 repeated five times. The
+reason is exactly the same as in the simpler example 2. Here it's a bit more
+insidious because of the syntactic sugar Go applies to calling methods with
+pointer receivers. Whereas between examples 1 and 2 we changed the argument
+passed into the function from <tt class="docutils literal">i</tt> to <tt class="docutils literal">&amp;i</tt>, here the method invocation is
+exactly the same! It's <tt class="docutils literal">go m.Show()</tt> in both cases, yet the behavior is very
+different.</p>
+<p>This is a rather unfortunate confluence of Go features, IMHO. Nothing in the
+call site hints that <tt class="docutils literal">m</tt> is passed by reference, and one has to go look at
+the documentation of the <tt class="docutils literal">Show</tt> method to see that (the method can be in
+a completely different package from the calling code, of course). In most cases
+this feature is useful, enabling us to write cleaner code. But here the
+passing by reference has unexpected effects.</p>
+</div>
+<div class="section" id="closures">
+<h2>Closures</h2>
+<p>Finally we come back to closures, with <strong>example 5</strong>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">foobyval</span><span class="p">(</span><span class="nx">n</span><span class="w"> </span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nx">n</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="mi">5</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">go</span><span class="w"> </span><span class="kd">func</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">foobyval</span><span class="p">(</span><span class="nx">i</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}()</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">time</span><span class="p">.</span><span class="nx">Sleep</span><span class="p">(</span><span class="mi">100</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Millisecond</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This is likely to print not what you'd expect. On my machine it prints:</p>
+<div class="highlight"><pre><span></span>5
+5
+5
+5
+5
+</pre></div>
+<p>Even though <tt class="docutils literal">i</tt> is passed by value to <tt class="docutils literal">foobyval</tt>  in the the closure, which
+seems like it should be fine based on example 1. Let's find out why. We'll start
+with the disassembly of the <tt class="docutils literal">for</tt> loop:</p>
+<div class="highlight"><pre><span></span>0x0039 00057 (go-closure.go:14) MOVL    $8, (SP)
+0x0040 00064 (go-closure.go:14) LEAQ    &quot;&quot;.main.func1·f(SB), CX
+0x0047 00071 (go-closure.go:14) MOVQ    CX, 8(SP)
+0x004c 00076 (go-closure.go:14) MOVQ    AX, 16(SP)
+0x0051 00081 (go-closure.go:14) CALL    runtime.newproc(SB)
+0x0056 00086 (go-closure.go:13) MOVQ    &quot;&quot;.&amp;i+24(SP), AX
+0x005b 00091 (go-closure.go:13) INCQ    (AX)
+0x005e 00094 (go-closure.go:13) CMPQ    (AX), $5
+0x0062 00098 (go-closure.go:13) JLT     57
+</pre></div>
+<p>It's fairly similar to example 2: note that <tt class="docutils literal">i</tt> is represented as <em>an address</em>
+in the <tt class="docutils literal">AX</tt> register, meaning that we pass it around by reference, even though
+the closure calls <tt class="docutils literal">foobyval</tt>. This loop body invokes a function using
+<tt class="docutils literal">runtime.newproc</tt>, but where does this function come from?</p>
+<p><tt class="docutils literal">func1</tt> is created by the compiler to represent the closure. The compiler
+<em>outlines</em> the closure's code into a standalone function and inserts a call to
+it in <tt class="docutils literal">main</tt>. The main challenge in outlining closures like this is how to
+treat the variables the closure implicitly uses but weren't declared in its
+argument list.</p>
+<p>Here's the body of <tt class="docutils literal">func1</tt>:</p>
+<div class="highlight"><pre><span></span>0x0000 00000 (go-closure.go:14) TEXT    &quot;&quot;.main.func1(SB), ABIInternal, $16-8
+0x0000 00000 (go-closure.go:14) MOVQ    (TLS), CX
+0x0009 00009 (go-closure.go:14) CMPQ    SP, 16(CX)
+0x000d 00013 (go-closure.go:14) JLS     56
+0x000f 00015 (go-closure.go:14) SUBQ    $16, SP
+0x0013 00019 (go-closure.go:14) MOVQ    BP, 8(SP)
+0x0018 00024 (go-closure.go:14) LEAQ    8(SP), BP
+0x001d 00029 (go-closure.go:15) MOVQ    &quot;&quot;.&amp;i+24(SP), AX
+0x0022 00034 (go-closure.go:15) MOVQ    (AX), AX
+0x0025 00037 (go-closure.go:15) MOVQ    AX, (SP)
+0x0029 00041 (go-closure.go:15) CALL    &quot;&quot;.foobyval(SB)
+0x002e 00046 (go-closure.go:16) MOVQ    8(SP), BP
+0x0033 00051 (go-closure.go:16) ADDQ    $16, SP
+0x0037 00055 (go-closure.go:16) RET
+</pre></div>
+<p>The interesting thing to note is that the function has an argument in
+<tt class="docutils literal">24(SP)</tt>, which is an <tt class="docutils literal">int</tt> pointer - note the <tt class="docutils literal">MOVQ (AX), AX</tt> which
+extracts its value before passing it to <tt class="docutils literal">foobyval</tt>. In essence, <tt class="docutils literal">func1</tt>
+looks something like this:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">func1</span><span class="p">(</span><span class="nx">i</span><span class="w"> </span><span class="o">*</span><span class="kt">int</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">foobyval</span><span class="p">(</span><span class="o">*</span><span class="nx">i</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>And the loop in <tt class="docutils literal">main</tt> is transformed into:</p>
+<div class="highlight"><pre><span></span><span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="mi">5</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">go</span><span class="w"> </span><span class="nx">func1</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">i</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This is equivalent to example 2, which explains the output of the program. The
+technical jargon for what's happening here is that <tt class="docutils literal">i</tt> is a <em>free variable</em>
+inside the closure, and such variables are <em>captured by reference</em> in Go.</p>
+<p>The standard fix is to pass <tt class="docutils literal">i</tt> as a parameter into the closure, or
+alternatively assign it to a loop-body-local that's captured instead:</p>
+<div class="highlight"><pre><span></span><span class="k">for</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="w"> </span><span class="p">&lt;</span><span class="w"> </span><span class="mi">5</span><span class="p">;</span><span class="w"> </span><span class="nx">i</span><span class="o">++</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="nx">ii</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">i</span><span class="w"></span>
+<span class="w">        </span><span class="k">go</span><span class="w"> </span><span class="kd">func</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">                </span><span class="nx">foobyval</span><span class="p">(</span><span class="nx">ii</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">}()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This will print 0, 1, 2, 3, 4 in a scrambled order. Why is the behavior here
+different from example 5? Because <tt class="docutils literal">ii</tt> is created anew in every loop
+iteration, as opposed to <tt class="docutils literal">i</tt>.</p>
+<p>Finally, it's worth looking at an optimization to the capturing semantics.</p>
+</div>
+<div class="section" id="peeking-under-the-hood">
+<h2>Peeking under the hood</h2>
+<p>If you're not familiar with the architecture of the Go compiler, I suggest
+checking out my earlier article on Go compiler internals -
+<a class="reference external" href="../go-compiler-internals-adding-a-new-statement-to-go-part-1/index.html">part 1</a>,
+<a class="reference external" href="../go-compiler-internals-adding-a-new-statement-to-go-part-2/index.html">part 2</a>.</p>
+<p>The concrete syntax tree created by the parser creates the following note for
+the <tt class="docutils literal">go</tt> statement calling the closure:</p>
+<div class="highlight"><pre><span></span>0: *syntax.CallStmt {
+.  Tok: go
+.  Call: *syntax.CallExpr {
+.  .  Fun: *syntax.FuncLit {
+.  .  .  Type: *syntax.FuncType {
+.  .  .  .  ParamList: nil
+.  .  .  .  ResultList: nil
+.  .  .  }
+.  .  .  Body: *syntax.BlockStmt {
+.  .  .  .  List: []syntax.Stmt (1 entries) {
+.  .  .  .  .  0: *syntax.ExprStmt {
+.  .  .  .  .  .  X: *syntax.CallExpr {
+.  .  .  .  .  .  .  Fun: foobyval @ go-closure.go:15:4
+.  .  .  .  .  .  .  ArgList: []syntax.Expr (1 entries) {
+.  .  .  .  .  .  .  .  0: i @ go-closure.go:15:13
+.  .  .  .  .  .  .  }
+.  .  .  .  .  .  .  HasDots: false
+.  .  .  .  .  .  }
+.  .  .  .  .  }
+.  .  .  .  }
+.  .  .  .  Rbrace: syntax.Pos {}
+.  .  .  }
+.  .  }
+.  .  ArgList: nil
+.  .  HasDots: false
+.  }
+}
+</pre></div>
+<p>The function called is represented by a <tt class="docutils literal">FuncLit</tt> node - a <em>function literal</em>.
+When this tree is converted into the AST, outlining the function literal into
+a standalone function is one of the outcomes. This is done in the
+<tt class="docutils literal">noder.funcLit</tt> method that lives in <tt class="docutils literal">gc/closure.go</tt>.</p>
+<p>The type checker completes the transformation and we get this AST node for the
+outlined function representing the closure:</p>
+<div class="highlight"><pre><span></span>main.func1:
+.   DCLFUNC l(14) tc(1) FUNC-func()
+.   DCLFUNC-body
+.   .   CALLFUNC l(15) tc(1)
+.   .   .   NAME-main.foobyval a(true) l(8) x(0) class(PFUNC) tc(1) used FUNC-func(int)
+.   .   CALLFUNC-list
+.   .   .   NAME-main.i l(15) x(0) class(PAUTOHEAP) tc(1) used int
+</pre></div>
+<p>Note that the value passed into <tt class="docutils literal">foobyval</tt> is <tt class="docutils literal"><span class="pre">NAME-main.i</span></tt>, directly
+referencing the variable from the function enclosing the closure.</p>
+<p>At this point comes the stage of the compiler most relevant to our exploration -
+<tt class="docutils literal">capturevars</tt>. Its goal is to decide how to capture closed variables (i.e.
+free variables used in closures). Here's a comment for the relevant function
+in the compiler, which also describes the heuristic:</p>
+<div class="highlight"><pre><span></span><span class="c1">// capturevars is called in a separate phase after all typechecking is done.</span><span class="w"></span>
+<span class="c1">// It decides whether each variable captured by a closure should be captured</span><span class="w"></span>
+<span class="c1">// by value or by reference.</span><span class="w"></span>
+<span class="c1">// We use value capturing for values &lt;= 128 bytes that are never reassigned</span><span class="w"></span>
+<span class="c1">// after capturing (effectively constant).</span><span class="w"></span>
+</pre></div>
+<p>When it runs on example 5, <tt class="docutils literal">capturevars</tt> marks the loop variable <tt class="docutils literal">i</tt> as
+captured by reference, and adds a <tt class="docutils literal">addrtaken</tt> flag to it. This is visible
+in the AST:</p>
+<div class="highlight"><pre><span></span>FOR l(13) tc(1)
+.   LT l(13) tc(1) bool
+.   .   NAME-main.i a(true) g(1) l(13) x(0) class(PAUTOHEAP) esc(h) tc(1) addrtaken assigned used int
+</pre></div>
+<p>For the loop variable, the heuristic for value capturing doesn't apply because
+the value is reassigned after the call (recall the quote from the spec which
+says that loop vars are re-used between iterations). Therefore, <tt class="docutils literal">i</tt> is
+captured by reference.</p>
+<p>In the variation where we have <tt class="docutils literal">ii := i</tt> before the <tt class="docutils literal">go</tt> statement, <tt class="docutils literal">ii</tt>
+is not reassigned after the goroutine is launched, so it's captured by value.</p>
+<p>Once you're aware of the problem, it shouldn't cause you much problems in
+realistic scenarios - just be wary of free variables captured by closures.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>Some readers noted that - strictly speaking - there is no concept of
+<em>pass by reference</em> in Go, as everything is passed by value, including
+possibly pointers. In this article when I say &quot;pass by reference&quot;, I mean
+&quot;pass by address&quot;, which in some cases is explicit (as in passing <tt class="docutils literal">&amp;n</tt>
+into a function expecting a <tt class="docutils literal">*int</tt>), and in other cases implicit - as
+the latter parts of the article demonstrate.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>Here and elsewhere in this post, I'm using <tt class="docutils literal">time.Sleep</tt> as a quick and
+hacky way to wait for all the spawned goroutines to finish. Without this,
+<tt class="docutils literal">main</tt> will return before the other goroutine start running. The
+correct way to wait for goroutines in real code would be something like a
+<tt class="docutils literal">WaitGroup</tt> or a <tt class="docutils literal">done</tt> channel.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>The disassembly for all the samples in this post is obtained by calling
+the Go compiler directly with <tt class="docutils literal">go tool compile <span class="pre">-l</span> <span class="pre">-S</span></tt>. The <tt class="docutils literal"><span class="pre">-l</span></tt> flag
+disables function inlining, which makes the resulting assembly more
+readable.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-4">[4]</a></td><td><tt class="docutils literal">foobyval</tt> is not called directly because it's invoked in a <tt class="docutils literal">go</tt>
+statement. Rather, we pass its address as the second argument (at
+<tt class="docutils literal">16(SP)</tt>) to <tt class="docutils literal">runtime.newproc</tt>, and the arguments to <tt class="docutils literal">foobyval</tt>
+(<tt class="docutils literal">i</tt> in this case) follow higher on the stack.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

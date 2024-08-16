@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>An observation on writing line-processing loop code - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="an-observation-on-writing-line-processing-loop-code.html"
+                       rel="bookmark"
+                       title="Permalink to An observation on writing line-processing loop code">
+                        An observation on writing line-processing loop code
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> October 28, 2011 at 15:13</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/programming.html">Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>While reading <a class="reference external" href="http://pythonconquerstheuniverse.wordpress.com/2011/07/22/read-ahead-and-python-generators/">this article</a>, I ran into a concept named <a class="reference external" href="http://en.wikipedia.org/wiki/Jackson_Structured_Programming">Jackson Structured Programming</a> (JSP). JSP is mainly a design technique (with its own diagram syntax and CASE tools), but one of its main insights is a very intuitive programming pattern. This is what I want to focus on in this post.</p>
+<p>Consider the following problem:</p>
+<blockquote>
+A file is a sorted list of lines. We want to produce a report from this file, displaying each kind of line only once, along with a count of how many times it appears in the file.</blockquote>
+<p>For example, take this file:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">aaaa
+bbbb
+bbbb
+bbbb
+cccc
+cccc
+dddd
+dddd
+dddd
+dddd
+eeee
+ffff
+ffff
+gggg
+</pre></div>
+<p>The report produced from it would be:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">aaaa: 1
+bbbb: 3
+cccc: 2
+dddd: 4
+eeee: 1
+ffff: 2
+gggg: 1
+</pre></div>
+<p>Michael A. Jackson, the original developer of the JSP technique, has an interesting paper on this subject called <a class="reference external" href="http://mcs.open.ac.uk/mj665/GetWrong.pdf">&quot;Getting It Wrong - A Cautionary Tale&quot;</a> (PDF link), in which he explains the common way to solve this problem and its pitfalls. The code samples are in COBOL, but other than that the article is quite accessible. I encourage you to read it, or at least think about how you would write the code to solve this task before reading on.</p>
+<p>There's no catch here. The problem is very simple - there's no magic algorithm that's needed to solve it. This post deals with the particular implementation technique at the lowest level.</p>
+<p>When one thinks about a solution, most likely the first line of thought is &quot;OK, so we go over the file line by line, and for each line...&quot;. That's correct, of course, but stated like this it hints at a code pattern. In Python, for example, such code is likely to be based on:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">for</span> line <span style="color: #0000aa">in</span> stream:
+  <span style="color: #007f00"># do something</span>
+</pre></div>
+<p>Here's the full implementation, translating the code sample in the Wikipedia page on JSP linked earlier into Python:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">process_normal</span>(stream):
+    <span style="color: #7f007f">&quot;&quot;&quot; Process the stream using &quot;normal&quot; looping techniques</span>
+<span style="color: #7f007f">    &quot;&quot;&quot;</span>
+    count = <span style="color: #007f7f">0</span>
+    first_line_of_group = <span style="color: #00007f">None</span>
+    <span style="color: #00007f; font-weight: bold">for</span> line <span style="color: #0000aa">in</span> stream:
+        <span style="color: #00007f; font-weight: bold">if</span> first_line_of_group <span style="color: #0000aa">and</span> first_line_of_group != line:
+            print_line_with_count(first_line_of_group, count)
+        <span style="color: #00007f; font-weight: bold">if</span> <span style="color: #0000aa">not</span> first_line_of_group <span style="color: #0000aa">or</span> first_line_of_group != line:
+            count = <span style="color: #007f7f">0</span>
+            first_line_of_group = line
+        count += <span style="color: #007f7f">1</span>
+    <span style="color: #00007f; font-weight: bold">if</span> first_line_of_group:
+        print_line_with_count(first_line_of_group, count)
+</pre></div>
+<p>This code is, as far as I can tell, correct. However, it looks a bit complex. It's not bad, and it's not hard to understand, but there's a better way.</p>
+<p>Here it is. All it does is restructure the code a bit, deviating from the &quot;normal&quot; looping pattern, instead reading one line in advance and then keeping an invariant that when the main loop cycles it already has the next line handy in <tt class="docutils literal">line</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">def</span> <span style="color: #00007f">process_jsp</span>(stream):
+    <span style="color: #7f007f">&quot;&quot;&quot; Process the stream using the JSP looping technique with read-ahead</span>
+<span style="color: #7f007f">    &quot;&quot;&quot;</span>
+    line = stream.readline()
+    <span style="color: #00007f; font-weight: bold">while</span> line:
+        count = <span style="color: #007f7f">0</span>
+        first_line_of_group = line
+        <span style="color: #00007f; font-weight: bold">while</span> line <span style="color: #0000aa">and</span> line == first_line_of_group:
+            count += <span style="color: #007f7f">1</span>
+            line = stream.readline()
+        print_line_with_count(first_line_of_group, count)
+</pre></div>
+<p>I don't know about you, but it just strikes me how much simpler this code is to comprehend. You can almost read the code aloud and just understand it. Simpler to comprehend, hence much less likely to contain bugs (which is the point Jackson is trying to make in his paper).</p>
+<p>At this point I could stop and say - &quot;oh, cool, a nice coding pattern that makes some problems more natural to express&quot;. But I'm not satisfied. I'm trying to understand what happened here. Why did such a seemingly simple code change make the algorithm much easier to express?</p>
+<p>Here's what I think. The &quot;normal&quot; approach just implements a state machine. &quot;For each line...&quot; we have a state. The loop body then just acts according to the state. Since the state is not entirely trivial, to handle it also requires more than a minimal amount of code.</p>
+<p>On the other hand, in the JSP approach, most of the state <strong>is implicitly encoded in the code itself</strong>. Let me repeat that in other words - the state is still there, but it's implicit. Splitting the line reading to two places and keeping the invariant on the main loop allows us to express the state in the flow itself, instead of with explicit conditions.</p>
+<p>And I have Déjà vu here, because I've already written about something like this - in the article <a class="reference external" href="../../../2009/08/29/co-routines-as-an-alternative-to-state-machines/index.html">&quot;Co-routines as an alternative to state machines&quot;</a>. That article explains how, by using co-routines, we can avoid an explicit state machine and thus considerably simplify the code. By writing the code in a certain way, the state becomes implicitly encoded in the control flow instead.</p>
+<p>To be frank I'm not yet 100% sure on the connection - after all, the code presented in <tt class="docutils literal">process_jsp</tt> is not really a co-routine. But I can't escape the hunch that these concepts are related. If you have any insights on this, please share them!</p>
+<p>Another familiarity I see here is with the method of coding recursive-descent parsers (I've written a few posts on RD parsers in the past, for example <a class="reference external" href="../../../2008/09/26/recursive-descent-ll-and-predictive-parsers/index.html">this one</a>). When implementing an RD parser, the code consists of a set of mutual-calling functions that represent grammar structures (for example &quot;Statement&quot;, &quot;Identifier&quot;, &quot;Binary operation&quot;, etc.) Each such function assumes the current token is available, <em>without it having to read it from the input</em>. When the parsing of a construct finishes, the next token is read - for the sake of the next parsing function, not this one. Trying to code a RD parser differently - having each parsing function getting its own token prior to looking at it - results in much more complicated code. I think this is somewhat similar to the pattern presented here.</p>
+<p>To conclude, &quot;a-ha!&quot; moments can often come from examining the simplest things. Personally I feel that understanding the coding pattern presented in this post helps me see things more clearly, and helps understand other concepts a bit better. I was aware for a long time that simply changing the order of operations in such algorithms (i.e. process first, then read next input) may make the code simpler, and also used the technique myself, but I feel that only now I also understand <em>why</em> this is so. I hope I have managed to get the point across :-)</p>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="an-observation-on-writing-line-processing-loop-code.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

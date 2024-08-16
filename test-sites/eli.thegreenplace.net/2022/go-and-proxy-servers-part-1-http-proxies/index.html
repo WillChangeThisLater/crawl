@@ -1,0 +1,728 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Go and Proxy Servers: Part 1 - HTTP Proxies - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Go and Proxy Servers: Part 1 - HTTP Proxies">
+                        Go and Proxy Servers: Part 1 - HTTP Proxies
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> October 24, 2022 at 20:56</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/network-programming.html">Network Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>Proxy servers are an interesting and important part of network programming. This
+post is the first in a series describing how to implement simple proxy servers
+in Go and how to work with existing proxy servers.</p>
+<p>Here is a list of posts in the series:</p>
+<ul class="simple">
+<li>Part 1 - HTTP Proxies (this part)</li>
+<li><a class="reference external" href="../go-and-proxy-servers-part-2-https-proxies/index.html">Part 2 - HTTPS Proxies</a></li>
+<li><a class="reference external" href="../go-and-proxy-servers-part-3-socks-proxies/index.html">Part 3 - SOCKS Proxies</a></li>
+</ul>
+<p>For simplicity, this post focuses on unencrypted HTTP traffic. More advanced
+proxying techniques with encryption will be covered in subsequent posts. The
+full code of all the samples presented here is available <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2022/go-and-proxies">on GitHub</a>.</p>
+<div class="section" id="forward-and-reverse-proxies">
+<h2>Forward and reverse proxies</h2>
+<p>Let's begin with the Wikipedia description for what a <em>proxy server</em> is:</p>
+<blockquote>
+In computer networking, a proxy server is a server application that acts as
+an intermediary between a client requesting a resource and the server
+providing that resource.</blockquote>
+<p>Proxies can be typically divided into two categories: forward proxies
+(or just &quot;proxies&quot;, but we'll use <em>forward</em> explicitly here to make things
+clearer) and reverse proxies. The difference between the two is quite subtle
+and worth spending a couple of minutes on.</p>
+<p>This diagram shows what a forward proxy server does:</p>
+<img alt="Diagram showing a forward proxy server between clients and servers" class="align-center" src="../../images/2022/forward-proxy-server.png" />
+<p>The &quot;Internet&quot; blob is an arbitrary collection of network switches, routers and
+other proxy servers. These days many HTTP requests go through several such
+&quot;relays&quot; the user is probably unaware of. What the diagram shows is that a
+forward proxy server typically sits between the user and the internet. These
+servers have many uses; for example:</p>
+<ul class="simple">
+<li>Enforcing browsing restrictions at the company/school or even national level</li>
+<li>Overcoming browsing restrictions by connecting to a proxy server instead of
+the target website directly</li>
+<li>Protecting the identity of users online by anonymizing traffic; instead
+of traffic coming from a specific user, it comes from a proxy that has many
+users connecting through it <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a></li>
+<li>Ancillary services like logging, caching, monitoring and debugging</li>
+</ul>
+<p>A reverse proxy, on the other hand, can be seen as interjecting between the
+internet and backend servers:</p>
+<img alt="Diagram showing a reverse proxy server between the internet and backend servers" class="align-center" src="../../images/2022/reverse-proxy-server.png" />
+<p>Reverse proxies are typically installed in front of servers by the implementers
+of a service, and are transparent to users. They can also play multiple roles:</p>
+<ul class="simple">
+<li>Load balancing for high-traffic servers. This can even be globally distributed,
+wherein a reverse proxy will automatically direct a user to the server that's
+closest to them geographically</li>
+<li>Protection from DDoS attacks</li>
+<li>TLS termination, wherein the reverse proxy is responsible for secure
+communication with clients, while internal backend servers don't require
+encryption (for performance and other reasons)</li>
+<li>Ancillary services like logging, caching, monitoring and debugging</li>
+</ul>
+<p>A prominent example of reverse proxies are <a class="reference external" href="https://en.wikipedia.org/wiki/Content_delivery_network">CDNs</a> like Cloudflare.
+If you connect to pretty much any large internet website/application these days,
+you're almost certainly going through one or more reverse proxy servers.</p>
+<p>A more technical way to see the difference between forward and reverse proxies
+is to consider it from a developer's point of view. When a client sends a
+request to a server, a <em>forward</em> proxy sits in front of the client. The client
+accesses many different servers through this proxy. On the other side, before
+a client's request makes to to a server, a <em>reverse</em> proxy intercepts it on
+the server side and may redirect or modify it in some way. A reverse proxy
+typically answers queries at a single address, but will get contacted by
+multiple clients.</p>
+</div>
+<div class="section" id="using-an-off-the-shelf-reverse-proxy">
+<h2>Using an off-the-shelf reverse proxy</h2>
+<p>Enough theory, let's do some experiments. We'll start by discussing reverse
+proxies, because I feel these are generally more common and useful for
+developers to understand.</p>
+<p>Throughout this post, we'll be using this simple HTTP server as a backend to try
+different setups:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">addr</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;addr&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;127.0.0.1:8080&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;listen address&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Parse</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">http</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/&quot;</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="kd">func</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="kd">var</span><span class="w"> </span><span class="nx">b</span><span class="w"> </span><span class="nx">strings</span><span class="p">.</span><span class="nx">Builder</span><span class="w"></span>
+
+<span class="w">      </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">b</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;%v\t%v\t%v\tHost: %v\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">RemoteAddr</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">Method</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">Host</span><span class="p">)</span><span class="w"></span>
+<span class="w">      </span><span class="k">for</span><span class="w"> </span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">headers</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">Header</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">h</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">headers</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">          </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">b</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;%v: %v\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">name</span><span class="p">,</span><span class="w"> </span><span class="nx">h</span><span class="p">)</span><span class="w"></span>
+<span class="w">        </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="p">}</span><span class="w"></span>
+<span class="w">      </span><span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nx">b</span><span class="p">.</span><span class="nx">String</span><span class="p">())</span><span class="w"></span>
+
+<span class="w">      </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Fprintf</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;hello %s\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">})</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;Starting server on&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">addr</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ListenAndServe</span><span class="p">(</span><span class="o">*</span><span class="nx">addr</span><span class="p">,</span><span class="w"> </span><span class="kc">nil</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;ListenAndServe:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It answers every HTTP route with a successful &quot;hello &lt;route&gt;&quot; response and
+dumps information about the HTTP request it receives to the log. For example, if
+we run it with the default port, and then try to access a route with <tt class="docutils literal">curl</tt>:</p>
+<div class="highlight"><pre><span></span>$ curl localhost:8080/foo/bar/50
+hello /foo/bar/50
+</pre></div>
+<p>The server prints something like this:</p>
+<div class="highlight"><pre><span></span>2022/10/19 05:34:41 Starting server on 127.0.0.1:8080
+2022/10/19 05:35:07 127.0.0.1:35106   GET     /foo/bar/50     Host: localhost:8080
+User-Agent: curl/7.81.0
+Accept: */*
+</pre></div>
+<p>We're now ready for a more advanced setup. Let's install <a class="reference external" href="https://caddyserver.com/">Caddy</a> and use it <a class="reference external" href="https://caddyserver.com/docs/quick-starts/reverse-proxy">as a reverse proxy</a>. Since we know our
+backend listens on port 8080, we'll run Caddy like this:</p>
+<div class="highlight"><pre><span></span>caddy reverse-proxy --from :9090 --to :8080
+</pre></div>
+<p>It will listen to port 9090 and forward everything it gets to 8080. We can
+<tt class="docutils literal">curl</tt> to port 9090:</p>
+<div class="highlight"><pre><span></span>$ curl localhost:9090/hi/there
+hello /hi/there
+</pre></div>
+<p>And we get a response from our server; in the server's terminal, we'll see more
+logging emitted for this new request. This is as simple as it gets. It may not
+seem useful on its own, but this setup can be easily extended to be much more
+advanced; for example:</p>
+<ul class="simple">
+<li>Caddy will automatically proxy HTTPS from the client to the backend server
+as HTTP. This is called &quot;TLS termination&quot;, and it means that our backend
+doesn't have to deal with TLS and certificates.</li>
+<li>Caddy can be configured to serve as a load balancer in reverse-proxy mode,
+with different balancing strategies, health checks to the backend and so on.</li>
+</ul>
+</div>
+<div class="section" id="setting-up-our-own-reverse-proxy-in-go">
+<h2>Setting up our own reverse proxy in Go</h2>
+<p>It's useful to see a commercial-grade tool in action, but it will be more
+educational to roll our own. The Go standard library makes it pretty easy with
+the <tt class="docutils literal">net/http/httputil</tt> package which provides a <tt class="docutils literal">ReverseProxy</tt> type and
+a simple constructor named <tt class="docutils literal">NewSingleHostReverseProxy</tt> to implement the kind
+of forwarding shown in the previous section. To create a simple reverse proxy
+that forwards from one address to another, all we need to write is:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fromAddr</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;from&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;127.0.0.1:9090&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;proxy&#39;s listening address&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">toAddr</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;to&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;127.0.0.1:8080&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;the address this proxy will forward to&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Parse</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">toUrl</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">parseToUrl</span><span class="p">(</span><span class="o">*</span><span class="nx">toAddr</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">proxy</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">httputil</span><span class="p">.</span><span class="nx">NewSingleHostReverseProxy</span><span class="p">(</span><span class="nx">toUrl</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;Starting proxy server on&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">fromAddr</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ListenAndServe</span><span class="p">(</span><span class="o">*</span><span class="nx">fromAddr</span><span class="p">,</span><span class="w"> </span><span class="nx">proxy</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;ListenAndServe:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="c1">// parseToUrl parses a &quot;to&quot; address to url.URL value</span><span class="w"></span>
+<span class="kd">func</span><span class="w"> </span><span class="nx">parseToUrl</span><span class="p">(</span><span class="nx">addr</span><span class="w"> </span><span class="kt">string</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="nx">url</span><span class="p">.</span><span class="nx">URL</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">!</span><span class="nx">strings</span><span class="p">.</span><span class="nx">HasPrefix</span><span class="p">(</span><span class="nx">addr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;http&quot;</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">addr</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s">&quot;http://&quot;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">addr</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">toUrl</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">url</span><span class="p">.</span><span class="nx">Parse</span><span class="p">(</span><span class="nx">addr</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">toUrl</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>If we run this proxy in a terminal, listening on its default port of 9090:</p>
+<div class="highlight"><pre><span></span>$ go run basic-reverse-proxy.go
+2022/10/20 22:13:00 Starting proxy server on 127.0.0.1:9090
+</pre></div>
+<p>And with our debugging server still listening on 8080, <tt class="docutils literal">curl</tt> requests will
+be redirected by the proxy to the server.</p>
+<p>The <tt class="docutils literal">ReverseProxy</tt> type is fairly versatile and can be extensively configured
+with several user-defined functions. <tt class="docutils literal">NewSingleHostReverseProxy</tt> itself is
+implemented as a custom <tt class="docutils literal">Director</tt> field on this type. We can go one step
+further and implement a very simplistic &quot;load-balancing&quot; reverse proxy that
+round-robins between two backend servers. Here's the interesting code snippet
+(the full code is <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2022/go-and-proxies/reverse-proxy-loadbalance.go">here</a>):</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fromAddr</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;from&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;127.0.0.1:9090&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;proxy&#39;s listening address&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">toAddr1</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;to1&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;127.0.0.1:8080&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;the first address this proxy will forward to&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">toAddr2</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;to2&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;127.0.0.1:8081&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;the second address this proxy will forward to&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Parse</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">toUrl1</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">parseToUrl</span><span class="p">(</span><span class="o">*</span><span class="nx">toAddr1</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">toUrl2</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">parseToUrl</span><span class="p">(</span><span class="o">*</span><span class="nx">toAddr2</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">proxy</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">loadBalancingReverseProxy</span><span class="p">(</span><span class="nx">toUrl1</span><span class="p">,</span><span class="w"> </span><span class="nx">toUrl2</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;Starting proxy server on&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">fromAddr</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ListenAndServe</span><span class="p">(</span><span class="o">*</span><span class="nx">fromAddr</span><span class="p">,</span><span class="w"> </span><span class="nx">proxy</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;ListenAndServe:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">loadBalancingReverseProxy</span><span class="p">(</span><span class="nx">target1</span><span class="p">,</span><span class="w"> </span><span class="nx">target2</span><span class="w"> </span><span class="o">*</span><span class="nx">url</span><span class="p">.</span><span class="nx">URL</span><span class="p">)</span><span class="w"> </span><span class="o">*</span><span class="nx">httputil</span><span class="p">.</span><span class="nx">ReverseProxy</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">targetNum</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">director</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="kd">func</span><span class="p">(</span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">target</span><span class="w"> </span><span class="o">*</span><span class="nx">url</span><span class="p">.</span><span class="nx">URL</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Simple round robin between the two targets</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">targetNum</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">target</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">target1</span><span class="w"></span>
+<span class="w">      </span><span class="nx">targetNum</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">2</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">target</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">target2</span><span class="w"></span>
+<span class="w">      </span><span class="nx">targetNum</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="mi">1</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Scheme</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">target</span><span class="p">.</span><span class="nx">Scheme</span><span class="w"></span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Host</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">target</span><span class="p">.</span><span class="nx">Host</span><span class="w"></span>
+<span class="w">    </span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Path</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">RawPath</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">joinURLPath</span><span class="p">(</span><span class="nx">target</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// For simplicity, we don&#39;t handle RawQuery or the User-Agent header here:</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// see the full code of NewSingleHostReverseProxy for an example of doing</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// that.</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">httputil</span><span class="p">.</span><span class="nx">ReverseProxy</span><span class="p">{</span><span class="nx">Director</span><span class="p">:</span><span class="w"> </span><span class="nx">director</span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This proxy expects two backend servers to be provided with
+the <tt class="docutils literal"><span class="pre">--to1</span></tt> and <tt class="docutils literal"><span class="pre">--to2</span></tt> flags. It then uses a custom <tt class="docutils literal">Director</tt> to
+redirect HTTP requests to these two addresses in a simple round-robin fashion.</p>
+<p>If we run two debugging servers on ports 8080 and 8081, and this proxy on its
+default port 9090, then <tt class="docutils literal">curl</tt> requests to port 9090 will reach the debugging
+servers in turns. Try it out!</p>
+<p>As an exercise, extend this reverse proxy to include all the functionality from
+<tt class="docutils literal">NewSingleHostReverseProxy</tt> (we skipped some fields for brevity), and implement
+a more sophisticated load-balancing policy with an arbitrary number of
+backends. For inspiration, see the documentation of
+<a class="reference external" href="https://caddyserver.com/docs/caddyfile/directives/reverse_proxy">Caddy's reverse_proxy configuration</a>.</p>
+</div>
+<div class="section" id="a-simple-forward-proxy">
+<h2>A simple forward proxy</h2>
+<p>Now that we've seen a few examples of setting up reverse proxies, let's turn
+our attention to <em>forward</em> proxies. In many ways, the two are similar - both
+are servers that take requests from clients and forward them to other servers.
+But there are a few interesting differences to point out; also, it's a good
+opportunity to demonstrate some subtleties proxy servers have to handle by
+implementing them ourselves instead of relying on an existing type.</p>
+<p>First, we'll need a quick detour to discuss HTTP. HTTP is a
+textual protocol on top of TCP. When a client connects to a server, it sends a
+request with some optional headers and body (which can be arbitrary bytes). The
+server responds with text of its own - a code (200 for success, 404 for &quot;not
+found&quot; etc.), response headers and body.</p>
+<p>When we run <tt class="docutils literal">curl <span class="pre">http://example.org/some/path</span></tt>, what <tt class="docutils literal">curl</tt> does is:</p>
+<ol class="arabic simple">
+<li>Resolve the <tt class="docutils literal">example.org</tt> domain to an IP address <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a></li>
+<li>Create a TCP connection to this address at port 80 (the default port for
+HTTP)</li>
+<li>Send an HTTP <tt class="docutils literal">GET</tt> request</li>
+</ol>
+<p>The request <tt class="docutils literal">curl</tt> sends looks something like:</p>
+<div class="highlight"><pre><span></span>GET /some/path HTTP/1.1
+Host: example.org
+User-Agent: curl/7.81.0
+Accept: */*
+</pre></div>
+<p>Since it knows what server it connected to, and the server knows who it is, the
+path given to the <tt class="docutils literal">GET</tt> request is relative (ignore the <tt class="docutils literal">Host:</tt> header for a
+bit, we'll discuss it later).
+However, when a client connects through a forward proxy, things are not as
+straightforward. If a proxy receives a relative path, it doesn't know where
+to forward the request! Therefore, for proxies the HTTP/1.1 standard requires
+clients to use an <em>absolute</em> URL.</p>
+<p>Say we set up a local proxy to run on port 9999 (details on how to do that will
+follow shortly), and direct <tt class="docutils literal">curl</tt> to use it by setting the <tt class="docutils literal">http_proxy</tt>
+environment variable:</p>
+<div class="highlight"><pre><span></span>$ http_proxy=http://localhost:9999 curl http://example.org/foo/bar
+</pre></div>
+<p>Now the request <tt class="docutils literal">curl</tt> sends looks like this:</p>
+<div class="highlight"><pre><span></span>GET http://example.org/foo/bar HTTP/1.1
+Host: example.org
+User-Agent: curl/7.81.0
+Accept: */*
+Proxy-Connection: Keep-Alive
+</pre></div>
+<p>Note the absolute path provided in the <tt class="docutils literal">GET</tt> request. This tells the proxy
+where to forward the request.</p>
+<p>With that in mind, let's code a simple forward proxy in Go (full code <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2022/go-and-proxies/basic-forward-proxy.go">here</a>).
+The main part of the code is <tt class="docutils literal">proxyHandler</tt>, which is a type implementing the
+<tt class="docutils literal">http.Handler</tt> interface:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">forwardProxy</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">p</span><span class="w"> </span><span class="o">*</span><span class="nx">forwardProxy</span><span class="p">)</span><span class="w"> </span><span class="nx">ServeHTTP</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// The &quot;Host:&quot; header is promoted to Request.Host and is removed from</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// request.Header by net/http, so we print it out explicitly.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">RemoteAddr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;\t\t&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">Method</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;\t\t&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;\t\t Host:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">Host</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;\t\t\t\t\t&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">Header</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Scheme</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="s">&quot;http&quot;</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Scheme</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="s">&quot;https&quot;</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">msg</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="s">&quot;unsupported protocal scheme &quot;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Scheme</span><span class="w"></span>
+<span class="w">    </span><span class="nx">http</span><span class="p">.</span><span class="nx">Error</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nx">msg</span><span class="p">,</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">StatusBadRequest</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nx">msg</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">client</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">http</span><span class="p">.</span><span class="nx">Client</span><span class="p">{}</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// When a http.Request is sent through an http.Client, RequestURI should not</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// be set (see documentation of this field).</span><span class="w"></span>
+<span class="w">  </span><span class="nx">req</span><span class="p">.</span><span class="nx">RequestURI</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">removeHopHeaders</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">Header</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">removeConnectionHeaders</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">Header</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">clientIP</span><span class="p">,</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">net</span><span class="p">.</span><span class="nx">SplitHostPort</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">RemoteAddr</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">appendHostToXForwardHeader</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">Header</span><span class="p">,</span><span class="w"> </span><span class="nx">clientIP</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">resp</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">Do</span><span class="p">(</span><span class="nx">req</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">http</span><span class="p">.</span><span class="nx">Error</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;Server Error&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">StatusInternalServerError</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;ServeHTTP:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">resp</span><span class="p">.</span><span class="nx">Body</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nx">req</span><span class="p">.</span><span class="nx">RemoteAddr</span><span class="p">,</span><span class="w"> </span><span class="s">&quot; &quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">resp</span><span class="p">.</span><span class="nx">Status</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">removeHopHeaders</span><span class="p">(</span><span class="nx">resp</span><span class="p">.</span><span class="nx">Header</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">removeConnectionHeaders</span><span class="p">(</span><span class="nx">resp</span><span class="p">.</span><span class="nx">Header</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">copyHeader</span><span class="p">(</span><span class="nx">w</span><span class="p">.</span><span class="nx">Header</span><span class="p">(),</span><span class="w"> </span><span class="nx">resp</span><span class="p">.</span><span class="nx">Header</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">w</span><span class="p">.</span><span class="nx">WriteHeader</span><span class="p">(</span><span class="nx">resp</span><span class="p">.</span><span class="nx">StatusCode</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">io</span><span class="p">.</span><span class="nx">Copy</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nx">resp</span><span class="p">.</span><span class="nx">Body</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">addr</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;addr&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;127.0.0.1:9999&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;proxy address&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Parse</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">proxy</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">forwardProxy</span><span class="p">{}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;Starting proxy server on&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">addr</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ListenAndServe</span><span class="p">(</span><span class="o">*</span><span class="nx">addr</span><span class="p">,</span><span class="w"> </span><span class="nx">proxy</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;ListenAndServe:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Here's a walkthrough of what <tt class="docutils literal">ServeHTTP</tt> does:</p>
+<ol class="arabic simple">
+<li>Print out the request for debugging</li>
+<li>Massage the request headers in accordance with proxy behavior (more on this
+later)</li>
+<li>Create a <tt class="docutils literal">http.Client</tt> and use it to execute the request. The
+<tt class="docutils literal">Request.URL</tt> field is already populated to exactly what we need!</li>
+<li>Massage the response headers in accordance with proxy behavior</li>
+<li>Copy the headers and the response body from the client created in step (3)
+to the proxy response</li>
+</ol>
+<p>For the additional functions used here, look in the full code. The most
+important work they do is remove some special headers if they exist. With
+modern HTTP routes that include multiple proxies, some headers are meant to go
+end-to-end, but others are only meant to go between a single set of TCP peers.
+These latter headers are called &quot;hop by hop&quot; headers, and the proxy is not
+supposed to forward them.</p>
+<p>Additionally, this proxy properly updates the <tt class="docutils literal"><span class="pre">X-forwarded-for</span></tt> header (see
+<a class="reference external" href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/X-Forwarded-For">this MDN page</a>
+for details).</p>
+<p>Let's see this proxy in action. We'll start it in a new
+terminal, to listen on its default port (9999):</p>
+<div class="highlight"><pre><span></span>$ go run basic-forward-proxy.go
+2022/10/21 19:28:02 Starting proxy server on 127.0.0.1:9999
+</pre></div>
+<p>And now we can run our <tt class="docutils literal">curl</tt> in a separate terminal:</p>
+<div class="highlight"><pre><span></span>$ http_proxy=http://localhost:9999 curl http://example.org
+&lt;!doctype html&gt;
+&lt;html&gt;
+...
+... // the rest of the document
+</pre></div>
+<p>Looking at our proxy's terminal, it will print some logs similar to:</p>
+<div class="highlight"><pre><span></span>2022/10/21 19:29:52 127.0.0.1:40964 GET      http://example.org/      Host: example.org
+2022/10/21 19:29:52                 map[Accept:[*/*] Proxy-Connection:[Keep-Alive] User-Agent:[curl/7.81.0]]
+2022/10/21 19:29:52 127.0.0.1:40964 200 OK
+</pre></div>
+<p>Naturally, the proxy presented here is simplistic and should not be used in
+production. Production proxies have much better support for all the nuanced
+behaviors expected from proxy servers; most importantly, they have mitigations
+for various security risks and attacks. But the basics are here! This proxy
+simply forwards requests to the target server so it's not very useful on its own
+(beyond logging all activity, which also has some uses), but it should be easy
+to extend with features like blocking certain domains, etc.</p>
+</div>
+<div class="section" id="issuing-http-requests-in-go-through-a-proxy">
+<h2>Issuing HTTP requests in Go through a proxy</h2>
+<p>So far we've been talking about proxy servers and the backend servers they
+route requests to. In this section, let's look at the other side - how HTTP
+clients written in Go interact with proxies.</p>
+<p>Here's a simple HTTP client written in Go - it issues an HTTP <tt class="docutils literal">GET</tt> request
+to the URL of our choice and dumps the response status code and body to stdout:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">target</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;target&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;http://example.org&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;URL to get&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Parse</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">resp</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">Get</span><span class="p">(</span><span class="o">*</span><span class="nx">target</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">resp</span><span class="p">.</span><span class="nx">Body</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;Response status:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">resp</span><span class="p">.</span><span class="nx">Status</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">body</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">ioutil</span><span class="p">.</span><span class="nx">ReadAll</span><span class="p">(</span><span class="nx">resp</span><span class="p">.</span><span class="nx">Body</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nb">string</span><span class="p">(</span><span class="nx">body</span><span class="p">))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Here's a simple invocation:</p>
+<div class="highlight"><pre><span></span>$ go run http-get-basic.go --target http://example.org
+Response status: 200 OK
+&lt;!doctype html&gt;
+&lt;html&gt;
+...
+... // the rest of the document
+</pre></div>
+<p>If you recall, to instruct <tt class="docutils literal">curl</tt> to use a proxy all we had to do was set an
+environment variable named <tt class="docutils literal">http_proxy</tt>. The same approach works for Go! If
+we run our forward proxy from the previous section on its default port (9999),
+we can invoke our client as follows:</p>
+<div class="highlight"><pre><span></span>$ http_proxy=localhost:9999 go run http-get-basic.go --target http://example.org
+Response status: 200 OK
+&lt;!doctype html&gt;
+&lt;html&gt;
+...
+... // the rest of the document
+</pre></div>
+<p>And we'll see the proxy print out something like this to its log:</p>
+<div class="highlight"><pre><span></span>2022/10/22 06:47:45 GET http://example.org/ HTTP/1.1
+Accept-Encoding: gzip
+User-Agent: Go-http-client/1.1
+</pre></div>
+<p>So Go's HTTP machinery supports proxy-related environment variables out of
+the box. It also supports <tt class="docutils literal">https_proxy</tt> for proxying HTTPS (more on this in
+a future part of this series), and the uppercase versions of both variables -
+<tt class="docutils literal">HTTP_PROXY</tt> and <tt class="docutils literal">HTTPS_PROXY</tt>. In addition, it supports <tt class="docutils literal">no_proxy</tt> (and
+<tt class="docutils literal">NO_PROXY</tt>) for listing domains that should never go through a proxy. While
+these variables are not in formal industry standards, they've very widely
+supported by tools <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>. If you're interested in the details, the Go standard
+library package dealing with these environment variables for Go is
+<a class="reference external" href="https://pkg.go.dev/golang.org/x/net&#64;v0.1.0/http/httpproxy">x/net/http/httpproxy</a>.</p>
+<p>When pointing Go HTTP clients at proxies, there's one important gotcha to be
+aware of. If you're developing your backend servers locally, you'll probably
+run into it. Go HTTP clients will not proxy <tt class="docutils literal">localhost</tt> addresses (or their
+synonyms) by default, even if <tt class="docutils literal">http_proxy</tt> is set.</p>
+<p>If we run our debugging server on port 8080 and try to access it with the
+client through our proxy:</p>
+<div class="highlight"><pre><span></span>$ http_proxy=localhost:9999 go run http-get-basic.go --target http://localhost:8080/foo/bar
+</pre></div>
+<p>We'll see the server's response, but it comes directly from the server, not the
+proxy (you can verify this by looking at the proxy's logs). While this is
+inconvenient <a class="footnote-reference" href="index.html#footnote-4" id="footnote-reference-4">[4]</a>, there are easy workarounds.</p>
+<p>Workaround 1 doesn't require us to touch any code, but does require mucking with
+the machine's network configuration. On Linux it's as simple as adding an alias
+in <tt class="docutils literal">/etc/hosts</tt>:</p>
+<div class="highlight"><pre><span></span>127.0.0.1 local.alias
+</pre></div>
+<p>And now a request like this <em>does</em> go through the proxy:</p>
+<div class="highlight"><pre><span></span>$ http_proxy=localhost:9999 go run http-get-basic.go --target http://local.alias:8080/foo/bar
+</pre></div>
+<p>Workaround 2 leaves the machine configuration alone, but requires us to change
+how our HTTP client is initialized in Go. Go's <tt class="docutils literal">http.Client</tt> can be configured
+with a <a class="reference external" href="https://pkg.go.dev/net/http#Transport">http.Transport</a> , which by default
+uses <a class="reference external" href="https://pkg.go.dev/net/http#ProxyFromEnvironment">ProxyFromEnvironment</a> for
+its proxy configuration. This is the function that handles variables like <tt class="docutils literal">http_proxy</tt> and
+has the aforementioned special case. To avoid triggering this case, we'll use a custom proxy
+configuration in the transport as follows:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">target</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;target&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;http://example.org&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;URL to get&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">proxy</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;proxy&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;http://localhost:9999&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;proxy to use&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Parse</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">proxyUrl</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">url</span><span class="p">.</span><span class="nx">Parse</span><span class="p">(</span><span class="o">*</span><span class="nx">proxy</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">client</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">http</span><span class="p">.</span><span class="nx">Client</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Transport</span><span class="p">:</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">http</span><span class="p">.</span><span class="nx">Transport</span><span class="p">{</span><span class="nx">Proxy</span><span class="p">:</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ProxyURL</span><span class="p">(</span><span class="nx">proxyUrl</span><span class="p">)},</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">r</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">client</span><span class="p">.</span><span class="nx">Get</span><span class="p">(</span><span class="o">*</span><span class="nx">target</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">Body</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">body</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">ioutil</span><span class="p">.</span><span class="nx">ReadAll</span><span class="p">(</span><span class="nx">r</span><span class="p">.</span><span class="nx">Body</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fmt</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nb">string</span><span class="p">(</span><span class="nx">body</span><span class="p">))</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>With our proxy set up on port 9999 and the debugging server on port 8080, this
+new client accesses the server through the proxy successfully (see the proxy
+logs to be sure):</p>
+<div class="highlight"><pre><span></span>$ go run http-get-explicit-proxy.go --target http://localhost:8080/foo/bar
+hello /foo/bar
+</pre></div>
+</div>
+<div class="section" id="appendix-a-host-headers">
+<h2>Appendix A: Host headers</h2>
+<p>Sharp-eyed readers may have noticed some mentions of <tt class="docutils literal">Host:</tt> headers in this
+post, specifically in debugging printouts from our proxy server and also from
+the requests sent by <tt class="docutils literal">curl</tt>. Host headers arose as a way to enable &quot;virtual
+hosting&quot;, where multiple domain names resolve to the same IP address. When the
+web server listening on that address receives a request, the request will have
+a relative URL <a class="footnote-reference" href="index.html#footnote-5" id="footnote-reference-5">[5]</a> - but what domain is it aimed for? This is what the Host
+header on the request specifies.</p>
+<p>These days the Host header is ubiquitous; <a class="reference external" href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Host">MDN says</a>:</p>
+<blockquote>
+A Host header field must be sent in all HTTP/1.1 request messages. A 400 (Bad
+Request) status code may be sent to any HTTP/1.1 request message that lacks or
+contains more than one Host header field.</blockquote>
+<p>Go's <tt class="docutils literal">http</tt> package also has some special handling for the Host header. For
+example, an HTTP server will promote this header to the <tt class="docutils literal">http.Request.Host</tt>
+field automatically; it also removes it from the <tt class="docutils literal">http.Request.Header</tt> map.
+Go clients will set this header automatically in requests, taken from the URL
+passed to the request.</p>
+</div>
+<div class="section" id="appendix-b-using-a-reverse-proxy-to-implement-a-forward-proxy">
+<h2>Appendix B: using a reverse proxy to implement a forward proxy</h2>
+<p>If the distinction between forward and reverse proxies still seems subtle, don't
+worry! It really is. At the end of the day, all proxies take requests and
+forward them to another server.</p>
+<p>As another piece of evidence, consider this snippet which uses Go's builtin
+<tt class="docutils literal">httputil.ReverseProxy</tt> to implement a forward proxy:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">proxyHandler</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">r</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">target</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">url</span><span class="p">.</span><span class="nx">Parse</span><span class="p">(</span><span class="nx">r</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Scheme</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="s">&quot;://&quot;</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nx">r</span><span class="p">.</span><span class="nx">URL</span><span class="p">.</span><span class="nx">Host</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">reqb</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">httputil</span><span class="p">.</span><span class="nx">DumpRequest</span><span class="p">(</span><span class="nx">r</span><span class="p">,</span><span class="w"> </span><span class="kc">true</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="nb">string</span><span class="p">(</span><span class="nx">reqb</span><span class="p">))</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">p</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">httputil</span><span class="p">.</span><span class="nx">NewSingleHostReverseProxy</span><span class="p">(</span><span class="nx">target</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">p</span><span class="p">.</span><span class="nx">ServeHTTP</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nx">r</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">addr</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;addr&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;127.0.0.1:9999&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;proxy address&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Parse</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">http</span><span class="p">.</span><span class="nx">HandleFunc</span><span class="p">(</span><span class="s">&quot;/&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">proxyHandler</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;Starting proxy server on&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">addr</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ListenAndServe</span><span class="p">(</span><span class="o">*</span><span class="nx">addr</span><span class="p">,</span><span class="w"> </span><span class="kc">nil</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;ListenAndServe:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It extracts the target URL from the absolute path provided with the request
+and then uses <tt class="docutils literal">NewSingleHostReverseProxy</tt> to reverse-proxy the request to
+that address.</p>
+<p>I won't dwell on this example too much because this is an appendix, but you
+should now have all the information required to dissect it and understand
+exactly how it works.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>Though this can be problematic if you need strong security, since
+HTTP proxies are typically unencrypted. Using VPNs or specialized networks
+like Tor may be a better option.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>We can do this step on its own by using the <tt class="docutils literal">dig</tt> tool, e.g.
+<tt class="docutils literal">dig example.org</tt>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>Their origin is all the way back from CERN <tt class="docutils literal">libwww</tt> in 1994.
+See <a class="reference external" href="https://about.gitlab.com/blog/2021/01/27/we-need-to-talk-no-proxy/">this blog post</a> for
+more details.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-4">[4]</a></td><td>Though it likely makes sense for security. Firefox also refuses to route
+localhost traffic through a proxy unless a special configuration variable
+named <tt class="docutils literal">network.proxy.allow_hijacking_localhost</tt> is set to true.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-5" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-5">[5]</a></td><td>You may wonder why we can't just always send the absolute URL, like
+what's done for proxies. Don't forget that HTTP evolved over time while
+trying to not break existing servers. Many old servers would expect to
+see relative paths and would break if requests with absolute paths arrived,
+so a different way had to be devised.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

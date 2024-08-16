@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Go and Proxy Servers: Part 2 - HTTPS Proxies - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Go and Proxy Servers: Part 2 - HTTPS Proxies">
+                        Go and Proxy Servers: Part 2 - HTTPS Proxies
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> November 09, 2022 at 19:31</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/network-programming.html">Network Programming</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This is the second post in a series about proxy servers and Go. Here is a list
+of posts in the series:</p>
+<ul class="simple">
+<li><a class="reference external" href="../go-and-proxy-servers-part-1-http-proxies/index.html">Part 1 - HTTP Proxies</a></li>
+<li>Part 2 - HTTPS Proxies (this part)</li>
+<li><a class="reference external" href="../go-and-proxy-servers-part-3-socks-proxies/index.html">Part 3 - SOCKS Proxies</a></li>
+</ul>
+<p>The previous part is an overview of proxy servers and presents some basic Go
+implementations, as well as discussing how to configure Go clients to use
+proxies. While it serves as important background information, it has one
+glaring omission: these days most web traffic is over HTTPS, not HTTP.</p>
+<p>This post will cover proxying HTTPS. It assumes you know what HTTPS and TLS are
+(if not, check out this earlier <a class="reference external" href="../../2021/go-https-servers-with-tls/index.html">post on HTTP servers in Go</a>).</p>
+<div class="section" id="what-is-different">
+<h2>What is different?</h2>
+<p>Why won't HTTP proxies &quot;just work&quot; for HTTPS? The reason is that an HTTPS client
+expects to talk to a specific server, and will look for a valid certificate from
+that server to start sending information.</p>
+<p>Say we want to access <a class="reference external" href="https://example.org">https://example.org</a>; when our client initiates an HTTPS
+session to this domain, it expects a valid signed certificate for
+<a class="reference external" href="https://example.org">https://example.org</a>.
+A proxy server unaffiliated with this domain will find it difficult to provide
+such a certificate.</p>
+<p>Proxies work for HTTPS (HTTP over TLS) by doing one of the following (or a
+variation):</p>
+<p><strong>First</strong>, the proxy can &quot;terminate&quot; the TLS connection <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>; the proxy here
+<em>is</em> the server. It's deployed by the developers of the domain we're accessing,
+and thus has the right certificates. This is commonly done for
+reverse proxies. For our <a class="reference external" href="https://example.org">https://example.org</a> example - the proxy would have a
+valid certificate for this domain and would be able to talk to clients. What the
+proxy does on the other side is up to it - it could be using unencrypted HTTP
+with backend servers, or use HTTPS with some internal certificates the external
+world doesn't need to know about.</p>
+<p>Here's a Wikipedia diagram of this setup:</p>
+<img alt="Diagram showing a TLS termination proxy, taken from Wikipedia" class="align-center" src="../../images/2022/tls-termination-proxy.png" style="width: 500px;" />
+<p><strong>Second</strong>, the proxy can tunnel the TLS connection to the target server. In
+this scenario the proxy acts as a blind pipe for traffic.</p>
+<p><strong>Third</strong>, the proxy can tunnel the TLS connection to the target while also
+reading (and potentially modifying) its contents. It's still a tunnel, but not
+a blind one. If you wonder how this is even possible, read on.</p>
+</div>
+<div class="section" id="tls-terminating-reverse-proxy">
+<h2>TLS-terminating reverse proxy</h2>
+<p>Let's start with the simplest case - a TLS-terminating reverse proxy. This is
+very similar to the basic HTTP reverse proxy example from the
+<a class="reference external" href="../go-and-proxy-servers-part-1-http-proxies/index.html">previous post</a>,
+but it listens to HTTPS traffic on its incoming port. This server will need a
+certificate for localhost that the client trusts; I recommend <a class="reference external" href="https://github.com/FiloSottile/mkcert">mkcert</a>, or see <a class="reference external" href="../../2021/go-https-servers-with-tls/index.html">this post</a> for more
+details. Here's the code (full code sample <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2022/go-and-proxies/https-reverse-proxy.go">on GitHub</a>):</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">fromAddr</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;from&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;127.0.0.1:9090&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;proxy&#39;s listening address&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">toAddr</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;to&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;127.0.0.1:8080&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;the address this proxy will forward to&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">certFile</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;certfile&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;cert.pem&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;certificate PEM file&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">keyFile</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;keyfile&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;key.pem&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;key PEM file&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Parse</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">toUrl</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">parseToUrl</span><span class="p">(</span><span class="o">*</span><span class="nx">toAddr</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">proxy</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">httputil</span><span class="p">.</span><span class="nx">NewSingleHostReverseProxy</span><span class="p">(</span><span class="nx">toUrl</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">srv</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">http</span><span class="p">.</span><span class="nx">Server</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Addr</span><span class="p">:</span><span class="w">    </span><span class="o">*</span><span class="nx">fromAddr</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Handler</span><span class="p">:</span><span class="w"> </span><span class="nx">proxy</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">TLSConfig</span><span class="p">:</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">tls</span><span class="p">.</span><span class="nx">Config</span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">MinVersion</span><span class="p">:</span><span class="w">               </span><span class="nx">tls</span><span class="p">.</span><span class="nx">VersionTLS13</span><span class="p">,</span><span class="w"></span>
+<span class="w">      </span><span class="nx">PreferServerCipherSuites</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="p">},</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;Starting proxy server on&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">fromAddr</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">srv</span><span class="p">.</span><span class="nx">ListenAndServeTLS</span><span class="p">(</span><span class="o">*</span><span class="nx">certFile</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">keyFile</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;ListenAndServe:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>To see this proxy in action, we'll need a bit of setup. First, as discussed
+<a class="reference external" href="../go-and-proxy-servers-part-1-http-proxies/index.html">previously</a>,
+I have <tt class="docutils literal">local.alias</tt> set up as an alias for 127.0.0.1 <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>; I then used
+<tt class="docutils literal">mkcert</tt> to generate a locally-trusted certificate with an accompanying
+private key. Then, the proxy can be run:</p>
+<div class="highlight"><pre><span></span>$ go run https-reverse-proxy.go \
+     -certfile &lt;path to certificate .pem&gt; \
+     -keyfile &lt;path to key .pem&gt;
+2022/11/04 19:43:56 Starting proxy server on 127.0.0.1:9090
+</pre></div>
+<p>In a separate window, run <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2022/go-and-proxies/http-server-debug-request-headers.go">the debugging HTTP server</a>
+listening on its default port 8080:</p>
+<div class="highlight"><pre><span></span>$ go run http-server-debug-request-headers.go
+2022/11/04 19:44:18 Starting server on 127.0.0.1:8080
+</pre></div>
+<p>Finally, we can issue <tt class="docutils literal">curl</tt> requests to our proxy server, and they will be
+properly forwarded to the debugging server:</p>
+<div class="highlight"><pre><span></span>$ curl https://local.alias:9090/fo/540
+hello /fo/540
+</pre></div>
+<p>As mentioned earlier, this proxy is called &quot;TLS terminating&quot; because it takes
+care of the encrypted TLS communication with clients. In a realistic scenario,
+this server would be serving <a class="reference external" href="https://mybusiness.com">https://mybusiness.com</a> at the default HTTPS port
+443, and would have the valid certificate for this domain. This is how most
+non-trivial websites run these days, and lots of production-grade tools exist
+to support such a workflow. You can easily configure web servers like Caddy and
+Nginx to serve as TLS-terminating reverse proxies.</p>
+</div>
+<div class="section" id="a-proxy-for-tunneling-arbitrary-traffic-to-destination">
+<h2>A proxy for tunneling arbitrary traffic to destination</h2>
+<p>As we've seen, HTTPS doesn't present a big issue for reverse proxies, because
+these just happen to be the right place to terminate the TLS connection anyhow.
+How about forward proxies, though? These seem to have a real problem with HTTPS
+because they don't have the right certificates.</p>
+<p>The solution IETF came up with is a special HTTP method called <tt class="docutils literal">CONNECT</tt>.
+Quoting from <a class="reference external" href="https://www.rfc-editor.org/rfc/rfc7231#section-4.3.6">RFC 7231</a>:</p>
+<!--  -->
+<blockquote>
+<p>The CONNECT method requests that the recipient establish a tunnel to
+the destination origin server identified by the request-target and,
+if successful, thereafter restrict its behavior to blind forwarding
+of packets, in both directions, until the tunnel is closed.  Tunnels
+are commonly used to create an end-to-end virtual connection, through
+one or more proxies, which can then be secured using TLS (Transport
+Layer Security, [RFC5246]).</p>
+<p>CONNECT is intended only for use in requests to a proxy.  An origin
+server that receives a CONNECT request for itself MAY respond with a
+2xx (Successful) status code to indicate that a connection is
+established.  However, most origin servers do not implement CONNECT.</p>
+</blockquote>
+<p>To create a tunnel, the following sequence of events occurs:</p>
+<ol class="arabic simple">
+<li>The client contacts the proxy and sends it a <tt class="docutils literal">CONNECT</tt> request. The
+request specifies which destination server (host and port) to connect to, for
+example <tt class="docutils literal">CONNECT example.org:443 HTTP/1.1</tt></li>
+<li>The proxy establishes a TCP connection to the specified host:port</li>
+<li>If successful, it returns a <tt class="docutils literal">HTTP/1.1 200 OK</tt> response to the client</li>
+<li>From this point on, the proxy will forward all TCP traffic between the client
+and destination server on this connection. This traffic is often HTTPS, but
+it could be anything else</li>
+<li>The proxy monitors both sides of the connection and terminates the tunnel
+as soon as one of the sides closes its connection.</li>
+</ol>
+<img alt="Diagram showing a CONNECT tunneling proxy" class="align-center" src="../../images/2022/connect-tunnel-proxy.png" />
+<p>As you'd expect by now, implementing such a proxy in Go is fairly
+straightforward! <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2022/go-and-proxies/connect-tunnel-proxy.go">The full code sample is on GitHub</a>;
+let's start with the standard scaffolding <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">addr</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">flag</span><span class="p">.</span><span class="nx">String</span><span class="p">(</span><span class="s">&quot;addr&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;127.0.0.1:9999&quot;</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;proxy address&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">flag</span><span class="p">.</span><span class="nx">Parse</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">proxy</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">forwardProxy</span><span class="p">{}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;Starting proxy server on&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">*</span><span class="nx">addr</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ListenAndServe</span><span class="p">(</span><span class="o">*</span><span class="nx">addr</span><span class="p">,</span><span class="w"> </span><span class="nx">proxy</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;ListenAndServe:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">type</span><span class="w"> </span><span class="nx">forwardProxy</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>To have <tt class="docutils literal">forwardProxy</tt> implement the <tt class="docutils literal">http.Handler</tt> interface, let's add
+a <tt class="docutils literal">ServeHTTP</tt> method:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">p</span><span class="w"> </span><span class="o">*</span><span class="nx">forwardProxy</span><span class="p">)</span><span class="w"> </span><span class="nx">ServeHTTP</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">Method</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">MethodConnect</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">proxyConnect</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">http</span><span class="p">.</span><span class="nx">Error</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="s">&quot;this proxy only supports CONNECT&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">StatusMethodNotAllowed</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This proxy will only agree to serve <tt class="docutils literal">CONNECT</tt> tunnels and won't work as a
+regular HTTP proxy. Implementing the latter is left as an exercise to the
+reader. The key function is <tt class="docutils literal">proxyConnect</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">proxyConnect</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;CONNECT requested to %v (from %v)&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">Host</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">RemoteAddr</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">targetConn</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">net</span><span class="p">.</span><span class="nx">Dial</span><span class="p">(</span><span class="s">&quot;tcp&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">Host</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;failed to dial to target&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">req</span><span class="p">.</span><span class="nx">Host</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="nx">http</span><span class="p">.</span><span class="nx">Error</span><span class="p">(</span><span class="nx">w</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">.</span><span class="nx">Error</span><span class="p">(),</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">StatusServiceUnavailable</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">w</span><span class="p">.</span><span class="nx">WriteHeader</span><span class="p">(</span><span class="nx">http</span><span class="p">.</span><span class="nx">StatusOK</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">hj</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">w</span><span class="p">.(</span><span class="nx">http</span><span class="p">.</span><span class="nx">Hijacker</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">!</span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;http server doesn&#39;t support hijacking connection&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">clientConn</span><span class="p">,</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">hj</span><span class="p">.</span><span class="nx">Hijack</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;http hijacking failed&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;tunnel established&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">go</span><span class="w"> </span><span class="nx">tunnelConn</span><span class="p">(</span><span class="nx">targetConn</span><span class="p">,</span><span class="w"> </span><span class="nx">clientConn</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">go</span><span class="w"> </span><span class="nx">tunnelConn</span><span class="p">(</span><span class="nx">clientConn</span><span class="p">,</span><span class="w"> </span><span class="nx">targetConn</span><span class="p">)</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This code reads the destination address from the request and establishes a new
+TCP connection. It then... <em>hijacks</em> the client connection? What's that all
+about? Don't worry, it's simpler than it sounds! When working with the
+<tt class="docutils literal">net/http</tt> package, we don't deal with TCP connections directly; instead, we
+deal with abstractions like <tt class="docutils literal">ResponseWriter</tt>. But underlying every HTTP
+session is a TCP connection; the <tt class="docutils literal">Hijack</tt> method lets us get to that
+connection, essentially puncturing a hole through the abstraction.</p>
+<p>The caveat is that once we've hijacked the connection, we're on our own. The
+<tt class="docutils literal">net/http</tt> package will no longer manage things for us; we have to close the
+connection on our own when we're done, and so on.</p>
+<p>In this case of tunneling traffic in the proxy, the raw TCP connection is
+exactly what we need. So we end up with two TCP connections - one with the
+client and one with the destination server. The next step is to hook them up
+together. We start two goroutines - one for each direction; <tt class="docutils literal">tunnelConn</tt>
+does this:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">tunnelConn</span><span class="p">(</span><span class="nx">dst</span><span class="w"> </span><span class="nx">io</span><span class="p">.</span><span class="nx">WriteCloser</span><span class="p">,</span><span class="w"> </span><span class="nx">src</span><span class="w"> </span><span class="nx">io</span><span class="p">.</span><span class="nx">ReadCloser</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">io</span><span class="p">.</span><span class="nx">Copy</span><span class="p">(</span><span class="nx">dst</span><span class="p">,</span><span class="w"> </span><span class="nx">src</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">dst</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="nx">src</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>For a production server you'd probably want to be a bit more careful w.r.t
+error handling, but this will do for demonstration purposes.</p>
+<p>Let's take this proxy for a spin; first, run it in a terminal:</p>
+<div class="highlight"><pre><span></span>$ go run connect-tunnel-proxy.go
+2022/11/04 21:10:49 Starting proxy server on 127.0.0.1:9999
+</pre></div>
+<p>Now we can access an HTTPS site using this proxy; we'll invoke <tt class="docutils literal">curl <span class="pre">-v</span></tt> to
+see exactly what it's doing. Note that we set up the <tt class="docutils literal">https_proxy</tt> env var
+to tell <tt class="docutils literal">curl</tt> which proxy it needs to contact in order to access HTTPS
+targets:</p>
+<div class="highlight"><pre><span></span>$ https_proxy=localhost:9999 curl -v https://example.org
+* Uses proxy env variable https_proxy == &#39;localhost:9999&#39;
+*   Trying 127.0.0.1:9999...
+* Connected to (nil) (127.0.0.1) port 9999 (#0)
+* allocate connect buffer!
+* Establish HTTP proxy tunnel to example.org:443
+&gt; CONNECT example.org:443 HTTP/1.1
+&gt; Host: example.org:443
+&gt; User-Agent: curl/7.81.0
+&gt; Proxy-Connection: Keep-Alive
+&gt;
+&lt; HTTP/1.1 200 OK
+&lt; Transfer-Encoding: chunked
+* Ignoring Transfer-Encoding in CONNECT 200 response
+&lt;
+* Proxy replied 200 to CONNECT request
+* CONNECT phase completed!
+* ALPN, offering h2
+* ALPN, offering http/1.1
+*  CAfile: /etc/ssl/certs/ca-certificates.crt
+*  CApath: /etc/ssl/certs
+* TLSv1.0 (OUT), TLS header, Certificate Status (22):
+* TLSv1.3 (OUT), TLS handshake, Client hello (1):
+* TLSv1.2 (IN), TLS header, Certificate Status (22):
+...
+... // more TLS spew
+...
+&lt;!doctype html&gt;
+... // And the HTML for https://example.org is dumped
+</pre></div>
+<p>We see that <tt class="docutils literal">curl</tt> contacted our proxy, sending it a <tt class="docutils literal">CONNECT</tt> request for
+<tt class="docutils literal"><span class="pre">https://example.org</span></tt>. Our proxy replied with <tt class="docutils literal">200 OK</tt> and then <tt class="docutils literal">curl</tt>
+proceeded to perform a TLS handshake with the destination server, through the
+proxy. It works! Our proxy also prints some useful log lines:</p>
+<div class="highlight"><pre><span></span>2022/11/04 21:12:15 CONNECT requested to example.org:443 (from 127.0.0.1:33468)
+2022/11/04 21:12:15 tunnel established
+</pre></div>
+<p>In <a class="reference external" href="../go-and-proxy-servers-part-1-http-proxies/index.html">Part 1</a>,
+we've written a simple HTTP client in Go to test our proxy interactions. Let's
+reuse it here, this time providing a <tt class="docutils literal">https_proxy</tt> setting:</p>
+<div class="highlight"><pre><span></span>$ https_proxy=localhost:9999 go run http-get-basic.go --target https://example.org
+Response status: 200 OK
+&lt;!doctype html&gt;
+... // And the HTML for https://example.org is dumped
+</pre></div>
+</div>
+<div class="section" id="mitm-intercepting-https-proxies">
+<h2>MITM / intercepting HTTPS proxies</h2>
+<p>So far in our discussion of HTTPS proxies we've assumed that proxies cannot
+actually snoop into the underlying HTTPS traffic unless they have the right
+certificate. This is true, of course. I'm not aware of any breach in the
+security of a modern version of TLS (1.3 at the time of writing). However, in
+cryptography what matters is the weakest link - and the disclaimer &quot;unless they
+have the right certificate&quot; hints at one.</p>
+<p><a class="reference external" href="https://en.wikipedia.org/wiki/Man-in-the-middle_attack">Man-in-the-middle (MITM)</a> forward proxies
+allow intercepting HTTPS traffic, reading and even modifying it. They accomplish
+this by enjoying the collaboration of the system administrator of the machine
+the client is running on.</p>
+<p>TLS certificates follow a &quot;chain of trust&quot;. With access to the client machine,
+we can install a special root certificate authority (CA) that the machine
+inherently trusts, and use it to sign fake certificates the proxy can generate
+for any website.</p>
+<p>Here's how it works:</p>
+<ul class="simple">
+<li>The client machine trusts certificate authority X (this was set up by the
+administrator or by the user themselves). Typically browsers come with
+hard-coded lists of &quot;root CAs&quot;, but it's possible to augment these lists
+with system-specific settings</li>
+<li>A tunneling proxy has the private keys of X, and can use them to sign
+certificates</li>
+<li>Once the proxy receives a <tt class="docutils literal">CONNECT</tt> request to access some <tt class="docutils literal">domain.com</tt>,
+it generates a fake certificate for this domain, signing it with X's key</li>
+<li>This permits the proxy to communicate with the client on behalf of
+<tt class="docutils literal">domain.com</tt>, essentially decrypting all traffic intended only for that
+domain's eyes</li>
+<li>The proxy can look at the traffic and modify it, and then forward it to the
+actual <tt class="docutils literal">domain.com</tt> (using a separate TLS connection), and similarly examine
+and modify the responses</li>
+</ul>
+<p>This sounds sinister, but that isn't the only use case. Debugging proxies exist
+that let us do this for valid reasons. Moreover, if an organization
+installs a proxy it probably doesn't want users to easily circumvent it by
+blind tunneling, so it may set all machines up such that the proxy has access
+to the traffic's contents. If you think your bank logins are safe from your
+work laptop because the bank's website uses TLS, think again. It's unlikely that
+your workplace will use your bank credentials for any sinister purposes, but
+they probably could if they wanted to.</p>
+<p>Note that in some setups, the organization doesn't even have to set up a proxy
+to do this. If all the traffic from a computer goes through a specific set of
+routers, for example, these routers can implement the same trick to decrypt
+and proxy all HTTPS traffic - without the user suspecting anything. The critical
+part here is having the private keys for a certificate authority the user's
+machine trusts.</p>
+<p>Implementing such a proxy in Go is not hard, but there are some nuances to be
+aware of. I have a <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2022/go-and-proxies/connect-mitm-proxy.go">working implementation on GitHub</a>.
+Here's the well-commented main HTTP handler of the proxy (for the functions it
+calls,
+consult the full source):</p>
+<div class="highlight"><pre><span></span><span class="c1">// proxyConnect implements the MITM proxy for CONNECT tunnels.</span><span class="w"></span>
+<span class="kd">func</span><span class="w"> </span><span class="p">(</span><span class="nx">p</span><span class="w"> </span><span class="o">*</span><span class="nx">mitmProxy</span><span class="p">)</span><span class="w"> </span><span class="nx">proxyConnect</span><span class="p">(</span><span class="nx">w</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ResponseWriter</span><span class="p">,</span><span class="w"> </span><span class="nx">proxyReq</span><span class="w"> </span><span class="o">*</span><span class="nx">http</span><span class="p">.</span><span class="nx">Request</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;CONNECT requested to %v (from %v)&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">proxyReq</span><span class="p">.</span><span class="nx">Host</span><span class="p">,</span><span class="w"> </span><span class="nx">proxyReq</span><span class="p">.</span><span class="nx">RemoteAddr</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// &quot;Hijack&quot; the client connection to get a TCP (or TLS) socket we can read</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// and write arbitrary data to/from.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">hj</span><span class="p">,</span><span class="w"> </span><span class="nx">ok</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">w</span><span class="p">.(</span><span class="nx">http</span><span class="p">.</span><span class="nx">Hijacker</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">!</span><span class="nx">ok</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;http server doesn&#39;t support hijacking connection&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">clientConn</span><span class="p">,</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">hj</span><span class="p">.</span><span class="nx">Hijack</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;http hijacking failed&quot;</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// proxyReq.Host will hold the CONNECT target host, which will typically have</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// a port - e.g. example.org:443</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// To generate a fake certificate for example.org, we have to first split off</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// the host from the port.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">host</span><span class="p">,</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">net</span><span class="p">.</span><span class="nx">SplitHostPort</span><span class="p">(</span><span class="nx">proxyReq</span><span class="p">.</span><span class="nx">Host</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;error splitting host/port:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Create a fake TLS certificate for the target host, signed by our CA. The</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// certificate will be valid for 10 days - this number can be changed.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">pemCert</span><span class="p">,</span><span class="w"> </span><span class="nx">pemKey</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">createCert</span><span class="p">([]</span><span class="kt">string</span><span class="p">{</span><span class="nx">host</span><span class="p">},</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">caCert</span><span class="p">,</span><span class="w"> </span><span class="nx">p</span><span class="p">.</span><span class="nx">caKey</span><span class="p">,</span><span class="w"> </span><span class="mi">240</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="nx">tlsCert</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">tls</span><span class="p">.</span><span class="nx">X509KeyPair</span><span class="p">(</span><span class="nx">pemCert</span><span class="p">,</span><span class="w"> </span><span class="nx">pemKey</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Send an HTTP OK response back to the client; this initiates the CONNECT</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// tunnel. From this point on the client will assume it&#39;s connected directly</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// to the target.</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">_</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">clientConn</span><span class="p">.</span><span class="nx">Write</span><span class="p">([]</span><span class="nb">byte</span><span class="p">(</span><span class="s">&quot;HTTP/1.1 200 OK\r\n\r\n&quot;</span><span class="p">));</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;error writing status to client:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Configure a new TLS server, pointing it at the client connection, using</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// our certificate. This server will now pretend being the target.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">tlsConfig</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">tls</span><span class="p">.</span><span class="nx">Config</span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">PreferServerCipherSuites</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">CurvePreferences</span><span class="p">:</span><span class="w">         </span><span class="p">[]</span><span class="nx">tls</span><span class="p">.</span><span class="nx">CurveID</span><span class="p">{</span><span class="nx">tls</span><span class="p">.</span><span class="nx">X25519</span><span class="p">,</span><span class="w"> </span><span class="nx">tls</span><span class="p">.</span><span class="nx">CurveP256</span><span class="p">},</span><span class="w"></span>
+<span class="w">    </span><span class="nx">MinVersion</span><span class="p">:</span><span class="w">               </span><span class="nx">tls</span><span class="p">.</span><span class="nx">VersionTLS13</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="nx">Certificates</span><span class="p">:</span><span class="w">             </span><span class="p">[]</span><span class="nx">tls</span><span class="p">.</span><span class="nx">Certificate</span><span class="p">{</span><span class="nx">tlsCert</span><span class="p">},</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">tlsConn</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">tls</span><span class="p">.</span><span class="nx">Server</span><span class="p">(</span><span class="nx">clientConn</span><span class="p">,</span><span class="w"> </span><span class="nx">tlsConfig</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">tlsConn</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Create a buffered reader for the client connection; this is required to</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// use http package functions with this connection.</span><span class="w"></span>
+<span class="w">  </span><span class="nx">connReader</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">bufio</span><span class="p">.</span><span class="nx">NewReader</span><span class="p">(</span><span class="nx">tlsConn</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Run the proxy in a loop until the client closes the connection.</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Read an HTTP request from the client; the request is sent over TLS that</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// connReader is configured to serve. The read will run a TLS handshake in</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// the first invocation (we could also call tlsConn.Handshake explicitly</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// before the loop, but this isn&#39;t necessary).</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Note that while the client believes it&#39;s talking across an encrypted</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// channel with the target, the proxy gets these requests in &quot;plain text&quot;</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// because of the MITM setup.</span><span class="w"></span>
+<span class="w">    </span><span class="nx">r</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">ReadRequest</span><span class="p">(</span><span class="nx">connReader</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="nx">io</span><span class="p">.</span><span class="nx">EOF</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">break</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// We can dump the request; log it, modify it...</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">b</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">httputil</span><span class="p">.</span><span class="nx">DumpRequest</span><span class="p">(</span><span class="nx">r</span><span class="p">,</span><span class="w"> </span><span class="kc">false</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;incoming request:\n%s\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nb">string</span><span class="p">(</span><span class="nx">b</span><span class="p">))</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// Take the original request and changes its destination to be forwarded</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// to the target server.</span><span class="w"></span>
+<span class="w">    </span><span class="nx">changeRequestToTarget</span><span class="p">(</span><span class="nx">r</span><span class="p">,</span><span class="w"> </span><span class="nx">proxyReq</span><span class="p">.</span><span class="nx">Host</span><span class="p">)</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// Send the request to the target server and log the response.</span><span class="w"></span>
+<span class="w">    </span><span class="nx">resp</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">http</span><span class="p">.</span><span class="nx">DefaultClient</span><span class="p">.</span><span class="nx">Do</span><span class="p">(</span><span class="nx">r</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="s">&quot;error sending request to target:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">b</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">httputil</span><span class="p">.</span><span class="nx">DumpResponse</span><span class="p">(</span><span class="nx">resp</span><span class="p">,</span><span class="w"> </span><span class="kc">false</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;target response:\n%s\n&quot;</span><span class="p">,</span><span class="w"> </span><span class="nb">string</span><span class="p">(</span><span class="nx">b</span><span class="p">))</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="k">defer</span><span class="w"> </span><span class="nx">resp</span><span class="p">.</span><span class="nx">Body</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">    </span><span class="c1">// Send the target server&#39;s response back to the client.</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">resp</span><span class="p">.</span><span class="nx">Write</span><span class="p">(</span><span class="nx">tlsConn</span><span class="p">);</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="nx">log</span><span class="p">.</span><span class="nx">Println</span><span class="p">(</span><span class="s">&quot;error writing response back:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This proxy only handles the simple case where the target's domain is explicitly
+provided in the <tt class="docutils literal">CONNECT</tt> request. It doesn't support x509 SAN extensions or
+SNI, though these should be easy to add. For some additional details on the
+various complications see <a class="reference external" href="https://docs.mitmproxy.org/stable/concepts-howmitmproxyworks/">this documentation page from mitmproxy</a>, a featureful
+intercepting HTTPS proxy implementation in Python.</p>
+<p>To run this proxy, we need to provide it with the path to the certificate and
+private key of a CA implicitly trusted by our machine. Since I'm using
+<tt class="docutils literal">mkcert</tt> and have previously ran it with <tt class="docutils literal"><span class="pre">-install</span></tt> to install such a CA, I
+found the path to these by running <tt class="docutils literal">mkcert <span class="pre">-CAROOT</span></tt>. The invocation then looks
+something like this (your paths will be different):</p>
+<div class="highlight"><pre><span></span>$ mkcert -CAROOT
+/home/eliben/.local/share/mkcert
+
+$ go run connect-mitm-proxy.go \
+    -cacertfile /home/eliben/.local/share/mkcert/rootCA.pem \
+    -cakeyfile /home/eliben/.local/share/mkcert/rootCA-key.pem
+2022/11/08 20:49:02 loaded CA certificate and key; IsCA=true
+2022/11/08 20:49:02 Starting proxy server on 127.0.0.1:9999
+</pre></div>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>The first time you hear it, the term &quot;terminate&quot; may sound a bit odd.
+In this context it doesn't carry any negative connotations; it simply
+means &quot;the TLS ends here&quot;, to distinguish from &quot;TLS pass-through&quot;,
+where the TLS traffic is tunneled as-is to the backend server.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>You can get by with just <tt class="docutils literal">localhost</tt> too, though.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>Note that while this proxy helps us access HTTPS destinations, it serves
+over plain HTTP itself. Having this proxy serve HTTPS is straightforward,
+and can be accomplished as an exercise (hint: see the earlier code
+sample in this post).</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

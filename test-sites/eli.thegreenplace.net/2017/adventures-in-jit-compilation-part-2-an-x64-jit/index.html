@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Adventures in JIT compilation: Part 2 - an x64 JIT - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Adventures in JIT compilation: Part 2 - an x64 JIT">
+                        Adventures in JIT compilation: Part 2 - an x64 JIT
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> March 22, 2017 at 06:32</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/compilation.html">Compilation</a>
+        ,
+    <a href="../../tag/code-generation.html">Code generation</a>
+        ,
+    <a href="../../tag/assembly.html">Assembly</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>In the <a class="reference external" href="../adventures-in-jit-compilation-part-1-an-interpreter/index.html">first part of the series</a>
+I've briefly introduced the BF source language and went on to present four
+interpreters with increasing degree of optimization. That post should serve as a
+good backgroud before diving into actual JIT-ing.</p>
+<p>Another important part of the background puzzle is my <a class="reference external" href="../../2013/11/05/how-to-jit-an-introduction.html">How to JIT - an
+introduction</a> post from
+2013; there, I discuss some of the basic tools needed to emit executable x64
+machine code at run-time and actually run it on Linux. Please go through it
+quickly if these things are new to you.</p>
+<div class="section" id="the-two-phases-of-jit">
+<h2>The two phases of JIT</h2>
+<p>As I wrote <a class="reference external" href="../../2013/11/05/how-to-jit-an-introduction.html">previously</a>, the JIT
+technique is easier to understand when divided into two distinct phases:</p>
+<ol class="arabic simple">
+<li>Create machine code at program run-time.</li>
+<li>Execute that machine code, also at program run-time.</li>
+</ol>
+<p>Phase 2 for our BF JIT is exactly identical to the method described in that
+introductory post. Take a look at the <tt class="docutils literal">JitProgram</tt> class in
+<a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/bfjit/jit_utils.h">jit_utils</a>
+for details. We'll be more focused on phase 1, which will be translating
+BF to x64 machine code; per the definition quoted in part 1 of the
+series, we're going to develop an actual BF compiler (compiling from BF source
+to x64 machine code).</p>
+</div>
+<div class="section" id="compilers-assemblers-and-instruction-encoding">
+<h2>Compilers, assemblers and instruction encoding</h2>
+<p>Traditionally, compilation was divided into several stages. The actual source
+language compiler would translate some higher-level language to target-specific
+assembly; then, an assembler would translate assembly to actual machine code
+<a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>. There's a number of important benefits assembly language provides over raw
+machine code. Salient examples include:</p>
+<ul class="simple">
+<li>Instruction encoding: it's certainly nicer to write <tt class="docutils literal">inc %r13</tt> to increment
+the contents of register <tt class="docutils literal">r13</tt> than to write <tt class="docutils literal">0x49, 0xFF, 0xC5</tt>.
+Instruction encoding for the popular architectures is <a class="reference external" href="http://ref.x86asm.net/">notoriously complicated</a>.</li>
+<li>Naming labels and procedures for jumps/calls: it's easier to write <tt class="docutils literal">jl loop</tt>
+than to figure out the encoding for the instruction, along with the relative
+position of the <tt class="docutils literal">loop</tt> label and encoding the delta to it (not to mention
+this delta changes every time we add instructions in between and needs to be
+recomputed). Similarly for functions, <tt class="docutils literal">call foo</tt> instead of doing it by
+address.</li>
+</ul>
+<p>One of my guiding principles through the field of programming is that before
+diving into the possible solutions for a problem (for example, some library for
+doing X) it's worth working through the problem manually first (doing X by hand,
+without libraries). Grinding your teeth over issues for a while is the best way
+to appreciate what the shrinkwrapped solution/library does for you.</p>
+<p>In this spirit, our first JIT is going to be completely hand-written.</p>
+</div>
+<div class="section" id="simple-jit-hand-rolling-x64-instruction-encoding">
+<h2>Simple JIT - hand-rolling x64 instruction encoding</h2>
+<p>Out first JIT for this post is <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/bfjit/simplejit.cpp">simplejit.cpp</a>. Similarly to the
+interpreters of part 1, all the action happens in a single function (here called
+<tt class="docutils literal">simplejit</tt>) invoked from <tt class="docutils literal">main</tt>. <tt class="docutils literal">simplejit</tt> goes through the BF source
+and emits x64 machine code into a memory buffer; in the end, it jumps to this
+machine code to run the BF program.</p>
+<p>Here's its beginning:</p>
+<div class="highlight"><pre><span></span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">uint8_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">memory</span><span class="p">(</span><span class="n">MEMORY_SIZE</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+
+<span class="c1">// Registers used in the program:</span>
+<span class="c1">//</span>
+<span class="c1">// r13: the data pointer -- contains the address of memory.data()</span>
+<span class="c1">//</span>
+<span class="c1">// rax, rdi, rsi, rdx: used for making system calls, per the ABI.</span>
+
+<span class="n">CodeEmitter</span><span class="w"> </span><span class="n">emitter</span><span class="p">;</span><span class="w"></span>
+
+<span class="c1">// Throughout the translation loop, this stack contains offsets (in the</span>
+<span class="c1">// emitter code vector) of locations for fixup.</span>
+<span class="n">std</span><span class="o">::</span><span class="n">stack</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">open_bracket_stack</span><span class="p">;</span><span class="w"></span>
+
+<span class="c1">// movabs &lt;address of memory.data&gt;, %r13</span>
+<span class="n">emitter</span><span class="p">.</span><span class="n">EmitBytes</span><span class="p">({</span><span class="mh">0x49</span><span class="p">,</span><span class="w"> </span><span class="mh">0xBD</span><span class="p">});</span><span class="w"></span>
+<span class="n">emitter</span><span class="p">.</span><span class="n">EmitUint64</span><span class="p">((</span><span class="kt">uint64_t</span><span class="p">)</span><span class="n">memory</span><span class="p">.</span><span class="n">data</span><span class="p">());</span><span class="w"></span>
+</pre></div>
+<p>As usual, we have our BF memory buffer in a <tt class="docutils literal"><span class="pre">std::vector</span></tt>. The comments reveal
+some of the conventions used througout the emitted program: our &quot;data pointer&quot;
+will be in <tt class="docutils literal">r13</tt>.</p>
+<p><tt class="docutils literal">CodeEmitter</tt> is a very simple utility to append bytes and words to a vector
+of bytes. Its full code <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/bfjit/jit_utils.cpp">is here</a>.
+It's platform independent except the assumption of little-endian (for
+<tt class="docutils literal">EmitUint64</tt> it will write the lowest byte of the 64-bit word first, then the
+second lowest byte, etc.)</p>
+<p>Our first bit of actual machine code emission follows:</p>
+<div class="highlight"><pre><span></span><span class="c1">// movabs &lt;address of memory.data&gt;, %r13</span>
+<span class="n">emitter</span><span class="p">.</span><span class="n">EmitBytes</span><span class="p">({</span><span class="mh">0x49</span><span class="p">,</span><span class="w"> </span><span class="mh">0xBD</span><span class="p">});</span><span class="w"></span>
+<span class="n">emitter</span><span class="p">.</span><span class="n">EmitUint64</span><span class="p">((</span><span class="kt">uint64_t</span><span class="p">)</span><span class="n">memory</span><span class="p">.</span><span class="n">data</span><span class="p">());</span><span class="w"></span>
+</pre></div>
+<p>And it's a cool one, mixing elements from the host (the C++ program doing the
+emission) and the JITed code. First note the usage of <tt class="docutils literal">movabs</tt>, a x64
+instruction useful for placing 64-bit immediates in a register. This is exactly
+what we're doing here - placing the address of the data buffer of <tt class="docutils literal">memory</tt>
+in <tt class="docutils literal">r13</tt>. The call to <tt class="docutils literal">EmitBytes</tt> with a cryptic sequence of hex values is
+preceded by a snippet of assembly in a comment - the assembly conveys the
+meaning for human readers, the hex values are the actual encoding the machine
+will understand.</p>
+<p>Then comes the BF compilation loop, which looks at the next BF instruction and
+emits the appropriate machine code for it. Our compiler works in a single pass;
+this means that there's a bit of trickiness in handling the jumps, as we will
+soon see.</p>
+<div class="highlight"><pre><span></span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">pc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">pc</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">p</span><span class="p">.</span><span class="n">instructions</span><span class="p">.</span><span class="n">size</span><span class="p">();</span><span class="w"> </span><span class="o">++</span><span class="n">pc</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kt">char</span><span class="w"> </span><span class="n">instruction</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p</span><span class="p">.</span><span class="n">instructions</span><span class="p">[</span><span class="n">pc</span><span class="p">];</span><span class="w"></span>
+<span class="w">  </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">instruction</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;&gt;&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// inc %r13</span>
+<span class="w">    </span><span class="n">emitter</span><span class="p">.</span><span class="n">EmitBytes</span><span class="p">({</span><span class="mh">0x49</span><span class="p">,</span><span class="w"> </span><span class="mh">0xFF</span><span class="p">,</span><span class="w"> </span><span class="mh">0xC5</span><span class="p">});</span><span class="w"></span>
+<span class="w">    </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;&lt;&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// dec %r13</span>
+<span class="w">    </span><span class="n">emitter</span><span class="p">.</span><span class="n">EmitBytes</span><span class="p">({</span><span class="mh">0x49</span><span class="p">,</span><span class="w"> </span><span class="mh">0xFF</span><span class="p">,</span><span class="w"> </span><span class="mh">0xCD</span><span class="p">});</span><span class="w"></span>
+<span class="w">    </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;+&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// Our memory is byte-addressable, so using addb/subb for modifying it.</span>
+<span class="w">    </span><span class="c1">// addb $1, 0(%r13)</span>
+<span class="w">    </span><span class="n">emitter</span><span class="p">.</span><span class="n">EmitBytes</span><span class="p">({</span><span class="mh">0x41</span><span class="p">,</span><span class="w"> </span><span class="mh">0x80</span><span class="p">,</span><span class="w"> </span><span class="mh">0x45</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">,</span><span class="w"> </span><span class="mh">0x01</span><span class="p">});</span><span class="w"></span>
+<span class="w">    </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;-&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// subb $1, 0(%r13)</span>
+<span class="w">    </span><span class="n">emitter</span><span class="p">.</span><span class="n">EmitBytes</span><span class="p">({</span><span class="mh">0x41</span><span class="p">,</span><span class="w"> </span><span class="mh">0x80</span><span class="p">,</span><span class="w"> </span><span class="mh">0x6D</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">,</span><span class="w"> </span><span class="mh">0x01</span><span class="p">});</span><span class="w"></span>
+<span class="w">    </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+</pre></div>
+<p>These are pretty straightforward; since <tt class="docutils literal">r13</tt> is the data pointer, <tt class="docutils literal">&gt;</tt> and
+<tt class="docutils literal">&lt;</tt> increment and decrement it, while <tt class="docutils literal">+</tt> and <tt class="docutils literal">-</tt> increment and decrement
+what it's pointing to. One slightly subtle aspect is that I chose a byte-value
+memory for our BF implementations; this means we have to be careful when reading
+or writing to memory and do byte-addressing (the <tt class="docutils literal">b</tt> suffixes on <tt class="docutils literal">add</tt> and
+<tt class="docutils literal">sub</tt> above) rather than the default 64-bit-addressing.</p>
+<p>The code emitted for <tt class="docutils literal">.</tt> and <tt class="docutils literal">,</tt> is a bit more exciting; in the effort of
+avoiding any external dependencies, we're going to invoke
+<a class="reference external" href="http://man7.org/linux/man-pages/man2/syscalls.2.html">Linux system calls</a>
+directly. <tt class="docutils literal">WRITE</tt> for <tt class="docutils literal">.</tt>; <tt class="docutils literal">READ</tt> for <tt class="docutils literal">,</tt>. We're using the x64 ABI
+here with the syscall identifier in <tt class="docutils literal">rax</tt>:</p>
+<div class="highlight"><pre><span></span><span class="w">  </span><span class="c1">// To emit one byte to stdout, call the write syscall with fd=1 (for</span>
+<span class="w">  </span><span class="c1">// stdout), buf=address of byte, count=1.</span>
+<span class="w">  </span><span class="c1">//</span>
+<span class="w">  </span><span class="c1">// mov $1, %rax</span>
+<span class="w">  </span><span class="c1">// mov $1, %rdi</span>
+<span class="w">  </span><span class="c1">// mov %r13, %rsi</span>
+<span class="w">  </span><span class="c1">// mov $1, %rdx</span>
+<span class="w">  </span><span class="c1">// syscall</span>
+<span class="w">  </span><span class="n">emitter</span><span class="p">.</span><span class="n">EmitBytes</span><span class="p">({</span><span class="mh">0x48</span><span class="p">,</span><span class="w"> </span><span class="mh">0xC7</span><span class="p">,</span><span class="w"> </span><span class="mh">0xC0</span><span class="p">,</span><span class="w"> </span><span class="mh">0x01</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">});</span><span class="w"></span>
+<span class="w">  </span><span class="n">emitter</span><span class="p">.</span><span class="n">EmitBytes</span><span class="p">({</span><span class="mh">0x48</span><span class="p">,</span><span class="w"> </span><span class="mh">0xC7</span><span class="p">,</span><span class="w"> </span><span class="mh">0xC7</span><span class="p">,</span><span class="w"> </span><span class="mh">0x01</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">});</span><span class="w"></span>
+<span class="w">  </span><span class="n">emitter</span><span class="p">.</span><span class="n">EmitBytes</span><span class="p">({</span><span class="mh">0x4C</span><span class="p">,</span><span class="w"> </span><span class="mh">0x89</span><span class="p">,</span><span class="w"> </span><span class="mh">0xEE</span><span class="p">});</span><span class="w"></span>
+<span class="w">  </span><span class="n">emitter</span><span class="p">.</span><span class="n">EmitBytes</span><span class="p">({</span><span class="mh">0x48</span><span class="p">,</span><span class="w"> </span><span class="mh">0xC7</span><span class="p">,</span><span class="w"> </span><span class="mh">0xC2</span><span class="p">,</span><span class="w"> </span><span class="mh">0x01</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">});</span><span class="w"></span>
+<span class="w">  </span><span class="n">emitter</span><span class="p">.</span><span class="n">EmitBytes</span><span class="p">({</span><span class="mh">0x0F</span><span class="p">,</span><span class="w"> </span><span class="mh">0x05</span><span class="p">});</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="k">case</span><span class="w"> </span><span class="sc">&#39;,&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// To read one byte from stdin, call the read syscall with fd=0 (for</span>
+<span class="w">  </span><span class="c1">// stdin),</span>
+<span class="w">  </span><span class="c1">// buf=address of byte, count=1.</span>
+<span class="w">  </span><span class="n">emitter</span><span class="p">.</span><span class="n">EmitBytes</span><span class="p">({</span><span class="mh">0x48</span><span class="p">,</span><span class="w"> </span><span class="mh">0xC7</span><span class="p">,</span><span class="w"> </span><span class="mh">0xC0</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">});</span><span class="w"></span>
+<span class="w">  </span><span class="n">emitter</span><span class="p">.</span><span class="n">EmitBytes</span><span class="p">({</span><span class="mh">0x48</span><span class="p">,</span><span class="w"> </span><span class="mh">0xC7</span><span class="p">,</span><span class="w"> </span><span class="mh">0xC7</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">});</span><span class="w"></span>
+<span class="w">  </span><span class="n">emitter</span><span class="p">.</span><span class="n">EmitBytes</span><span class="p">({</span><span class="mh">0x4C</span><span class="p">,</span><span class="w"> </span><span class="mh">0x89</span><span class="p">,</span><span class="w"> </span><span class="mh">0xEE</span><span class="p">});</span><span class="w"></span>
+<span class="w">  </span><span class="n">emitter</span><span class="p">.</span><span class="n">EmitBytes</span><span class="p">({</span><span class="mh">0x48</span><span class="p">,</span><span class="w"> </span><span class="mh">0xC7</span><span class="p">,</span><span class="w"> </span><span class="mh">0xC2</span><span class="p">,</span><span class="w"> </span><span class="mh">0x01</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">});</span><span class="w"></span>
+<span class="w">  </span><span class="n">emitter</span><span class="p">.</span><span class="n">EmitBytes</span><span class="p">({</span><span class="mh">0x0F</span><span class="p">,</span><span class="w"> </span><span class="mh">0x05</span><span class="p">});</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+</pre></div>
+<p>The comments certainly help, don't they? I hope these snippets are a great
+motivation for using assembly language rather than encoding instructions
+manually :-)</p>
+<p>The jump instructions are always the most interesting in BF. For <tt class="docutils literal">[</tt> we do:</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;[&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// For the jumps we always emit the instruciton for 32-bit pc-relative</span>
+<span class="w">  </span><span class="c1">// jump, without worrying about potentially short jumps and relaxation.</span>
+
+<span class="w">  </span><span class="c1">// cmpb $0, 0(%r13)</span>
+<span class="w">  </span><span class="n">emitter</span><span class="p">.</span><span class="n">EmitBytes</span><span class="p">({</span><span class="mh">0x41</span><span class="p">,</span><span class="w"> </span><span class="mh">0x80</span><span class="p">,</span><span class="w"> </span><span class="mh">0x7d</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">});</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Save the location in the stack, and emit JZ (with 32-bit relative</span>
+<span class="w">  </span><span class="c1">// offset) with 4 placeholder zeroes that will be fixed up later.</span>
+<span class="w">  </span><span class="n">open_bracket_stack</span><span class="p">.</span><span class="n">push</span><span class="p">(</span><span class="n">emitter</span><span class="p">.</span><span class="n">size</span><span class="p">());</span><span class="w"></span>
+<span class="w">  </span><span class="n">emitter</span><span class="p">.</span><span class="n">EmitBytes</span><span class="p">({</span><span class="mh">0x0F</span><span class="p">,</span><span class="w"> </span><span class="mh">0x84</span><span class="p">});</span><span class="w"></span>
+<span class="w">  </span><span class="n">emitter</span><span class="p">.</span><span class="n">EmitUint32</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+</pre></div>
+<p>Note that we don't know where this jump leads at this point - it will go to the
+matching <tt class="docutils literal">]</tt>, which we haven't encountered yet! Therefore, to keep our
+compilation in a single pass <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a> we use the time-honored technique of
+<em>backpatching</em> by emitting a placeholder value for the jump and fixing it up
+once we encounter the matching label. Another thing to note is always using a
+32-bit pc-relative jump, for simplicity; we could save a couple of bytes with a
+short jump in most cases (see <a class="reference external" href="../../2013/01/03/assembler-relaxation.html">my article on assembler relaxation</a> for the full
+scoop), but I don't think it's worth the effort here.</p>
+<p>Compiling the matching <tt class="docutils literal">]</tt> is a bit trickier; I hope the comments do a good
+job explaining what's going on, and the code itself is optimized for readability
+rather than cleverness:</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;]&#39;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">open_bracket_stack</span><span class="p">.</span><span class="n">empty</span><span class="p">())</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">DIE</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;unmatched closing &#39;]&#39; at pc=&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">pc</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">open_bracket_offset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">open_bracket_stack</span><span class="p">.</span><span class="n">top</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="n">open_bracket_stack</span><span class="p">.</span><span class="n">pop</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// cmpb $0, 0(%r13)</span>
+<span class="w">  </span><span class="n">emitter</span><span class="p">.</span><span class="n">EmitBytes</span><span class="p">({</span><span class="mh">0x41</span><span class="p">,</span><span class="w"> </span><span class="mh">0x80</span><span class="p">,</span><span class="w"> </span><span class="mh">0x7d</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">,</span><span class="w"> </span><span class="mh">0x00</span><span class="p">});</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// open_bracket_offset points to the JZ that jumps to this closing</span>
+<span class="w">  </span><span class="c1">// bracket. We&#39;ll need to fix up the offset for that JZ, as well as emit a</span>
+<span class="w">  </span><span class="c1">// JNZ with a correct offset back. Note that both [ and ] jump to the</span>
+<span class="w">  </span><span class="c1">// instruction *after* the matching bracket if their condition is</span>
+<span class="w">  </span><span class="c1">// fulfilled.</span>
+
+<span class="w">  </span><span class="c1">// Compute the offset for this jump. The jump start is computed from after</span>
+<span class="w">  </span><span class="c1">// the jump instruction, and the target is the instruction after the one</span>
+<span class="w">  </span><span class="c1">// saved on the stack.</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">jump_back_from</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">emitter</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">6</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">jump_back_to</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">open_bracket_offset</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">6</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">pcrel_offset_back</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">      </span><span class="n">compute_relative_32bit_offset</span><span class="p">(</span><span class="n">jump_back_from</span><span class="p">,</span><span class="w"> </span><span class="n">jump_back_to</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// jnz &lt;open_bracket_location&gt;</span>
+<span class="w">  </span><span class="n">emitter</span><span class="p">.</span><span class="n">EmitBytes</span><span class="p">({</span><span class="mh">0x0F</span><span class="p">,</span><span class="w"> </span><span class="mh">0x85</span><span class="p">});</span><span class="w"></span>
+<span class="w">  </span><span class="n">emitter</span><span class="p">.</span><span class="n">EmitUint32</span><span class="p">(</span><span class="n">pcrel_offset_back</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Also fix up the forward jump at the matching [. Note that here we don&#39;t</span>
+<span class="w">  </span><span class="c1">// need to add the size of this jmp to the &quot;jump to&quot; offset, since the jmp</span>
+<span class="w">  </span><span class="c1">// was already emitted and the emitter size was bumped forward.</span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">jump_forward_from</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">open_bracket_offset</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">6</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="kt">size_t</span><span class="w"> </span><span class="n">jump_forward_to</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">emitter</span><span class="p">.</span><span class="n">size</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">pcrel_offset_forward</span><span class="w"> </span><span class="o">=</span><span class="w"></span>
+<span class="w">      </span><span class="n">compute_relative_32bit_offset</span><span class="p">(</span><span class="n">jump_forward_from</span><span class="p">,</span><span class="w"> </span><span class="n">jump_forward_to</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">emitter</span><span class="p">.</span><span class="n">ReplaceUint32AtOffset</span><span class="p">(</span><span class="n">open_bracket_offset</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"></span>
+<span class="w">                                </span><span class="n">pcrel_offset_forward</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This concludes the compiler loop; we end up with a bunch of potentially
+executable machine code in <tt class="docutils literal">vector</tt>. This code refers to the host program (the
+address of <tt class="docutils literal">memory.data()</tt>), but that's OK since the host program's lifetime
+wraps the lifetime of the JITed code. What's remaining is to actually invoke
+this machine code:</p>
+<div class="highlight"><pre><span></span><span class="c1">// ... after the compilation loop</span>
+
+<span class="c1">// The emitted code will be called as a function from C++; therefore it has to</span>
+<span class="c1">// use the proper calling convention. Emit a &#39;ret&#39; for orderly return to the</span>
+<span class="c1">// caller.</span>
+<span class="n">emitter</span><span class="p">.</span><span class="n">EmitByte</span><span class="p">(</span><span class="mh">0xC3</span><span class="p">);</span><span class="w"></span>
+
+<span class="c1">// Load the emitted code to executable memory and run it.</span>
+<span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">uint8_t</span><span class="o">&gt;</span><span class="w"> </span><span class="n">emitted_code</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">emitter</span><span class="p">.</span><span class="n">code</span><span class="p">();</span><span class="w"></span>
+<span class="n">JitProgram</span><span class="w"> </span><span class="nf">jit_program</span><span class="p">(</span><span class="n">emitted_code</span><span class="p">);</span><span class="w"></span>
+
+<span class="c1">// JittedFunc is the C++ type for the JIT function emitted here. The emitted</span>
+<span class="c1">// function is callable from C++ and follows the x64 System V ABI.</span>
+<span class="k">using</span><span class="w"> </span><span class="n">JittedFunc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="p">)(</span><span class="kt">void</span><span class="p">);</span><span class="w"></span>
+
+<span class="n">JittedFunc</span><span class="w"> </span><span class="n">func</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="n">JittedFunc</span><span class="p">)</span><span class="n">jit_program</span><span class="p">.</span><span class="n">program_memory</span><span class="p">();</span><span class="w"></span>
+<span class="n">func</span><span class="p">();</span><span class="w"></span>
+</pre></div>
+<p>The call should be familiar from reading the <a class="reference external" href="../../2013/11/05/how-to-jit-an-introduction.html">How to JIT</a> post.
+Note that here we opted for the simplest function possible - no arguments, no
+return value; in future sections we'll spice it up a bit.</p>
+</div>
+<div class="section" id="taking-our-jit-for-a-spin">
+<h2>Taking our JIT for a spin</h2>
+<p>In <a class="reference external" href="../adventures-in-jit-compilation-part-1-an-interpreter/index.html">part 1</a>,
+I presented a trivial BF program that prints the numbers 1 to 5 to the screen:</p>
+<div class="highlight"><pre><span></span>++++++++ ++++++++ ++++++++ ++++++++ ++++++++ ++++++++
+&gt;+++++
+[&lt;+.&gt;-]
+</pre></div>
+<p>Let's see what our compiler translates it to. Even though the code vector inside
+<tt class="docutils literal">simplejit</tt> is ephemeral (lives only temporarily in memory), we can serialize
+it to a binary file which we can then disassemble (with <tt class="docutils literal">objdump <span class="pre">-D</span> <span class="pre">-b</span> binary
+<span class="pre">-mi386:x86-64</span></tt>). The following is the disassembly listing with comments I
+embedded to explain what's going on:</p>
+<div class="highlight"><pre><span></span> # The runtime address of memory.data() goes into r13; note that this will
+ # likely be a different value in every invocation of the JIT.
+
+  0:   49 bd f0 54 e3 00 00    movabs $0xe354f0,%r13
+  7:   00 00 00
+
+ # A sequence of 48 instructions that all do the same, for the initial sequence
+ # of +s; this makes me miss our optimizing interpreter, by worry not - we&#39;ll
+ # make this go away later in the post.
+
+  a:   41 80 45 00 01          addb   $0x1,0x0(%r13)
+  f:   41 80 45 00 01          addb   $0x1,0x0(%r13)
+
+ # [...] 46 more &#39;addb&#39;
+
+ # &gt;+++++
+
+ fa:   49 ff c5                inc    %r13
+ fd:   41 80 45 00 01          addb   $0x1,0x0(%r13)
+102:   41 80 45 00 01          addb   $0x1,0x0(%r13)
+107:   41 80 45 00 01          addb   $0x1,0x0(%r13)
+10c:   41 80 45 00 01          addb   $0x1,0x0(%r13)
+111:   41 80 45 00 01          addb   $0x1,0x0(%r13)
+
+ # Here comes the loop! Note that the relative jump offset is already inserted
+ # into the &#39;je&#39; instruction by the backpatching process.
+
+116:   41 80 7d 00 00          cmpb   $0x0,0x0(%r13)
+11b:   0f 84 35 00 00 00       je     0x156
+121:   49 ff cd                dec    %r13
+124:   41 80 45 00 01          addb   $0x1,0x0(%r13)
+
+ # The &#39;.&#39; is translated into a syscall to WRITE
+
+129:   48 c7 c0 01 00 00 00    mov    $0x1,%rax
+130:   48 c7 c7 01 00 00 00    mov    $0x1,%rdi
+137:   4c 89 ee                mov    %r13,%rsi
+13a:   48 c7 c2 01 00 00 00    mov    $0x1,%rdx
+141:   0f 05                   syscall
+143:   49 ff c5                inc    %r13
+146:   41 80 6d 00 01          subb   $0x1,0x0(%r13)
+14b:   41 80 7d 00 00          cmpb   $0x0,0x0(%r13)
+
+ # Jump back to beginning of loop
+
+150:   0f 85 cb ff ff ff       jne    0x121
+
+ # We&#39;re done
+
+156:   c3                      retq
+</pre></div>
+</div>
+<div class="section" id="how-does-it-perform">
+<h2>How does it perform?</h2>
+<p>It's time to measure the performance of our JIT against the interpreters from
+part 1. <tt class="docutils literal">optinterp3</tt> was about 10x faster than the naive interpreter - how
+will this JIT measure up? Note that it has no optimizations (except not having
+to recompute the jump destination for every loop iteration as the naive
+interpreter did). Can you guess? The results may surprise you...</p>
+<p>The simple JIT runs <tt class="docutils literal">mandelbrot</tt> in 2.89 seconds, and <tt class="docutils literal">factor</tt> in 0.94
+seconds - much faster still than <tt class="docutils literal">opt3interp</tt>; here's the comparison plot
+(omitting the slower interpreters since they skew the scale):</p>
+<img alt="BF opt3 vs simplejit" class="align-center" src="../../images/2017/bf-runtime-vs-simplejit.png" />
+<p>Why is this so? <tt class="docutils literal">opt3interp</tt> is heavily optimized - it folds entire loops into
+a single operation; <tt class="docutils literal">simplejit</tt> does none of this - we've just seen the
+embarrassing sequence of <tt class="docutils literal">addb</tt>s it emits for a long sequence of <tt class="docutils literal">+</tt>s.</p>
+<p>The reason is that the <em>baseline</em> performance of the JIT is vastly better. I've
+mentioned this briefly in part 1 - imagine what's needed to interpret a
+single instruction in the fastest interpreter.</p>
+<ol class="arabic simple">
+<li>Advance <tt class="docutils literal">pc</tt> and compare it to program size.</li>
+<li>Grab the instruction at <tt class="docutils literal">pc</tt>.</li>
+<li>Switch on the value of the instruction to the right <tt class="docutils literal">case</tt>.</li>
+<li>Execute the <tt class="docutils literal">case</tt>.</li>
+</ol>
+<p>This requires a whole sequence of machine instructions, with at least two
+branches (one for the loop, one for the <tt class="docutils literal">switch</tt>). On the other hand, the JIT
+just emits a <em>single instruction</em> - no branches. I would say that - depending on
+what the compiler did while compiling the interpreter - the JIT is between 4 and
+8 times faster at running any given BF operation. It has to run many more BF
+operations because it doesn't optimize, but this difference is insufficient to
+close the huge baseline gap. Later in this post we're going to see an optimized
+JIT which performs even better.</p>
+<p>But first, let's talk about this painful instruction encoding business.</p>
+</div>
+<div class="section" id="manually-encoding-instructions">
+<h2>Manually encoding instructions</h2>
+<p>As promised, <tt class="docutils literal">simplejit</tt> is completely self-contained. It doesn't use any
+external libraries, and encodes all the instructions by hand. It's not hard to
+see how painful that process is, and the code is absolutely unreadable unless
+accompanied by detailed comments; moreover, changing the code is a pain, and
+changes happen in unexpected ways. For example, if we want to use some other
+register in an instruction, the change to emitted code won't be intuitive.
+<tt class="docutils literal">add %r8, %r9</tt> is encoded as <tt class="docutils literal">0x4C, 0x01, 0xC8</tt>, but <tt class="docutils literal">add %r8, %r10</tt> is
+<tt class="docutils literal">0x4C, 0x01, 0xD0</tt>; since registers are specified in sub-byte nibbles,
+one needs very good memory and tons of experience to predict what goes where.</p>
+<p>Would you expect related instructions to look somewhat similar?
+They don't. <tt class="docutils literal">inc %r13</tt> is encoded as <tt class="docutils literal">0x49, 0xFF, 0xC0</tt>, for example.
+To put it bluntly - unless you're <a class="reference external" href="http://www.catb.org/jargon/html/story-of-mel.html">Mel</a>, you're going to have a
+hard time. Now imagine that you have to support emitting code for multiple
+architectures!</p>
+<p>This is why all compilers, VMs and related projects have their own layers to
+help with this encoding task, along with related tasks like labels and jump
+computations. Most are not exposed for easy usage outside their project; others,
+like <a class="reference external" href="http://luajit.org/dynasm.html">DynASM</a> (developed as part of the LuaJIT
+project) are packaged for separate usage. DynASM is an example of a low-level
+framework - providing instruction encoding and not much else; some frameworks
+are higher-level, doing more compiler-y things like register allocation. One
+example is <a class="reference external" href="../../2013/10/17/getting-started-with-libjit-part-1.html">libjit</a>;
+another is LLVM.</p>
+</div>
+<div class="section" id="asmjit">
+<h2>asmjit</h2>
+<p>While looking for a library to help me encode instructions, I initially tried
+DynASM. It's an interesting approach - and you can see <a class="reference external" href="http://blog.reverberate.org/2012/12/hello-jit-world-joy-of-simple-jits.html">Josh Haberman's post</a>
+about using it for a simple BF JIT, but I found it to be a bit too
+abandonware-ish for my taste. Besides, I don't like the funky preprocessor
+approach with a dependency on Lua.</p>
+<p>So I found another project that seemed to fit the bill - <a class="reference external" href="https://github.com/asmjit/asmjit">asmjit</a> - a pure C++ library without any
+preprocessing. <tt class="docutils literal">asmjit</tt> began about 3 years ago to ease its author's
+development of fast kernels for graphics code. Its documentation isn't much
+better than <tt class="docutils literal">dynasm</tt>'s, but being just a C++ library I found it easier to dive
+into the source when questions arose the docs couldn't answer. Besides, the
+author is very active and quick in answering questions on GitHub and adding
+missing featuers. Therefore, the rest of this post shows BF JITs that use
+<tt class="docutils literal">asmjit</tt> - these can also serve as a non-trivial tutorial for the library.</p>
+</div>
+<div class="section" id="simpleasmjit-jit-with-sane-instruction-encoding">
+<h2>simpleasmjit - JIT with sane instruction encoding</h2>
+<p>Enter <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/bfjit/simpleasmjit.cpp">simpleasmjit.cpp</a> -
+the same simple JIT (no optimizations) as <tt class="docutils literal">simplejit</tt>, but using <tt class="docutils literal">asmjit</tt>
+for the instruction encoding, labels and so on. Just for fun, we'll mix things
+up a bit. First, we'll change the JITed function signature from <tt class="docutils literal">void
+<span class="pre">(*)(void)</span></tt> to <tt class="docutils literal">void <span class="pre">(*)(uint64_t)</span></tt>; the address of the BF memory buffer will
+be passed as argument into the JITed function rather than hard-coded into it.</p>
+<p>Second, we'll use actual C functions to emit / input characters, rather than
+system calls. Moreover, since <tt class="docutils literal">putchar</tt> and <tt class="docutils literal">getchar</tt> may be macros on some
+systems, taking their address can be unsafe. So we'll wrap them in actual C++
+functions, whose address it <em>is</em> safe to take in emitted code:</p>
+<div class="highlight"><pre><span></span><span class="kt">void</span><span class="w"> </span><span class="nf">myputchar</span><span class="p">(</span><span class="kt">uint8_t</span><span class="w"> </span><span class="n">c</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">putchar</span><span class="p">(</span><span class="n">c</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kt">uint8_t</span><span class="w"> </span><span class="nf">mygetchar</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">getchar</span><span class="p">();</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p><tt class="docutils literal">simpleasmjit</tt> starts by initializing an <tt class="docutils literal">asmjit</tt> runtime, code holder and
+assembler <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>:</p>
+<div class="highlight"><pre><span></span><span class="n">asmjit</span><span class="o">::</span><span class="n">JitRuntime</span><span class="w"> </span><span class="n">jit_runtime</span><span class="p">;</span><span class="w"></span>
+<span class="n">asmjit</span><span class="o">::</span><span class="n">CodeHolder</span><span class="w"> </span><span class="n">code</span><span class="p">;</span><span class="w"></span>
+<span class="n">code</span><span class="p">.</span><span class="n">init</span><span class="p">(</span><span class="n">jit_runtime</span><span class="p">.</span><span class="n">getCodeInfo</span><span class="p">());</span><span class="w"></span>
+<span class="n">asmjit</span><span class="o">::</span><span class="n">X86Assembler</span><span class="w"> </span><span class="nf">assm</span><span class="p">(</span><span class="o">&amp;</span><span class="n">code</span><span class="p">);</span><span class="w"></span>
+</pre></div>
+<p>Next, we'll give a mnemonic name to our data pointer, and emit a copy of the
+address of the memory buffer into it (it's in <tt class="docutils literal">rdi</tt> initially, as the first
+function argument in the x64 ABI):</p>
+<div class="highlight"><pre><span></span><span class="c1">// We pass the data pointer as an argument to the JITed function, so it&#39;s</span>
+<span class="c1">// expected to be in rdi. Move it to r13.</span>
+<span class="n">asmjit</span><span class="o">::</span><span class="n">X86Gp</span><span class="w"> </span><span class="n">dataptr</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">asmjit</span><span class="o">::</span><span class="n">x86</span><span class="o">::</span><span class="n">r13</span><span class="p">;</span><span class="w"></span>
+<span class="n">assm</span><span class="p">.</span><span class="n">mov</span><span class="p">(</span><span class="n">dataptr</span><span class="p">,</span><span class="w"> </span><span class="n">asmjit</span><span class="o">::</span><span class="n">x86</span><span class="o">::</span><span class="n">rdi</span><span class="p">);</span><span class="w"></span>
+</pre></div>
+<p>Then we get to the usual BF processing loop that emits code for every BF op:</p>
+<div class="highlight"><pre><span></span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kt">size_t</span><span class="w"> </span><span class="n">pc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">pc</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">p</span><span class="p">.</span><span class="n">instructions</span><span class="p">.</span><span class="n">size</span><span class="p">();</span><span class="w"> </span><span class="o">++</span><span class="n">pc</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kt">char</span><span class="w"> </span><span class="n">instruction</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">p</span><span class="p">.</span><span class="n">instructions</span><span class="p">[</span><span class="n">pc</span><span class="p">];</span><span class="w"></span>
+<span class="w">  </span><span class="k">switch</span><span class="w"> </span><span class="p">(</span><span class="n">instruction</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;&gt;&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// inc %r13</span>
+<span class="w">    </span><span class="n">assm</span><span class="p">.</span><span class="n">inc</span><span class="p">(</span><span class="n">dataptr</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;&lt;&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// dec %r13</span>
+<span class="w">    </span><span class="n">assm</span><span class="p">.</span><span class="n">dec</span><span class="p">(</span><span class="n">dataptr</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;+&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// addb $1, 0(%r13)</span>
+<span class="w">    </span><span class="n">assm</span><span class="p">.</span><span class="n">add</span><span class="p">(</span><span class="n">asmjit</span><span class="o">::</span><span class="n">x86</span><span class="o">::</span><span class="n">byte_ptr</span><span class="p">(</span><span class="n">dataptr</span><span class="p">),</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;-&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">    </span><span class="c1">// subb $1, 0(%r13)</span>
+<span class="w">    </span><span class="n">assm</span><span class="p">.</span><span class="n">sub</span><span class="p">(</span><span class="n">asmjit</span><span class="o">::</span><span class="n">x86</span><span class="o">::</span><span class="n">byte_ptr</span><span class="p">(</span><span class="n">dataptr</span><span class="p">),</span><span class="w"> </span><span class="mi">1</span><span class="p">);</span><span class="w"></span>
+<span class="w">    </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+</pre></div>
+<p>Notice the difference! No more obscure hex codes - <tt class="docutils literal">assm.inc(dataptr)</tt> is so
+much nicer than <tt class="docutils literal">0x49, 0xFF, 0xC5</tt>, isn't it?</p>
+<p>For input and output we emit calls to our wrapper functions:</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;.&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// call myputchar [dataptr]</span>
+<span class="w">  </span><span class="n">assm</span><span class="p">.</span><span class="n">movzx</span><span class="p">(</span><span class="n">asmjit</span><span class="o">::</span><span class="n">x86</span><span class="o">::</span><span class="n">rdi</span><span class="p">,</span><span class="w"> </span><span class="n">asmjit</span><span class="o">::</span><span class="n">x86</span><span class="o">::</span><span class="n">byte_ptr</span><span class="p">(</span><span class="n">dataptr</span><span class="p">));</span><span class="w"></span>
+<span class="w">  </span><span class="n">assm</span><span class="p">.</span><span class="n">call</span><span class="p">(</span><span class="n">asmjit</span><span class="o">::</span><span class="n">imm_ptr</span><span class="p">(</span><span class="n">myputchar</span><span class="p">));</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="k">case</span><span class="w"> </span><span class="sc">&#39;,&#39;</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// [dataptr] = call mygetchar</span>
+<span class="w">  </span><span class="c1">// Store only the low byte to memory to avoid overwriting unrelated data.</span>
+<span class="w">  </span><span class="n">assm</span><span class="p">.</span><span class="n">call</span><span class="p">(</span><span class="n">asmjit</span><span class="o">::</span><span class="n">imm_ptr</span><span class="p">(</span><span class="n">mygetchar</span><span class="p">));</span><span class="w"></span>
+<span class="w">  </span><span class="n">assm</span><span class="p">.</span><span class="n">mov</span><span class="p">(</span><span class="n">asmjit</span><span class="o">::</span><span class="n">x86</span><span class="o">::</span><span class="n">byte_ptr</span><span class="p">(</span><span class="n">dataptr</span><span class="p">),</span><span class="w"> </span><span class="n">asmjit</span><span class="o">::</span><span class="n">x86</span><span class="o">::</span><span class="n">al</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+</pre></div>
+<p>The magic is in the <tt class="docutils literal">imm_ptr</tt> modifier, which places the address of the
+function in the emitted code.</p>
+<p>Finally, the code handling <tt class="docutils literal">[</tt> and <tt class="docutils literal">]</tt> is also much simpler due to asmjit's
+<em>labels</em>, which can be used before they're actually emitted:</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="sc">&#39;[&#39;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">assm</span><span class="p">.</span><span class="n">cmp</span><span class="p">(</span><span class="n">asmjit</span><span class="o">::</span><span class="n">x86</span><span class="o">::</span><span class="n">byte_ptr</span><span class="p">(</span><span class="n">dataptr</span><span class="p">),</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">asmjit</span><span class="o">::</span><span class="n">Label</span><span class="w"> </span><span class="n">open_label</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assm</span><span class="p">.</span><span class="n">newLabel</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="n">asmjit</span><span class="o">::</span><span class="n">Label</span><span class="w"> </span><span class="n">close_label</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assm</span><span class="p">.</span><span class="n">newLabel</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Jump past the closing &#39;]&#39; if [dataptr] = 0; close_label wasn&#39;t bound</span>
+<span class="w">  </span><span class="c1">// yet (it will be bound when we handle the matching &#39;]&#39;), but asmjit lets</span>
+<span class="w">  </span><span class="c1">// us emit the jump now and will handle the back-patching later.</span>
+<span class="w">  </span><span class="n">assm</span><span class="p">.</span><span class="n">jz</span><span class="p">(</span><span class="n">close_label</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// open_label is bound past the jump; all in all, we&#39;re emitting:</span>
+<span class="w">  </span><span class="c1">//</span>
+<span class="w">  </span><span class="c1">//    cmpb 0(%r13), 0</span>
+<span class="w">  </span><span class="c1">//    jz close_label</span>
+<span class="w">  </span><span class="c1">// open_label:</span>
+<span class="w">  </span><span class="c1">//    ...</span>
+<span class="w">  </span><span class="n">assm</span><span class="p">.</span><span class="n">bind</span><span class="p">(</span><span class="n">open_label</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// Save both labels on the stack.</span>
+<span class="w">  </span><span class="n">open_bracket_stack</span><span class="p">.</span><span class="n">push</span><span class="p">(</span><span class="n">BracketLabels</span><span class="p">(</span><span class="n">open_label</span><span class="p">,</span><span class="w"> </span><span class="n">close_label</span><span class="p">));</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+<span class="k">case</span><span class="w"> </span><span class="sc">&#39;]&#39;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">open_bracket_stack</span><span class="p">.</span><span class="n">empty</span><span class="p">())</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">DIE</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="s">&quot;unmatched closing &#39;]&#39; at pc=&quot;</span><span class="w"> </span><span class="o">&lt;&lt;</span><span class="w"> </span><span class="n">pc</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="n">BracketLabels</span><span class="w"> </span><span class="n">labels</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">open_bracket_stack</span><span class="p">.</span><span class="n">top</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="n">open_bracket_stack</span><span class="p">.</span><span class="n">pop</span><span class="p">();</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">//    cmpb 0(%r13), 0</span>
+<span class="w">  </span><span class="c1">//    jnz open_label</span>
+<span class="w">  </span><span class="c1">// close_label:</span>
+<span class="w">  </span><span class="c1">//    ...</span>
+<span class="w">  </span><span class="n">assm</span><span class="p">.</span><span class="n">cmp</span><span class="p">(</span><span class="n">asmjit</span><span class="o">::</span><span class="n">x86</span><span class="o">::</span><span class="n">byte_ptr</span><span class="p">(</span><span class="n">dataptr</span><span class="p">),</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">assm</span><span class="p">.</span><span class="n">jnz</span><span class="p">(</span><span class="n">labels</span><span class="p">.</span><span class="n">open_label</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">assm</span><span class="p">.</span><span class="n">bind</span><span class="p">(</span><span class="n">labels</span><span class="p">.</span><span class="n">close_label</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>We just have to remember which label we used for the jump and emit the exact
+same <tt class="docutils literal">Label</tt> object - <tt class="docutils literal">asmjit</tt> handles the backpatching on its own!
+Moreover, all the jump offset computations are performed automatically.</p>
+<p>Finally, after emitting the code we can call it:</p>
+<div class="highlight"><pre><span></span><span class="k">using</span><span class="w"> </span><span class="n">JittedFunc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kt">void</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="p">)(</span><span class="kt">uint64_t</span><span class="p">);</span><span class="w"></span>
+
+<span class="n">JittedFunc</span><span class="w"> </span><span class="n">func</span><span class="p">;</span><span class="w"></span>
+<span class="n">asmjit</span><span class="o">::</span><span class="n">Error</span><span class="w"> </span><span class="n">err</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">jit_runtime</span><span class="p">.</span><span class="n">add</span><span class="p">(</span><span class="o">&amp;</span><span class="n">func</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="n">code</span><span class="p">);</span><span class="w"></span>
+<span class="c1">// [...]</span>
+<span class="c1">// Call it, passing the address of memory as a parameter.</span>
+<span class="n">func</span><span class="p">((</span><span class="kt">uint64_t</span><span class="p">)</span><span class="n">memory</span><span class="p">.</span><span class="n">data</span><span class="p">());</span><span class="w"></span>
+</pre></div>
+<p>That's it. This JIT emits virtually the same exact code as <tt class="docutils literal">simplejit</tt>, and
+thus we don't expect it to perform any differently. The main point of this
+exercise is to show how much simpler and more pleasant emitting code is with a
+library like <tt class="docutils literal">asmjit</tt>. It hides all the icky encoding and offset computations,
+letting us focus on what's actually unique for our program - the sequence of
+instructions emitted.</p>
+</div>
+<div class="section" id="optasmjit-combining-bf-optimizations-with-a-jit">
+<h2>optasmjit - combining BF optimizations with a JIT</h2>
+<p>Finally, it's time to combine the clever optimizations we've developed in part 1
+with the JIT. Here, I'm essentially taking <tt class="docutils literal">optinterp3</tt> from part
+1 and bolting a JIT backend onto it. The result is <a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2017/bfjit/optasmjit.cpp">optasmjit.cpp</a>.</p>
+<p>Recall that instead of the 8 BF ops, we have an extended set, with integer
+arguments, that conveys higher-level ops in some cases:</p>
+<div class="highlight"><pre><span></span><span class="k">enum</span><span class="w"> </span><span class="k">class</span><span class="w"> </span><span class="nc">BfOpKind</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">INVALID_OP</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">INC_PTR</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">DEC_PTR</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">INC_DATA</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">DEC_DATA</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">READ_STDIN</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">WRITE_STDOUT</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">LOOP_SET_TO_ZERO</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">LOOP_MOVE_PTR</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">LOOP_MOVE_DATA</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">JUMP_IF_DATA_ZERO</span><span class="p">,</span><span class="w"></span>
+<span class="w">  </span><span class="n">JUMP_IF_DATA_NOT_ZERO</span><span class="w"></span>
+<span class="p">};</span><span class="w"></span>
+</pre></div>
+<p>The translation phase from BF ops to a sequence of <tt class="docutils literal">BfOpKind</tt> is exactly the
+same as it was in <tt class="docutils literal">optinterp3</tt>. Let's take a look at how a couple of the new
+ops are implemented now:</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="no">BfOpKind</span><span class="o">::</span><span class="no">INC_PTR</span><span class="p">:</span><span class="w"></span>
+<span class="w">  </span><span class="n">assm</span><span class="p">.</span><span class="n">add</span><span class="p">(</span><span class="n">dataptr</span><span class="p">,</span><span class="w"> </span><span class="n">op</span><span class="p">.</span><span class="n">argument</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+</pre></div>
+<p>As before with the interpreters, an increment of 1 is replaced by the addition
+of an argument. We use a different instruction for this - <tt class="docutils literal">add</tt> instead of
+<tt class="docutils literal">inc</tt> <a class="footnote-reference" href="index.html#footnote-4" id="footnote-reference-4">[4]</a>. How about something more interesting:</p>
+<div class="highlight"><pre><span></span><span class="k">case</span><span class="w"> </span><span class="no">BfOpKind</span><span class="o">::</span><span class="no">LOOP_MOVE_DATA</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Only move if the current data isn&#39;t 0:</span>
+<span class="w">  </span><span class="c1">//</span>
+<span class="w">  </span><span class="c1">//   cmpb 0(%r13), 0</span>
+<span class="w">  </span><span class="c1">//   jz skip_move</span>
+<span class="w">  </span><span class="c1">//   &lt;...&gt; move data</span>
+<span class="w">  </span><span class="c1">// skip_move:</span>
+<span class="w">  </span><span class="n">asmjit</span><span class="o">::</span><span class="n">Label</span><span class="w"> </span><span class="n">skip_move</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">assm</span><span class="p">.</span><span class="n">newLabel</span><span class="p">();</span><span class="w"></span>
+<span class="w">  </span><span class="n">assm</span><span class="p">.</span><span class="n">cmp</span><span class="p">(</span><span class="n">asmjit</span><span class="o">::</span><span class="n">x86</span><span class="o">::</span><span class="n">byte_ptr</span><span class="p">(</span><span class="n">dataptr</span><span class="p">),</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">assm</span><span class="p">.</span><span class="n">jz</span><span class="p">(</span><span class="n">skip_move</span><span class="p">);</span><span class="w"></span>
+
+<span class="w">  </span><span class="n">assm</span><span class="p">.</span><span class="n">mov</span><span class="p">(</span><span class="n">asmjit</span><span class="o">::</span><span class="n">x86</span><span class="o">::</span><span class="n">r14</span><span class="p">,</span><span class="w"> </span><span class="n">dataptr</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">op</span><span class="p">.</span><span class="n">argument</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">assm</span><span class="p">.</span><span class="n">sub</span><span class="p">(</span><span class="n">asmjit</span><span class="o">::</span><span class="n">x86</span><span class="o">::</span><span class="n">r14</span><span class="p">,</span><span class="w"> </span><span class="o">-</span><span class="n">op</span><span class="p">.</span><span class="n">argument</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="n">assm</span><span class="p">.</span><span class="n">add</span><span class="p">(</span><span class="n">asmjit</span><span class="o">::</span><span class="n">x86</span><span class="o">::</span><span class="n">r14</span><span class="p">,</span><span class="w"> </span><span class="n">op</span><span class="p">.</span><span class="n">argument</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="c1">// Use rax as a temporary holding the value of at the original pointer;</span>
+<span class="w">  </span><span class="c1">// then use al to add it to the new location, so that only the target</span>
+<span class="w">  </span><span class="c1">// location is affected: addb %al, 0(%r13)</span>
+<span class="w">  </span><span class="n">assm</span><span class="p">.</span><span class="n">mov</span><span class="p">(</span><span class="n">asmjit</span><span class="o">::</span><span class="n">x86</span><span class="o">::</span><span class="n">rax</span><span class="p">,</span><span class="w"> </span><span class="n">asmjit</span><span class="o">::</span><span class="n">x86</span><span class="o">::</span><span class="n">byte_ptr</span><span class="p">(</span><span class="n">dataptr</span><span class="p">));</span><span class="w"></span>
+<span class="w">  </span><span class="n">assm</span><span class="p">.</span><span class="n">add</span><span class="p">(</span><span class="n">asmjit</span><span class="o">::</span><span class="n">x86</span><span class="o">::</span><span class="n">byte_ptr</span><span class="p">(</span><span class="n">asmjit</span><span class="o">::</span><span class="n">x86</span><span class="o">::</span><span class="n">r14</span><span class="p">),</span><span class="w"> </span><span class="n">asmjit</span><span class="o">::</span><span class="n">x86</span><span class="o">::</span><span class="n">al</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">assm</span><span class="p">.</span><span class="n">mov</span><span class="p">(</span><span class="n">asmjit</span><span class="o">::</span><span class="n">x86</span><span class="o">::</span><span class="n">byte_ptr</span><span class="p">(</span><span class="n">dataptr</span><span class="p">),</span><span class="w"> </span><span class="mi">0</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="n">assm</span><span class="p">.</span><span class="n">bind</span><span class="p">(</span><span class="n">skip_move</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">break</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>I'll just note again how much simpler this code is to write with <tt class="docutils literal">asmjit</tt> than
+without it. Also note the careful handling of the byte-granulated data when
+touching memory - I ran into a number of nasty bugs when developing this. In
+fact, using the native machine word size (64 bits in this case) for BF memory
+cells would've made everything much simpler; 8-bit cells are closer to the
+common semantics of the language and provide an extra challenge.</p>
+</div>
+<div class="section" id="performance">
+<h2>Performance</h2>
+<p>Let's see how <tt class="docutils literal">optasmjit</tt> fares against the fastest interpreter and the
+unoptimized JIT - 0.93 seconds for <tt class="docutils literal">mandelbrot</tt>, 0.3 seconds for <tt class="docutils literal">factor</tt> -
+another factor of 3 in performance:</p>
+<img alt="BF opt3 vs simplejit vs optasmjit" class="align-center" src="../../images/2017/bf-runtime-vs-optasmjit.png" />
+<p>Notably, the performance delta with the optimized interpreter is huge: the JIT
+is more than 4x faster. If we compare it all the way to the initial simple
+interpreter, <tt class="docutils literal">optasmjit</tt> is about 40x faster - making it hard to even
+compare on the same chart :-)</p>
+<img alt="BF full performance comparison for part 2" class="align-center" src="../../images/2017/bf-runtime-full-part2.png" />
+</div>
+<div class="section" id="jits-are-fun">
+<h2>JITs are fun!</h2>
+<p>I find writing JITs lots of fun. It's really nice to be able to hand-craft every
+instruction emitted by the compiler. While this is quite painful to do without
+any encoding help, libraries like <tt class="docutils literal">asmjit</tt> make the process much more
+pleasant.</p>
+<p>We've done quite a bit in this part of the series. <tt class="docutils literal">optasmjit</tt> is a genuine
+optimizing JIT for BF! It:</p>
+<ul class="simple">
+<li>Parses BF source</li>
+<li>Translates it to a sequence of higher-level ops</li>
+<li>Optimizes these ops</li>
+<li>Compiles the ops to tight x64 assembly in memory and runs them</li>
+</ul>
+<p>Let's connect these steps to some real compiler jargon. <tt class="docutils literal">BfOpKind</tt> ops can be
+seen as the <a class="reference external" href="https://en.wikipedia.org/wiki/Intermediate_representation">compiler IR</a>. Translation of
+human-readable source code to IR is often the first step in compilation (though
+it in itself is sometimes divided into multiple steps for realistic languages).
+The translation/compilation of ops to assembly is often called &quot;lowering&quot;; in
+some compilers this involves multiple steps and intermediate IRs.</p>
+<p>I left a lot of code out of the blog post - otherwise it would be huge! I
+encourage you to go back through the full source files discussed here and
+understand what's going on - every JIT is a single standalone C++ file.</p>
+<hr class="docutils" />
+<p>Links to all posts in this series:</p>
+<ul class="simple">
+<li><a class="reference external" href="../adventures-in-jit-compilation-part-1-an-interpreter/index.html">Part 1 - an interpreter</a></li>
+<li><a class="reference external" href="index.html">Part 2 - an x64 JIT</a></li>
+<li><a class="reference external" href="../adventures-in-jit-compilation-part-3-llvm/index.html">Part 3 - LLVM</a></li>
+<li><a class="reference external" href="../adventures-in-jit-compilation-part-4-in-python/index.html">Part 4 - Python</a></li>
+</ul>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>I said <em>traditionally</em> because many modern compilers no longer work this
+way. For example, LLVM compiles IR to another, much lower-level IR that
+represents machine-code level instructions; assembly can be emitted from
+this IR, but also machine code directly - so the assembler is integrated
+into the compiler.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>Some compilers would do two passes; this is similar to our first
+interpreter optimization in part 1: the first pass collects information
+(such as location of all matching <tt class="docutils literal">]</tt>s), so the second pass already
+knows what offsets to emit.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>Please refer to asmjit's documentation for the full scoop. I'll also
+mention that asmjit has a &quot;compiler&quot; layer which does more sophisticated
+things like register allocation; in this post I'm only using the base
+assembly layer.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-4" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-4">[4]</a></td><td>Wondering whether we could have
+just used <tt class="docutils literal">add 1</tt> instead of <tt class="docutils literal">inc</tt> in the first place? Certainly! In
+fact, while there probably used to be a good reason for a separate
+<tt class="docutils literal">inc</tt> instruction, in these days of complex multi-port pipelined x64
+CPUs, it's not clear which one is faster. I just wanted to show both for
+diversity.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

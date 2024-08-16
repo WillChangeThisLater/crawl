@@ -16,14 +16,6 @@ var (
 	mu        = new(sync.Mutex)
 )
 
-//func getSHA256Sum(content io.Reader) string {
-//	bodyBytes, err := io.ReadAll(content)
-//	if err != nil {
-//		panic(err)
-//	}
-//	return fmt.Sprintf("%x", sha256.Sum256(bodyBytes))
-//}
-
 func getLinksFromHTML(htmlContent io.Reader) []string {
 	links := make([]string, 0)
 	tokenizer := html.NewTokenizer(htmlContent)
@@ -50,7 +42,7 @@ func crawlLinks(wg *sync.WaitGroup, semaphore chan struct{}, link string, discov
 
 	mu.Lock()
 	if _, ok := seenLinks[link]; ok {
-		log.Printf("%s link seen before - skipping\n", link)
+		// log.Printf("%s link seen before - skipping\n", link) // too noisy
 		mu.Unlock()
 		return
 	} else {
@@ -59,7 +51,7 @@ func crawlLinks(wg *sync.WaitGroup, semaphore chan struct{}, link string, discov
 	mu.Unlock()
 
 	semaphore <- struct{}{}
-	log.Printf("%s - GET request\n", link)
+	//log.Printf("%s - GET request\n", link) // too noisy
 	resp, err := http.Get(link)
 	<-semaphore
 
@@ -94,7 +86,7 @@ func crawlLinks(wg *sync.WaitGroup, semaphore chan struct{}, link string, discov
 
 		resolvedURL := baseURL.ResolveReference(parsedChildLink)
 		if resolvedURL.Host == baseURL.Host {
-			log.Printf("%s Kicking off crawl for %s\n", link, resolvedURL.String())
+			//log.Printf("%s Kicking off crawl for %s\n", link, resolvedURL.String()) // too noisy
 			wg.Add(1)
 			go crawlLinks(wg, semaphore, resolvedURL.String(), discoveredLinks)
 		}

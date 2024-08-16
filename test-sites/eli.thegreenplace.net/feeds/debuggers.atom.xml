@@ -1,0 +1,1368 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"><title>Eli Bendersky's website - Debuggers</title><link href="https://eli.thegreenplace.net/" rel="alternate"></link><link href="https://eli.thegreenplace.net/feeds/debuggers.atom.xml" rel="self"></link><id>https://eli.thegreenplace.net/</id><updated>2024-05-04T19:46:23-07:00</updated><entry><title>Programmatic access to the call stack in C++</title><link href="https://eli.thegreenplace.net/2015/programmatic-access-to-the-call-stack-in-c/" rel="alternate"></link><published>2015-07-15T05:33:00-07:00</published><updated>2024-05-04T19:46:23-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2015-07-15:/2015/programmatic-access-to-the-call-stack-in-c/</id><summary type="html">&lt;p&gt;Sometimes when working on a large project, I find it useful to figure out all
+the places from which some function or method is called. Moreover, more often
+than not I don't just want the immediate caller, but the whole call stack. This
+is most useful in two scenarios - when …&lt;/p&gt;</summary><content type="html">&lt;p&gt;Sometimes when working on a large project, I find it useful to figure out all
+the places from which some function or method is called. Moreover, more often
+than not I don't just want the immediate caller, but the whole call stack. This
+is most useful in two scenarios - when debugging and when trying to figure out
+how some code works.&lt;/p&gt;
+&lt;p&gt;One possible solution is to use a debugger - run the program within a debugger,
+place a breakpoint in the interesting place, examine call stack when stopped.
+While this works and can sometimes be very useful, I personally prefer a more
+programmatic approach. I want to change the code in a way that will print
+out the call stack in every place I find interesting. Then I can use grepping
+and more sophisticated tools to analyze the call logs and thus gain a better
+understanding of the workings of some piece of code.&lt;/p&gt;
+&lt;p&gt;In this post, I want to present a relatively simple method to do this. It's
+aimed mainly at Linux, but should work with little modification on other Unixes
+(including OS X).&lt;/p&gt;
+&lt;div class="section" id="obtaining-the-backtrace-libunwind"&gt;
+&lt;h2&gt;Obtaining the backtrace - libunwind&lt;/h2&gt;
+&lt;p&gt;I'm aware of three reasonably well-known methods of accessing the call stack
+programmatically:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;The gcc builtin macro &lt;tt class="docutils literal"&gt;__builtin_return_address&lt;/tt&gt;: very crude, low-level
+approach. This obtains the return address of the function on each frame on
+the stack. Note: just the address, not the function name. So extra processing
+is required to obtain the function name.&lt;/li&gt;
+&lt;li&gt;glibc's &lt;tt class="docutils literal"&gt;backtrace&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;backtrace_symbols&lt;/tt&gt;: can obtain the actual symbol
+names for the functions on the call stack.&lt;/li&gt;
+&lt;li&gt;&lt;tt class="docutils literal"&gt;libunwind&lt;/tt&gt;&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;Between the three, I strongly prefer &lt;tt class="docutils literal"&gt;libunwind&lt;/tt&gt;, as it's the most modern,
+widespread and portable solution. It's also more flexible than &lt;tt class="docutils literal"&gt;backtrace&lt;/tt&gt;,
+being able to provide extra information such as values of CPU registers at each
+stack frame.&lt;/p&gt;
+&lt;p&gt;Moreover, in the zoo of system programming, &lt;tt class="docutils literal"&gt;libunwind&lt;/tt&gt; is the closest to the
+&amp;quot;official word&amp;quot; you can get these days. For example, gcc can use &lt;tt class="docutils literal"&gt;libunwind&lt;/tt&gt;
+for implementing zero-cost C++ exceptions (which requires stack unwinding when
+an exception is actually thrown) &lt;a class="footnote-reference" href="#footnote-1" id="footnote-reference-1"&gt;[1]&lt;/a&gt;. LLVM also has a re-implementation of the
+&lt;tt class="docutils literal"&gt;libunwind&lt;/tt&gt; interface in &lt;a class="reference external" href="http://libcxx.llvm.org"&gt;libc++&lt;/a&gt;, which is used for
+unwinding in LLVM toolchains based on this library.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="code-sample"&gt;
+&lt;h2&gt;Code sample&lt;/h2&gt;
+&lt;p&gt;Here's a complete code sample for using &lt;tt class="docutils literal"&gt;libunwind&lt;/tt&gt; to obtain the backtrace
+from an arbitrary point in the execution of a program. Refer to the &lt;a class="reference external" href="http://www.nongnu.org/libunwind/docs.html"&gt;libunwind
+documentation&lt;/a&gt; for more details
+about the API functions invoked here:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="cp"&gt;#define UNW_LOCAL_ONLY&lt;/span&gt;
+&lt;span class="cp"&gt;#include&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="cpf"&gt;&amp;lt;libunwind.h&amp;gt;&lt;/span&gt;&lt;span class="cp"&gt;&lt;/span&gt;
+&lt;span class="cp"&gt;#include&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="cpf"&gt;&amp;lt;stdio.h&amp;gt;&lt;/span&gt;&lt;span class="cp"&gt;&lt;/span&gt;
+
+&lt;span class="c1"&gt;// Call this function to get a backtrace.&lt;/span&gt;
+&lt;span class="kt"&gt;void&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nf"&gt;backtrace&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;unw_cursor_t&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;cursor&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;unw_context_t&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;context&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="c1"&gt;// Initialize cursor to current frame for local unwinding.&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;unw_getcontext&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;context&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;unw_init_local&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;cursor&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;context&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="c1"&gt;// Unwind frames one by one, going up the frame stack.&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="k"&gt;while&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;unw_step&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;cursor&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;unw_word_t&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;offset&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;pc&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;unw_get_reg&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;cursor&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;UNW_REG_IP&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;pc&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;pc&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;==&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="k"&gt;break&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;printf&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;0x%lx:&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;pc&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="kt"&gt;char&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;sym&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;256&lt;/span&gt;&lt;span class="p"&gt;];&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;unw_get_proc_name&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;cursor&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;sym&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;sizeof&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;sym&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;offset&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;==&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="n"&gt;printf&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot; (%s+0x%lx)&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;sym&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;offset&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;else&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="n"&gt;printf&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot; -- error: unable to obtain symbol name for this frame&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="kt"&gt;void&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nf"&gt;foo&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;backtrace&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// &amp;lt;-------- backtrace here!&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="kt"&gt;void&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nf"&gt;bar&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;foo&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="kt"&gt;int&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nf"&gt;main&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;argc&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kt"&gt;char&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;**&lt;/span&gt;&lt;span class="n"&gt;argv&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;bar&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;tt class="docutils literal"&gt;libunwind&lt;/tt&gt; is easy to install from source or as a package. I just built it
+from source with the usual &lt;tt class="docutils literal"&gt;configure&lt;/tt&gt;, &lt;tt class="docutils literal"&gt;make&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;make install&lt;/tt&gt; sequence
+and placed it into &lt;tt class="docutils literal"&gt;/usr/local/lib&lt;/tt&gt;.&lt;/p&gt;
+&lt;p&gt;Once you have &lt;tt class="docutils literal"&gt;libunwind&lt;/tt&gt; installed in a place the compiler can find &lt;a class="footnote-reference" href="#footnote-2" id="footnote-reference-2"&gt;[2]&lt;/a&gt;,
+compile the code snippet with:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;gcc -o libunwind_backtrace -Wall -g libunwind_backtrace.c -lunwind
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Finally, run:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ LD_LIBRARY_PATH=/usr/local/lib ./libunwind_backtrace
+0x400958: (foo+0xe)
+0x400968: (bar+0xe)
+0x400983: (main+0x19)
+0x7f6046b99ec5: (__libc_start_main+0xf5)
+0x400779: (_start+0x29)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;So we get the complete call stack at the point where &lt;tt class="docutils literal"&gt;backtrace&lt;/tt&gt; is called. We
+can obtain the function symbol names and the address of the instruction where
+the call was made (more precisely, the return address which is the next
+instruction).&lt;/p&gt;
+&lt;p&gt;Sometimes, however, we want not only the caller's name, but also the call
+location (source file name + line number). This is useful when one function
+calls another from multiple locations and we want to pinpoint which one is
+actually part of a given call stack. &lt;tt class="docutils literal"&gt;libunwind&lt;/tt&gt; gives us the call address,
+but nothing beyond. Fortunately, it's all in the DWARF information of the
+binary, and given the address we can extract the exact call location in a number
+of ways. The simplest is probably to call &lt;tt class="docutils literal"&gt;addr2line&lt;/tt&gt;:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ addr2line 0x400968 -e libunwind_backtrace
+libunwind_backtrace.c:37
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;We pass the PC address to the left of the &lt;tt class="docutils literal"&gt;bar&lt;/tt&gt; frame to &lt;tt class="docutils literal"&gt;addr2line&lt;/tt&gt; and
+get the file name and line number.&lt;/p&gt;
+&lt;p&gt;Alternatively, we can use the &lt;a class="reference external" href="https://github.com/eliben/pyelftools/blob/main/examples/dwarf_decode_address.py"&gt;dwarf_decode_address example&lt;/a&gt;
+from pyelftools to obtain the same information:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ python &amp;lt;path&amp;gt;/dwarf_decode_address.py 0x400968 libunwind_backtrace
+Processing file: libunwind_backtrace
+Function: bar
+File: libunwind_backtrace.c
+Line: 37
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;If printing out the exact locations is important for you during the backtrace
+call, you can also go fully programmatic by using &lt;tt class="docutils literal"&gt;libdwarf&lt;/tt&gt; to open the
+executable and read this information from it, in the &lt;tt class="docutils literal"&gt;backtrace&lt;/tt&gt; call. There's
+a section and a code sample about a very similar task in &lt;a class="reference external" href="https://eli.thegreenplace.net/2011/02/07/how-debuggers-work-part-3-debugging-information"&gt;my blog post on
+debuggers&lt;/a&gt;.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="c-and-mangled-function-names"&gt;
+&lt;h2&gt;C++ and mangled function names&lt;/h2&gt;
+&lt;p&gt;The code sample above works well, but these days one is most likely writing C++
+code and not C, so there's a slight problem. In C++, names of functions and
+methods are &lt;a class="reference external" href="https://en.wikipedia.org/wiki/Name_mangling"&gt;mangled&lt;/a&gt;. This is
+essential to make C++ features like function overloading, namespaces and
+templates work. Let's say the actual call sequence is:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="k"&gt;namespace&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nn"&gt;ns&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="k"&gt;template&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="k"&gt;typename&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nc"&gt;T&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;typename&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nc"&gt;U&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="kt"&gt;void&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;foo&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;T&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;t&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;U&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;u&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;backtrace&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// &amp;lt;-------- backtrace here!&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="c1"&gt;// namespace ns&lt;/span&gt;
+
+&lt;span class="k"&gt;template&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="k"&gt;typename&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nc"&gt;T&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="k"&gt;struct&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nc"&gt;Klass&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;T&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;t&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="kt"&gt;void&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nf"&gt;bar&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;ns&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="n"&gt;foo&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;t&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nb"&gt;true&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="kt"&gt;int&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nf"&gt;main&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;argc&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kt"&gt;char&lt;/span&gt;&lt;span class="o"&gt;**&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;argv&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;Klass&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="kt"&gt;double&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;k&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;k&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;bar&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The backtrace printed will then be:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;0x400b3d: (_ZN2ns3fooIdbEEvT_T0_+0x17)
+0x400b24: (_ZN5KlassIdE3barEv+0x26)
+0x400af6: (main+0x1b)
+0x7fc02c0c4ec5: (__libc_start_main+0xf5)
+0x4008b9: (_start+0x29)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Oops, that's not nice. While some seasoned C++ veterans can usually make sense
+of simple mangled names (kinda like system programmers who can read text from
+hex ASCII), when the code is heavily templated this can get ugly very
+quickly.&lt;/p&gt;
+&lt;p&gt;One solution is to use a command-line tool - &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;c++filt&lt;/span&gt;&lt;/tt&gt;:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ c++filt _ZN2ns3fooIdbEEvT_T0_
+void ns::foo&amp;lt;double, bool&amp;gt;(double, bool)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;However, it would be nicer if our backtrace dumper would print the demangled
+name directly. Luckily, this is pretty easy to do, using the &lt;tt class="docutils literal"&gt;cxxabi.h&lt;/tt&gt; API
+that's part of libstdc++ (more precisely, libsupc++). libc++ also provides it in
+the low-level &lt;a class="reference external" href="http://libcxxabi.llvm.org/"&gt;libc++abi&lt;/a&gt;. All we need to do is
+call &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;abi::__cxa_demangle&lt;/span&gt;&lt;/tt&gt;. Here's a complete example:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;&lt;span class="cp"&gt;#define UNW_LOCAL_ONLY&lt;/span&gt;
+&lt;span class="cp"&gt;#include&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="cpf"&gt;&amp;lt;cxxabi.h&amp;gt;&lt;/span&gt;&lt;span class="cp"&gt;&lt;/span&gt;
+&lt;span class="cp"&gt;#include&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="cpf"&gt;&amp;lt;libunwind.h&amp;gt;&lt;/span&gt;&lt;span class="cp"&gt;&lt;/span&gt;
+&lt;span class="cp"&gt;#include&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="cpf"&gt;&amp;lt;cstdio&amp;gt;&lt;/span&gt;&lt;span class="cp"&gt;&lt;/span&gt;
+&lt;span class="cp"&gt;#include&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="cpf"&gt;&amp;lt;cstdlib&amp;gt;&lt;/span&gt;&lt;span class="cp"&gt;&lt;/span&gt;
+
+&lt;span class="kt"&gt;void&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nf"&gt;backtrace&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;unw_cursor_t&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;cursor&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;unw_context_t&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;context&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="c1"&gt;// Initialize cursor to current frame for local unwinding.&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;unw_getcontext&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;context&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;unw_init_local&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;cursor&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;context&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="c1"&gt;// Unwind frames one by one, going up the frame stack.&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="k"&gt;while&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;unw_step&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;cursor&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;unw_word_t&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;offset&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;pc&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;unw_get_reg&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;cursor&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;UNW_REG_IP&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;pc&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;pc&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;==&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="k"&gt;break&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;std&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="n"&gt;printf&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;0x%lx:&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;pc&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="kt"&gt;char&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;sym&lt;/span&gt;&lt;span class="p"&gt;[&lt;/span&gt;&lt;span class="mi"&gt;256&lt;/span&gt;&lt;span class="p"&gt;];&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;unw_get_proc_name&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;cursor&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;sym&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;sizeof&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;sym&lt;/span&gt;&lt;span class="p"&gt;),&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;offset&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;==&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="kt"&gt;char&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;nameptr&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;sym&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;status&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="kt"&gt;char&lt;/span&gt;&lt;span class="o"&gt;*&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;demangled&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;abi&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="n"&gt;__cxa_demangle&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;sym&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;nullptr&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;nullptr&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;amp;&lt;/span&gt;&lt;span class="n"&gt;status&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="k"&gt;if&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;status&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;==&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;        &lt;/span&gt;&lt;span class="n"&gt;nameptr&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;=&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;demangled&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="n"&gt;std&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="n"&gt;printf&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot; (%s+0x%lx)&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;nameptr&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;offset&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="n"&gt;std&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="n"&gt;free&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;demangled&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;else&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;      &lt;/span&gt;&lt;span class="n"&gt;std&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="n"&gt;printf&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="s"&gt;&amp;quot; -- error: unable to obtain symbol name for this frame&lt;/span&gt;&lt;span class="se"&gt;\n&lt;/span&gt;&lt;span class="s"&gt;&amp;quot;&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="k"&gt;namespace&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nn"&gt;ns&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="k"&gt;template&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="k"&gt;typename&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nc"&gt;T&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="k"&gt;typename&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nc"&gt;U&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="kt"&gt;void&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;foo&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;T&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;t&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;U&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;u&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;backtrace&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="c1"&gt;// &amp;lt;-------- backtrace here!&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="c1"&gt;// namespace ns&lt;/span&gt;
+
+&lt;span class="k"&gt;template&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="k"&gt;typename&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nc"&gt;T&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="k"&gt;struct&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nc"&gt;Klass&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;T&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;t&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="kt"&gt;void&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nf"&gt;bar&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;    &lt;/span&gt;&lt;span class="n"&gt;ns&lt;/span&gt;&lt;span class="o"&gt;::&lt;/span&gt;&lt;span class="n"&gt;foo&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;t&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nb"&gt;true&lt;/span&gt;&lt;span class="p"&gt;);&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;};&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="kt"&gt;int&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="nf"&gt;main&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="kt"&gt;int&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;argc&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="kt"&gt;char&lt;/span&gt;&lt;span class="o"&gt;**&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;argv&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="p"&gt;{&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;Klass&lt;/span&gt;&lt;span class="o"&gt;&amp;lt;&lt;/span&gt;&lt;span class="kt"&gt;double&lt;/span&gt;&lt;span class="o"&gt;&amp;gt;&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="n"&gt;k&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="n"&gt;k&lt;/span&gt;&lt;span class="p"&gt;.&lt;/span&gt;&lt;span class="n"&gt;bar&lt;/span&gt;&lt;span class="p"&gt;();&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+
+&lt;span class="w"&gt;  &lt;/span&gt;&lt;span class="k"&gt;return&lt;/span&gt;&lt;span class="w"&gt; &lt;/span&gt;&lt;span class="mi"&gt;0&lt;/span&gt;&lt;span class="p"&gt;;&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;span class="p"&gt;}&lt;/span&gt;&lt;span class="w"&gt;&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;This time, the backtrace is printed with all names nicely demangled:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span&gt;&lt;/span&gt;$ LD_LIBRARY_PATH=/usr/local/lib ./libunwind_backtrace_demangle
+0x400b59: (void ns::foo&amp;lt;double, bool&amp;gt;(double, bool)+0x17)
+0x400b40: (Klass&amp;lt;double&amp;gt;::bar()+0x26)
+0x400b12: (main+0x1b)
+0x7f6337475ec5: (__libc_start_main+0xf5)
+0x4008b9: (_start+0x29)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;hr class="docutils" /&gt;
+&lt;table class="docutils footnote" frame="void" id="footnote-1" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#footnote-reference-1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;AFAIK, gcc indeed uses &lt;tt class="docutils literal"&gt;libunwind&lt;/tt&gt; by default on some architectures,
+though it uses an alternative unwinder on others. Please correct me if
+I'm missing something here.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="footnote-2" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#footnote-reference-2"&gt;[2]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;If your &lt;tt class="docutils literal"&gt;libunwind&lt;/tt&gt; is in a non-standard location, you'll need to
+provide additional &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;-I&lt;/span&gt;&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;-L&lt;/span&gt;&lt;/tt&gt; flags.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;/div&gt;
+</content><category term="misc"></category><category term="Debuggers"></category><category term="C &amp; C++"></category></entry><entry><title>The contents of DWARF sections</title><link href="https://eli.thegreenplace.net/2011/12/26/the-contents-of-dwarf-sections" rel="alternate"></link><published>2011-12-26T05:30:29-08:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2011-12-26:/2011/12/26/the-contents-of-dwarf-sections</id><summary type="html">
+        &lt;p&gt;The best short introduction to the DWARF format available online is &lt;a class="reference external" href="http://www.dwarfstd.org/doc/Debugging%20using%20DWARF.pdf"&gt;this PDF&lt;/a&gt; by Michael J. Eager. It's hosted on the &lt;a class="reference external" href="http://www.dwarfstd.org"&gt;http://www.dwarfstd.org&lt;/a&gt; page and also pointed to by the Wikipedia entry on DWARF. While certainly a well-written paper that serves as a solid introduction to DWARF, it …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;The best short introduction to the DWARF format available online is &lt;a class="reference external" href="http://www.dwarfstd.org/doc/Debugging%20using%20DWARF.pdf"&gt;this PDF&lt;/a&gt; by Michael J. Eager. It's hosted on the &lt;a class="reference external" href="http://www.dwarfstd.org"&gt;http://www.dwarfstd.org&lt;/a&gt; page and also pointed to by the Wikipedia entry on DWARF. While certainly a well-written paper that serves as a solid introduction to DWARF, it unfortunately contains some errors in the final table which summarizes all DWARF sections in an ELF file, with their contents.&lt;/p&gt;
+&lt;p&gt;For reference, here are the correct descriptions. The sections are sorted in alphabetic order:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;&lt;tt class="docutils literal"&gt;.debug_abbrev&lt;/tt&gt; - Abbreviations used in the &lt;tt class="docutils literal"&gt;.debug_info&lt;/tt&gt; section&lt;/li&gt;
+&lt;li&gt;&lt;tt class="docutils literal"&gt;.debug_aranges&lt;/tt&gt; - Lookup table for mapping addresses to compilation units&lt;/li&gt;
+&lt;li&gt;&lt;tt class="docutils literal"&gt;.debug_frame&lt;/tt&gt; - Call frame information&lt;/li&gt;
+&lt;li&gt;&lt;tt class="docutils literal"&gt;.debug_info&lt;/tt&gt; - The core DWARF information section&lt;/li&gt;
+&lt;li&gt;&lt;tt class="docutils literal"&gt;.debug_line&lt;/tt&gt; - Line number information&lt;/li&gt;
+&lt;li&gt;&lt;tt class="docutils literal"&gt;.debug_loc&lt;/tt&gt; - Location lists used in &lt;tt class="docutils literal"&gt;DW_AT_location&lt;/tt&gt; attributes&lt;/li&gt;
+&lt;li&gt;&lt;tt class="docutils literal"&gt;.debug_macinfo&lt;/tt&gt; - Macro information&lt;/li&gt;
+&lt;li&gt;&lt;tt class="docutils literal"&gt;.debug_pubnames&lt;/tt&gt; - Lookup table for mapping object and function names to compilation units&lt;/li&gt;
+&lt;li&gt;&lt;tt class="docutils literal"&gt;.debug_pubtypes&lt;/tt&gt; - Lookup table for mapping type names to compilation units&lt;/li&gt;
+&lt;li&gt;&lt;tt class="docutils literal"&gt;.debug_ranges&lt;/tt&gt; - Address ranges used in &lt;tt class="docutils literal"&gt;DW_AT_ranges&lt;/tt&gt; attributes&lt;/li&gt;
+&lt;li&gt;&lt;tt class="docutils literal"&gt;.debug_str&lt;/tt&gt; - String table used in &lt;tt class="docutils literal"&gt;.debug_info&lt;/tt&gt;&lt;/li&gt;
+&lt;/ul&gt;
+
+    </content><category term="misc"></category><category term="Debuggers"></category></entry><entry><title>An interesting tree serialization algorithm from DWARF</title><link href="https://eli.thegreenplace.net/2011/09/29/an-interesting-tree-serialization-algorithm-from-dwarf" rel="alternate"></link><published>2011-09-29T06:41:23-07:00</published><updated>2022-10-04T14:08:24-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2011-09-29:/2011/09/29/an-interesting-tree-serialization-algorithm-from-dwarf</id><summary type="html">
+        &lt;p&gt;There are several techniques available for serializing trees. In this post I want to present one interesting technique I recently ran into, in the context of the &lt;a class="reference external" href="http://dwarfstd.org/"&gt;DWARF&lt;/a&gt; debugging information format &lt;a class="footnote-reference" href="#id3" id="id1"&gt;[1]&lt;/a&gt;. It allows serializing generic N-ary trees (where each node can have any number of children) into a linear …&lt;/p&gt;</summary><content type="html">
+        &lt;p&gt;There are several techniques available for serializing trees. In this post I want to present one interesting technique I recently ran into, in the context of the &lt;a class="reference external" href="http://dwarfstd.org/"&gt;DWARF&lt;/a&gt; debugging information format &lt;a class="footnote-reference" href="#id3" id="id1"&gt;[1]&lt;/a&gt;. It allows serializing generic N-ary trees (where each node can have any number of children) into a linear data structure suitable for storage or tramsmission.&lt;/p&gt;
+&lt;p&gt;First, let's define the data structures involved. I will use Python code to demonstrate the algorithm, so a simplistic tree node would be:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;class&lt;/span&gt; &lt;span style="color: #00007f"&gt;TreeNode&lt;/span&gt;(&lt;span style="color: #00007f"&gt;object&lt;/span&gt;):
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;__init__&lt;/span&gt;(&lt;span style="color: #00007f"&gt;self&lt;/span&gt;, data):
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.data = data
+        &lt;span style="color: #00007f"&gt;self&lt;/span&gt;.children = []
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;&lt;tt class="docutils literal"&gt;children&lt;/tt&gt; is a list of other &lt;tt class="docutils literal"&gt;TreeNode&lt;/tt&gt; objects, which makes each node the root of a sub-tree that can be traversed.&lt;/p&gt;
+&lt;p&gt;Now let's build an actual tree which we're going to use for demonstration purposes:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;tree = {}
+&lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; n &lt;span style="color: #0000aa"&gt;in&lt;/span&gt; &lt;span style="color: #7f007f"&gt;&amp;#39;ABCDEFGXY&amp;#39;&lt;/span&gt;:
+    tree[n] = TreeNode(n)
+
+tree[&lt;span style="color: #7f007f"&gt;&amp;#39;A&amp;#39;&lt;/span&gt;].children = [tree[&lt;span style="color: #7f007f"&gt;&amp;#39;B&amp;#39;&lt;/span&gt;], tree[&lt;span style="color: #7f007f"&gt;&amp;#39;C&amp;#39;&lt;/span&gt;], tree[&lt;span style="color: #7f007f"&gt;&amp;#39;D&amp;#39;&lt;/span&gt;]]
+tree[&lt;span style="color: #7f007f"&gt;&amp;#39;B&amp;#39;&lt;/span&gt;].children = [tree[&lt;span style="color: #7f007f"&gt;&amp;#39;E&amp;#39;&lt;/span&gt;], tree[&lt;span style="color: #7f007f"&gt;&amp;#39;F&amp;#39;&lt;/span&gt;]]
+tree[&lt;span style="color: #7f007f"&gt;&amp;#39;F&amp;#39;&lt;/span&gt;].children = [tree[&lt;span style="color: #7f007f"&gt;&amp;#39;G&amp;#39;&lt;/span&gt;]]
+tree[&lt;span style="color: #7f007f"&gt;&amp;#39;D&amp;#39;&lt;/span&gt;].children = [tree[&lt;span style="color: #7f007f"&gt;&amp;#39;X&amp;#39;&lt;/span&gt;], tree[&lt;span style="color: #7f007f"&gt;&amp;#39;Y&amp;#39;&lt;/span&gt;]]
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Here's how it looks &lt;a class="footnote-reference" href="#id4" id="id2"&gt;[2]&lt;/a&gt;:&lt;/p&gt;
+&lt;img class="align-center" src="https://eli.thegreenplace.net/images/2011/09/tree1.png" /&gt;
+&lt;p&gt;So how is a tree serialized?&lt;/p&gt;
+&lt;p&gt;Here's a quote from the DWARF v3 standard section 2.3 explaining it, slightly rephrased:&lt;/p&gt;
+&lt;blockquote&gt;
+The tree itself is represented by flattening it in prefix order. Each node is defined either to have children or not to have children. If a node is defined not to have children, the next physically succeeding node is a sibling. If a node is defined to have children, the next physically succeeding node is its first child. Additional children are represented as siblings of the first child. A chain of sibling entries is terminated by a null node.&lt;/blockquote&gt;
+&lt;p&gt;After a couple of minutes of thought it should become obvious that this indeed creates a serialized representation that is reversible. For my Python code, the serialized representation is going to be a list of &amp;quot;entries&amp;quot;, each entry being either &lt;tt class="docutils literal"&gt;None&lt;/tt&gt; (to specify the &amp;quot;null node&amp;quot; from the description above), or a pair of &lt;tt class="docutils literal"&gt;(data, has_children_flag)&lt;/tt&gt;, with &lt;tt class="docutils literal"&gt;data&lt;/tt&gt; being the tree node data, and &lt;tt class="docutils literal"&gt;has_children_flag&lt;/tt&gt; a boolean specifying whether this node has children. So for the tree depicted above, the serialized representation is:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;A,True
+B,True
+E,False
+F,True
+G,False
+None
+None
+C,False
+D,True
+X,False
+Y,False
+None
+None
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The algorithms for serializing a tree into this representation and deserializing it back are charmingly simple. Here they are, with Python (as usual) serving as pseudo-code as well as the implementation.&lt;/p&gt;
+&lt;p&gt;First, &lt;strong&gt;serialization&lt;/strong&gt;. The main idea is to walk the tree recursively in pre-order (first visiting a node, then its children in order), while populating the serialized list which exists outside the recursive visitor:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;serialize_tree&lt;/span&gt;(root_node):
+    &lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot; Given a tree root node (some object with a &amp;#39;data&amp;#39; attribute&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        and a &amp;#39;children&amp;#39; attribute which is a list of child nodes),&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        serialize it to a list, each element of which is either a&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        pair (data, has_children_flag), or None (which signals an&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        end of a sibling chain).&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;    &amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+    lst = []
+    &lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;serialize_aux&lt;/span&gt;(node):
+        &lt;span style="color: #007f00"&gt;# Recursive visitor function&lt;/span&gt;
+        &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; &lt;span style="color: #00007f"&gt;len&lt;/span&gt;(node.children) &amp;gt; &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;:
+            &lt;span style="color: #007f00"&gt;# The node has children, so:&lt;/span&gt;
+            &lt;span style="color: #007f00"&gt;#  1. add it to the list &amp;amp; mark that it has children&lt;/span&gt;
+            &lt;span style="color: #007f00"&gt;#  2. recursively serialize its children&lt;/span&gt;
+            &lt;span style="color: #007f00"&gt;#  3. finally add a null entry to signal that the children&lt;/span&gt;
+            &lt;span style="color: #007f00"&gt;#     of this node have ended&lt;/span&gt;
+            lst.append((node.data, &lt;span style="color: #00007f"&gt;True&lt;/span&gt;))
+            &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; child &lt;span style="color: #0000aa"&gt;in&lt;/span&gt; node.children:
+                serialize_aux(child)
+            lst.append(&lt;span style="color: #00007f"&gt;None&lt;/span&gt;)
+        &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt;:
+            &lt;span style="color: #007f00"&gt;# The node is child-less, so simply add it to&lt;/span&gt;
+            &lt;span style="color: #007f00"&gt;# the list &amp;amp; mark that it has no chilren&lt;/span&gt;
+            lst.append((node.data, &lt;span style="color: #00007f"&gt;False&lt;/span&gt;))
+    serialize_aux(root_node)
+    &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; lst
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;And now &lt;strong&gt;deserialization&lt;/strong&gt;. It uses a stack of &amp;quot;parents&amp;quot; to collect the nodes into a tree hierarchy. At each step in the loop the invariant is that the node at the top of the stack is the parent node to which nodes have to be added. When an entry with children is encountered, a new node is pushed on top of the stack. When a null entry is encountered, it means the end of children for the current parent, so it's popped off the stack:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;def&lt;/span&gt; &lt;span style="color: #00007f"&gt;deserialize_tree&lt;/span&gt;(nodelist):
+    &lt;span style="color: #7f007f"&gt;&amp;quot;&amp;quot;&amp;quot; Expects a node list of the form created by serialize_tree.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        Each entry in the list is either None or a pair of the form&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        (data, has_children_flag).&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;        Reconstruct the tree back from it and return its root node.&lt;/span&gt;
+&lt;span style="color: #7f007f"&gt;    &amp;quot;&amp;quot;&amp;quot;&lt;/span&gt;
+    &lt;span style="color: #007f00"&gt;# The first item in the nodelist represents the tree root&lt;/span&gt;
+    root = TreeNode(nodelist[&lt;span style="color: #007f7f"&gt;0&lt;/span&gt;][&lt;span style="color: #007f7f"&gt;0&lt;/span&gt;])
+    parentstack = [root]
+    &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; item &lt;span style="color: #0000aa"&gt;in&lt;/span&gt; nodelist[&lt;span style="color: #007f7f"&gt;1&lt;/span&gt;:]:
+        &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; item &lt;span style="color: #0000aa"&gt;is&lt;/span&gt; &lt;span style="color: #0000aa"&gt;not&lt;/span&gt; &lt;span style="color: #00007f"&gt;None&lt;/span&gt;:
+            &lt;span style="color: #007f00"&gt;# This node is added to the list of children of the current&lt;/span&gt;
+            &lt;span style="color: #007f00"&gt;# parent.&lt;/span&gt;
+            node = TreeNode(item[&lt;span style="color: #007f7f"&gt;0&lt;/span&gt;])
+            parentstack[-&lt;span style="color: #007f7f"&gt;1&lt;/span&gt;].children.append(node)
+            &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; item[&lt;span style="color: #007f7f"&gt;1&lt;/span&gt;]: &lt;span style="color: #007f00"&gt;# has children?&lt;/span&gt;
+                parentstack.append(node)
+        &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt;:
+            &lt;span style="color: #007f00"&gt;# end of children for current parent&lt;/span&gt;
+            parentstack.pop()
+    &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; root
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The DWARF spec just mentions the serialization format (the quote I pasted above) - it doesn't say how to implement it. If you can think of a simpler algorithm to implement this (de)serialization scheme, please let me know.&lt;/p&gt;
+&lt;img class="align-center" src="https://eli.thegreenplace.net/images/hline.jpg" style="width: 320px; height: 5px;" /&gt;
+&lt;table class="docutils footnote" frame="void" id="id3" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;In DWARF this scheme is used to serialize a tree of DIEs (Debugging Information Entries) into the &lt;tt class="docutils literal"&gt;.debug_info&lt;/tt&gt; section.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id4" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id2"&gt;[2]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;You may be wondering how this image was generated. I've used the excellent Google Visualization API to draw it, with the &amp;quot;orgchart&amp;quot; package. It's simple to write a bit of Python code that automatically generates the data table given a root of the tree. The visualization API renders the image onto a HTML canvas with Javascript. I then took a screenshot and converted the result to a PNG that's displayed here.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+
+    </content><category term="misc"></category><category term="Debuggers"></category><category term="Programming"></category><category term="Python"></category></entry><entry><title>How debuggers work: Part 3 - Debugging information</title><link href="https://eli.thegreenplace.net/2011/02/07/how-debuggers-work-part-3-debugging-information" rel="alternate"></link><published>2011-02-07T19:02:37-08:00</published><updated>2024-05-04T19:46:23-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2011-02-07:/2011/02/07/how-debuggers-work-part-3-debugging-information</id><summary type="html">
+        &lt;p&gt;This is the third part in a series of articles on how debuggers work. Make sure you read &lt;a class="reference external" href="https://eli.thegreenplace.net/2011/01/23/how-debuggers-work-part-1/"&gt;the first&lt;/a&gt; and &lt;a class="reference external" href="https://eli.thegreenplace.net/2011/01/27/how-debuggers-work-part-2-breakpoints/"&gt;the second&lt;/a&gt; parts before this one.&lt;/p&gt;
+&lt;div class="section" id="in-this-part"&gt;
+&lt;h3&gt;In this part&lt;/h3&gt;
+&lt;p&gt;I'm going to explain how the debugger figures out where to find the C functions and variables in the machine …&lt;/p&gt;&lt;/div&gt;</summary><content type="html">
+        &lt;p&gt;This is the third part in a series of articles on how debuggers work. Make sure you read &lt;a class="reference external" href="https://eli.thegreenplace.net/2011/01/23/how-debuggers-work-part-1/"&gt;the first&lt;/a&gt; and &lt;a class="reference external" href="https://eli.thegreenplace.net/2011/01/27/how-debuggers-work-part-2-breakpoints/"&gt;the second&lt;/a&gt; parts before this one.&lt;/p&gt;
+&lt;div class="section" id="in-this-part"&gt;
+&lt;h3&gt;In this part&lt;/h3&gt;
+&lt;p&gt;I'm going to explain how the debugger figures out where to find the C functions and variables in the machine code it wades through, and the data it uses to map between C source code lines and machine language words.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="debugging-information"&gt;
+&lt;h3&gt;Debugging information&lt;/h3&gt;
+&lt;p&gt;Modern compilers do a pretty good job converting your high-level code, with its nicely indented and nested control structures and arbitrarily typed variables into a big pile of bits called machine code, the sole purpose of which is to run as fast as possible on the target CPU. Most  lines of C get converted into several machine code instructions. Variables are shoved all over the place - into the stack, into registers, or completely optimized away. Structures and objects don't even &lt;em&gt;exist&lt;/em&gt; in the resulting code - they're merely an abstraction that gets translated to hard-coded offsets into memory buffers.&lt;/p&gt;
+&lt;p&gt;So how does a debugger know where to stop when you ask it to break at the entry to some function? How does it manage to find what to show you when you ask it for the value of a variable? The answer is - debugging information.&lt;/p&gt;
+&lt;p&gt;Debugging information is generated by the compiler together with the machine code. It is a representation of the relationship between the executable program and the original source code. This information is encoded into a pre-defined format and stored alongside the machine code. Many such formats were invented over the years for different platforms and executable files. Since the aim of this article isn't to survey the history of these formats, but rather to show how they work, we'll have to settle on something. This something is going to be DWARF, which is almost ubiquitously used today as the debugging information format for ELF executables on Linux and other Unix-y platforms.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="the-dwarf-in-the-elf"&gt;
+&lt;h3&gt;The DWARF in the ELF&lt;/h3&gt;
+&lt;div align="center" class="align-center"&gt;&lt;img class="align-center" src="https://eli.thegreenplace.net/images/2011/02/dwarf_logo.gif" /&gt;&lt;/div&gt;
+&lt;p&gt;According to &lt;a class="reference external" href="http://en.wikipedia.org/wiki/DWARF"&gt;its Wikipedia page&lt;/a&gt;, DWARF was designed alongside ELF, although it can in theory be embedded in other object file formats as well &lt;a class="footnote-reference" href="#id7" id="id1"&gt;[1]&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;DWARF is a complex format, building on many years of experience with previous formats for various architectures and operating systems. It has to be complex, since it solves a very tricky problem - presenting debugging information from any high-level language to debuggers, providing support for arbitrary platforms and ABIs. It would take much more than this humble article to explain it fully, and to be honest I don't understand all its dark corners well enough to engage in such an endeavor anyway &lt;a class="footnote-reference" href="#id8" id="id2"&gt;[2]&lt;/a&gt;. In this article I will take a more hands-on approach, showing just enough of DWARF to explain how debugging information works in practical terms.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="debug-sections-in-elf-files"&gt;
+&lt;h3&gt;Debug sections in ELF files&lt;/h3&gt;
+&lt;p&gt;First let's take a glimpse of where the DWARF info is placed inside ELF files. ELF defines arbitrary sections that may exist in each object file. A &lt;em&gt;section header table&lt;/em&gt; defines which sections exist and their names. Different tools treat various sections in special ways - for example the linker is looking for some sections, the debugger for others.&lt;/p&gt;
+&lt;p&gt;We'll be using an executable built from this C source for our experiments in this article, compiled into &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;tracedprog2&lt;/span&gt;&lt;/tt&gt;:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span style="color: #007f00"&gt;#include &amp;lt;stdio.h&amp;gt;&lt;/span&gt;
+
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;void&lt;/span&gt; &lt;span style="color: #00007f"&gt;do_stuff&lt;/span&gt;(&lt;span style="color: #00007f; font-weight: bold"&gt;int&lt;/span&gt; my_arg)
+{
+    &lt;span style="color: #00007f; font-weight: bold"&gt;int&lt;/span&gt; my_local = my_arg + &lt;span style="color: #007f7f"&gt;2&lt;/span&gt;;
+    &lt;span style="color: #00007f; font-weight: bold"&gt;int&lt;/span&gt; i;
+
+    &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; (i = &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;; i &amp;lt; my_local; ++i)
+        printf(&lt;span style="color: #7f007f"&gt;&amp;quot;i = %d\n&amp;quot;&lt;/span&gt;, i);
+}
+
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;int&lt;/span&gt; &lt;span style="color: #00007f"&gt;main&lt;/span&gt;()
+{
+    do_stuff(&lt;span style="color: #007f7f"&gt;2&lt;/span&gt;);
+    &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;;
+}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Dumping the section headers from the ELF executable using &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;objdump&lt;/span&gt; &lt;span class="pre"&gt;-h&lt;/span&gt;&lt;/tt&gt; we'll notice several sections with names beginning with &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;.debug_&lt;/span&gt;&lt;/tt&gt; - these are the DWARF debugging sections:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;26 .debug_aranges 00000020  00000000  00000000  00001037
+                 CONTENTS, READONLY, DEBUGGING
+27 .debug_pubnames 00000028  00000000  00000000  00001057
+                 CONTENTS, READONLY, DEBUGGING
+28 .debug_info   000000cc  00000000  00000000  0000107f
+                 CONTENTS, READONLY, DEBUGGING
+29 .debug_abbrev 0000008a  00000000  00000000  0000114b
+                 CONTENTS, READONLY, DEBUGGING
+30 .debug_line   0000006b  00000000  00000000  000011d5
+                 CONTENTS, READONLY, DEBUGGING
+31 .debug_frame  00000044  00000000  00000000  00001240
+                 CONTENTS, READONLY, DEBUGGING
+32 .debug_str    000000ae  00000000  00000000  00001284
+                 CONTENTS, READONLY, DEBUGGING
+33 .debug_loc    00000058  00000000  00000000  00001332
+                 CONTENTS, READONLY, DEBUGGING
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The first number seen for each section here is its size, and the last is the offset where it begins in the ELF file. The debugger uses this information to read the section from the executable.&lt;/p&gt;
+&lt;p&gt;Now let's see a few practical examples of finding useful debug information in DWARF.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="finding-functions"&gt;
+&lt;h3&gt;Finding functions&lt;/h3&gt;
+&lt;p&gt;One of the most basic things we want to do when debugging is placing breakpoints at some function, expecting the debugger to break right at its entrance. To be able to perform this feat, the debugger must have some mapping between a function name in the high-level code and the address in the machine code where the instructions for this function begin.&lt;/p&gt;
+&lt;p&gt;This information can be obtained from DWARF by looking at the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;.debug_info&lt;/span&gt;&lt;/tt&gt; section. Before we go further, a bit of background. The basic descriptive entity in DWARF is called the Debugging Information Entry (DIE). Each DIE has a tag - its type, and a set of attributes. DIEs are interlinked via sibling and child links, and values of attributes can point at other DIEs.&lt;/p&gt;
+&lt;p&gt;Let's run:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;objdump --dwarf=info tracedprog2
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The output is quite long, and for this example we'll just focus on these lines &lt;a class="footnote-reference" href="#id9" id="id3"&gt;[3]&lt;/a&gt;:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&amp;lt;1&amp;gt;&amp;lt;71&amp;gt;: Abbrev Number: 5 (DW_TAG_subprogram)
+    &amp;lt;72&amp;gt;   DW_AT_external    : 1
+    &amp;lt;73&amp;gt;   DW_AT_name        : (...): do_stuff
+    &amp;lt;77&amp;gt;   DW_AT_decl_file   : 1
+    &amp;lt;78&amp;gt;   DW_AT_decl_line   : 4
+    &amp;lt;79&amp;gt;   DW_AT_prototyped  : 1
+    &amp;lt;7a&amp;gt;   DW_AT_low_pc      : 0x8048604
+    &amp;lt;7e&amp;gt;   DW_AT_high_pc     : 0x804863e
+    &amp;lt;82&amp;gt;   DW_AT_frame_base  : 0x0      (location list)
+    &amp;lt;86&amp;gt;   DW_AT_sibling     : &amp;lt;0xb3&amp;gt;
+
+&amp;lt;1&amp;gt;&amp;lt;b3&amp;gt;: Abbrev Number: 9 (DW_TAG_subprogram)
+    &amp;lt;b4&amp;gt;   DW_AT_external    : 1
+    &amp;lt;b5&amp;gt;   DW_AT_name        : (...): main
+    &amp;lt;b9&amp;gt;   DW_AT_decl_file   : 1
+    &amp;lt;ba&amp;gt;   DW_AT_decl_line   : 14
+    &amp;lt;bb&amp;gt;   DW_AT_type        : &amp;lt;0x4b&amp;gt;
+    &amp;lt;bf&amp;gt;   DW_AT_low_pc      : 0x804863e
+    &amp;lt;c3&amp;gt;   DW_AT_high_pc     : 0x804865a
+    &amp;lt;c7&amp;gt;   DW_AT_frame_base  : 0x2c     (location list)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;There are two entries (DIEs) tagged &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;DW_TAG_subprogram&lt;/span&gt;&lt;/tt&gt;, which is a function in DWARF's jargon. Note that there's an entry for &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;do_stuff&lt;/span&gt;&lt;/tt&gt; and an entry for &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;main&lt;/span&gt;&lt;/tt&gt;. There are several interesting attributes, but the one that interests us here is &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;DW_AT_low_pc&lt;/span&gt;&lt;/tt&gt;. This is the program-counter (&lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;EIP&lt;/span&gt;&lt;/tt&gt; in x86) value for the beginning of the function. Note that it's &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;0x8048604&lt;/span&gt;&lt;/tt&gt; for &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;do_stuff&lt;/span&gt;&lt;/tt&gt;. Now let's see what this address is in the disassembly of the executable by running &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;objdump&lt;/span&gt; &lt;span class="pre"&gt;-d&lt;/span&gt;&lt;/tt&gt;:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;08048604 &amp;lt;do_stuff&amp;gt;:
+ 8048604:       55           push   ebp
+ 8048605:       89 e5        mov    ebp,esp
+ 8048607:       83 ec 28     sub    esp,0x28
+ 804860a:       8b 45 08     mov    eax,DWORD PTR [ebp+0x8]
+ 804860d:       83 c0 02     add    eax,0x2
+ 8048610:       89 45 f4     mov    DWORD PTR [ebp-0xc],eax
+ 8048613:       c7 45 (...)  mov    DWORD PTR [ebp-0x10],0x0
+ 804861a:       eb 18        jmp    8048634 &amp;lt;do_stuff+0x30&amp;gt;
+ 804861c:       b8 20 (...)  mov    eax,0x8048720
+ 8048621:       8b 55 f0     mov    edx,DWORD PTR [ebp-0x10]
+ 8048624:       89 54 24 04  mov    DWORD PTR [esp+0x4],edx
+ 8048628:       89 04 24     mov    DWORD PTR [esp],eax
+ 804862b:       e8 04 (...)  call   8048534 &amp;lt;printf@plt&amp;gt;
+ 8048630:       83 45 f0 01  add    DWORD PTR [ebp-0x10],0x1
+ 8048634:       8b 45 f0     mov    eax,DWORD PTR [ebp-0x10]
+ 8048637:       3b 45 f4     cmp    eax,DWORD PTR [ebp-0xc]
+ 804863a:       7c e0        jl     804861c &amp;lt;do_stuff+0x18&amp;gt;
+ 804863c:       c9           leave
+ 804863d:       c3           ret
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Indeed, &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;0x8048604&lt;/span&gt;&lt;/tt&gt; is the beginning of &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;do_stuff&lt;/span&gt;&lt;/tt&gt;, so the debugger can have a mapping between functions and their locations in the executable.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="finding-variables"&gt;
+&lt;h3&gt;Finding variables&lt;/h3&gt;
+&lt;p&gt;Suppose that we've indeed stopped at a breakpoint inside &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;do_stuff&lt;/span&gt;&lt;/tt&gt;. We want to ask the debugger to show us the value of the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;my_local&lt;/span&gt;&lt;/tt&gt; variable. How does it know where to find it? Turns out this is much trickier than finding functions. Variables can be located in global storage, on the stack, and even in registers. Additionally, variables with the same name can have different values in different lexical scopes. The debugging information has to be able to reflect all these variations, and indeed DWARF does.&lt;/p&gt;
+&lt;p&gt;I won't cover all the possibilities, but as an example I'll demonstrate how the debugger can find &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;my_local&lt;/span&gt;&lt;/tt&gt; in &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;do_stuff&lt;/span&gt;&lt;/tt&gt;. Let's start at &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;.debug_info&lt;/span&gt;&lt;/tt&gt; and look at the entry for &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;do_stuff&lt;/span&gt;&lt;/tt&gt; again, this time also looking at a couple of its sub-entries:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&amp;lt;1&amp;gt;&amp;lt;71&amp;gt;: Abbrev Number: 5 (DW_TAG_subprogram)
+    &amp;lt;72&amp;gt;   DW_AT_external    : 1
+    &amp;lt;73&amp;gt;   DW_AT_name        : (...): do_stuff
+    &amp;lt;77&amp;gt;   DW_AT_decl_file   : 1
+    &amp;lt;78&amp;gt;   DW_AT_decl_line   : 4
+    &amp;lt;79&amp;gt;   DW_AT_prototyped  : 1
+    &amp;lt;7a&amp;gt;   DW_AT_low_pc      : 0x8048604
+    &amp;lt;7e&amp;gt;   DW_AT_high_pc     : 0x804863e
+    &amp;lt;82&amp;gt;   DW_AT_frame_base  : 0x0      (location list)
+    &amp;lt;86&amp;gt;   DW_AT_sibling     : &amp;lt;0xb3&amp;gt;
+ &amp;lt;2&amp;gt;&amp;lt;8a&amp;gt;: Abbrev Number: 6 (DW_TAG_formal_parameter)
+    &amp;lt;8b&amp;gt;   DW_AT_name        : (...): my_arg
+    &amp;lt;8f&amp;gt;   DW_AT_decl_file   : 1
+    &amp;lt;90&amp;gt;   DW_AT_decl_line   : 4
+    &amp;lt;91&amp;gt;   DW_AT_type        : &amp;lt;0x4b&amp;gt;
+    &amp;lt;95&amp;gt;   DW_AT_location    : (...)       (DW_OP_fbreg: 0)
+ &amp;lt;2&amp;gt;&amp;lt;98&amp;gt;: Abbrev Number: 7 (DW_TAG_variable)
+    &amp;lt;99&amp;gt;   DW_AT_name        : (...): my_local
+    &amp;lt;9d&amp;gt;   DW_AT_decl_file   : 1
+    &amp;lt;9e&amp;gt;   DW_AT_decl_line   : 6
+    &amp;lt;9f&amp;gt;   DW_AT_type        : &amp;lt;0x4b&amp;gt;
+    &amp;lt;a3&amp;gt;   DW_AT_location    : (...)      (DW_OP_fbreg: -20)
+&amp;lt;2&amp;gt;&amp;lt;a6&amp;gt;: Abbrev Number: 8 (DW_TAG_variable)
+    &amp;lt;a7&amp;gt;   DW_AT_name        : i
+    &amp;lt;a9&amp;gt;   DW_AT_decl_file   : 1
+    &amp;lt;aa&amp;gt;   DW_AT_decl_line   : 7
+    &amp;lt;ab&amp;gt;   DW_AT_type        : &amp;lt;0x4b&amp;gt;
+    &amp;lt;af&amp;gt;   DW_AT_location    : (...)      (DW_OP_fbreg: -24)
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Note the first number inside the angle brackets in each entry. This is the nesting level - in this example entries with &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;&amp;lt;2&amp;gt;&lt;/span&gt;&lt;/tt&gt; are children of the entry with &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;&amp;lt;1&amp;gt;&lt;/span&gt;&lt;/tt&gt;. So we know that the variable &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;my_local&lt;/span&gt;&lt;/tt&gt; (marked by the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;DW_TAG_variable&lt;/span&gt;&lt;/tt&gt; tag) is a child of the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;do_stuff&lt;/span&gt;&lt;/tt&gt; function. The debugger is also interested in a variable's type to be able to display it correctly. In the case of &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;my_local&lt;/span&gt;&lt;/tt&gt; the type points to another DIE - &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;&amp;lt;0x4b&amp;gt;&lt;/span&gt;&lt;/tt&gt;. If we look it up in the output of &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;objdump&lt;/span&gt;&lt;/tt&gt; we'll see it's a signed 4-byte integer.&lt;/p&gt;
+&lt;p&gt;To actually locate the variable in the memory image of the executing process, the debugger will look at the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;DW_AT_location&lt;/span&gt;&lt;/tt&gt; attribute. For &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;my_local&lt;/span&gt;&lt;/tt&gt; it says &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;DW_OP_fbreg:&lt;/span&gt; &lt;span class="pre"&gt;-20&lt;/span&gt;&lt;/tt&gt;. This means that the variable is stored at offset -20 from the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;DW_AT_frame_base&lt;/span&gt;&lt;/tt&gt; attribute of its containing function - which is the base of the frame for the function.&lt;/p&gt;
+&lt;p&gt;The &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;DW_AT_frame_base&lt;/span&gt;&lt;/tt&gt; attribute of &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;do_stuff&lt;/span&gt;&lt;/tt&gt; has the value &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;0x0&lt;/span&gt; &lt;span class="pre"&gt;(location&lt;/span&gt; &lt;span class="pre"&gt;list)&lt;/span&gt;&lt;/tt&gt;, which means that this value actually has to be looked up in the location list section. Let's look at it:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;$ objdump --dwarf=loc tracedprog2
+
+tracedprog2:     file format elf32-i386
+
+Contents of the .debug_loc section:
+
+    Offset   Begin    End      Expression
+    00000000 08048604 08048605 (DW_OP_breg4: 4 )
+    00000000 08048605 08048607 (DW_OP_breg4: 8 )
+    00000000 08048607 0804863e (DW_OP_breg5: 8 )
+    00000000 &amp;lt;End of list&amp;gt;
+    0000002c 0804863e 0804863f (DW_OP_breg4: 4 )
+    0000002c 0804863f 08048641 (DW_OP_breg4: 8 )
+    0000002c 08048641 0804865a (DW_OP_breg5: 8 )
+    0000002c &amp;lt;End of list&amp;gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The location information we're interested in is the first one &lt;a class="footnote-reference" href="#id10" id="id4"&gt;[4]&lt;/a&gt;. For each address where the debugger may be, it specifies the current frame base from which offsets to variables are to be computed as an offset from a register. For x86, &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;bpreg4&lt;/span&gt;&lt;/tt&gt; refers to &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;esp&lt;/span&gt;&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;bpreg5&lt;/span&gt;&lt;/tt&gt; refers to &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;ebp&lt;/span&gt;&lt;/tt&gt;.&lt;/p&gt;
+&lt;p&gt;It's educational to look at the first several instructions of &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;do_stuff&lt;/span&gt;&lt;/tt&gt; again:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;08048604 &amp;lt;do_stuff&amp;gt;:
+ 8048604:       55          push   ebp
+ 8048605:       89 e5       mov    ebp,esp
+ 8048607:       83 ec 28    sub    esp,0x28
+ 804860a:       8b 45 08    mov    eax,DWORD PTR [ebp+0x8]
+ 804860d:       83 c0 02    add    eax,0x2
+ 8048610:       89 45 f4    mov    DWORD PTR [ebp-0xc],eax
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Note that &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;ebp&lt;/span&gt;&lt;/tt&gt; becomes relevant only after the second instruction is executed, and indeed for the first two addresses the base is computed from &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;esp&lt;/span&gt;&lt;/tt&gt; in the location information listed above. Once &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;ebp&lt;/span&gt;&lt;/tt&gt; is valid, it's convenient to compute offsets relative to it because it stays constant while &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;esp&lt;/span&gt;&lt;/tt&gt; keeps moving with data being pushed and popped from the stack.&lt;/p&gt;
+&lt;p&gt;So where does it leave us with &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;my_local&lt;/span&gt;&lt;/tt&gt;? We're only really interested in its value after the instruction at &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;0x8048610&lt;/span&gt;&lt;/tt&gt; (where its value is placed in memory after being computed in &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;eax&lt;/span&gt;&lt;/tt&gt;), so the debugger will be using the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;DW_OP_breg5:&lt;/span&gt; &lt;span class="pre"&gt;8&lt;/span&gt;&lt;/tt&gt; frame base to find it. Now it's time to rewind a little and recall that the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;DW_AT_location&lt;/span&gt;&lt;/tt&gt; attribute for &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;my_local&lt;/span&gt;&lt;/tt&gt;  says &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;DW_OP_fbreg:&lt;/span&gt; &lt;span class="pre"&gt;-20&lt;/span&gt;&lt;/tt&gt;. Let's do the math: -20 from the frame base, which is &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;ebp&lt;/span&gt; &lt;span class="pre"&gt;+&lt;/span&gt; &lt;span class="pre"&gt;8&lt;/span&gt;&lt;/tt&gt;. We get &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;ebp&lt;/span&gt; &lt;span class="pre"&gt;-&lt;/span&gt; &lt;span class="pre"&gt;12&lt;/span&gt;&lt;/tt&gt;. Now look at the disassembly again and note where the data is moved from &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;eax&lt;/span&gt;&lt;/tt&gt; - indeed, &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;ebp&lt;/span&gt; &lt;span class="pre"&gt;-&lt;/span&gt; &lt;span class="pre"&gt;12&lt;/span&gt;&lt;/tt&gt; is where &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;my_local&lt;/span&gt;&lt;/tt&gt; is stored.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="looking-up-line-numbers"&gt;
+&lt;h3&gt;Looking up line numbers&lt;/h3&gt;
+&lt;p&gt;When we talked about finding functions in the debugging information, I was cheating a little. When we debug C source code and put a breakpoint in a function, we're usually not interested in the first &lt;em&gt;machine code&lt;/em&gt; instruction &lt;a class="footnote-reference" href="#id11" id="id5"&gt;[5]&lt;/a&gt;. What we're &lt;em&gt;really&lt;/em&gt; interested in is the first &lt;em&gt;C code&lt;/em&gt; line of the function.&lt;/p&gt;
+&lt;p&gt;This is why DWARF encodes a full mapping between lines in the C source code and machine code addresses in the executable. This information is contained in the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;.debug_line&lt;/span&gt;&lt;/tt&gt; section and can be extracted in a readable form as follows:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;$ objdump --dwarf=decodedline tracedprog2
+
+tracedprog2:     file format elf32-i386
+
+Decoded dump of debug contents of section .debug_line:
+
+CU: /home/eliben/eli/eliben-code/debugger/tracedprog2.c:
+File name           Line number    Starting address
+tracedprog2.c                5           0x8048604
+tracedprog2.c                6           0x804860a
+tracedprog2.c                9           0x8048613
+tracedprog2.c               10           0x804861c
+tracedprog2.c                9           0x8048630
+tracedprog2.c               11           0x804863c
+tracedprog2.c               15           0x804863e
+tracedprog2.c               16           0x8048647
+tracedprog2.c               17           0x8048653
+tracedprog2.c               18           0x8048658
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;It shouldn't be hard to see the correspondence between this information, the C source code and the disassembly dump. Line number 5 points at the entry point to &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;do_stuff&lt;/span&gt;&lt;/tt&gt; - &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;0x8040604&lt;/span&gt;&lt;/tt&gt;. The next line, 6, is where the debugger should really stop when asked to break in &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;do_stuff&lt;/span&gt;&lt;/tt&gt;, and it points at &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;0x804860a&lt;/span&gt;&lt;/tt&gt; which is just past the prologue of the function. This line information easily allows bi-directional mapping between lines and addresses:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;When asked to place a breakpoint at a certain line, the debugger will use it to find which address it should put its trap on (remember our friend &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;int&lt;/span&gt; &lt;span class="pre"&gt;3&lt;/span&gt;&lt;/tt&gt; from the previous article?)&lt;/li&gt;
+&lt;li&gt;When an instruction causes a segmentation fault, the debugger will use it to find the source code line on which it happened.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/div&gt;
+&lt;div class="section" id="libdwarf-working-with-dwarf-programmatically"&gt;
+&lt;h3&gt;&lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;libdwarf&lt;/span&gt;&lt;/tt&gt; - Working with DWARF programmatically&lt;/h3&gt;
+&lt;p&gt;Employing command-line tools to access DWARF information, while useful, isn't fully satisfying. As programmers, we'd like to know how to write actual code that can read the format and extract what we need from it.&lt;/p&gt;
+&lt;p&gt;Naturally, one approach is to grab the DWARF specification and start hacking away. Now, remember how everyone keeps saying that you should never, ever parse HTML manually but rather use a library? Well, with DWARF it's even worse. DWARF is &lt;em&gt;much&lt;/em&gt; more complex than HTML. What I've shown here is just the tip of the iceberg, and to make things even harder, most of this information is encoded in a very compact and compressed way in the actual object file &lt;a class="footnote-reference" href="#id12" id="id6"&gt;[6]&lt;/a&gt;.&lt;/p&gt;
+&lt;p&gt;So we'll take another road and use a library to work with DWARF. There are two major libraries I'm aware of (plus a few less complete ones):&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;BFD (&lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;libbfd&lt;/span&gt;&lt;/tt&gt;) is used by the &lt;a class="reference external" href="http://www.gnu.org/software/binutils/"&gt;GNU binutils&lt;/a&gt;, including &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;objdump&lt;/span&gt;&lt;/tt&gt; which played a star role in this article, &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;ld&lt;/span&gt;&lt;/tt&gt; (the GNU linker) and &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;as&lt;/span&gt;&lt;/tt&gt; (the GNU assembler).&lt;/li&gt;
+&lt;li&gt;&lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;libdwarf&lt;/span&gt;&lt;/tt&gt; - which together with its big brother &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;libelf&lt;/span&gt;&lt;/tt&gt; are used for the tools on Solaris and FreeBSD operating systems.&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;I'm picking &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;libdwarf&lt;/span&gt;&lt;/tt&gt; over BFD because it appears less arcane to me and its license is more liberal (&lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;LGPL&lt;/span&gt;&lt;/tt&gt; vs. &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;GPL&lt;/span&gt;&lt;/tt&gt;).&lt;/p&gt;
+&lt;p&gt;Since &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;libdwarf&lt;/span&gt;&lt;/tt&gt; is itself quite complex it requires a lot of code to operate. I'm not going to show all this code here, but &lt;a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2011/dwarf_get_func_addr.c"&gt;you can download&lt;/a&gt; and run it yourself. To compile this file you'll need to have &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;libelf&lt;/span&gt;&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;libdwarf&lt;/span&gt;&lt;/tt&gt; installed, and pass the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;-lelf&lt;/span&gt;&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;-ldwarf&lt;/span&gt;&lt;/tt&gt; flags to the linker.&lt;/p&gt;
+&lt;p&gt;The demonstrated program takes an executable and prints the names of functions in it, along with their entry points. Here's what it produces for the C program we've been playing with in this article:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;$ dwarf_get_func_addr tracedprog2
+DW_TAG_subprogram: &amp;#39;do_stuff&amp;#39;
+low pc  : 0x08048604
+high pc : 0x0804863e
+DW_TAG_subprogram: &amp;#39;main&amp;#39;
+low pc  : 0x0804863e
+high pc : 0x0804865a
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The documentation of &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;libdwarf&lt;/span&gt;&lt;/tt&gt; (linked in the References section of this article) is quite good, and with some effort you should have no problem pulling any other information demonstrated in this article from the DWARF sections using it.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="conclusion-and-next-steps"&gt;
+&lt;h3&gt;Conclusion and next steps&lt;/h3&gt;
+&lt;p&gt;Debugging information is a simple concept in principle. The implementation details may be intricate, but in the end of the day what matters is that we now know how the debugger finds the information it needs about the original source code from which the executable it's tracing was compiled. With this information in hand, the debugger bridges between the world of the user, who thinks in terms of lines of code and data structures, and the world of the executable, which is just a bunch of machine code instructions and data in registers and memory.&lt;/p&gt;
+&lt;p&gt;This article, with its two predecessors, concludes an introductory series that explains the inner workings of a debugger. Using the information presented here and some programming effort, it should be possible to create a basic but functional debugger for Linux.&lt;/p&gt;
+&lt;p&gt;As for the next steps, I'm not sure yet. Maybe I'll end the series here, maybe I'll present some advanced topics such as backtraces, and perhaps debugging on Windows. Readers can also suggest ideas for future articles in this series or related material. Feel free to use the comments or send me an email.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="references"&gt;
+&lt;h3&gt;References&lt;/h3&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;&lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;objdump&lt;/span&gt;&lt;/tt&gt; man page&lt;/li&gt;
+&lt;li&gt;Wikipedia pages for &lt;a class="reference external" href="http://en.wikipedia.org/wiki/Executable_and_Linkable_Format"&gt;ELF&lt;/a&gt; and &lt;a class="reference external" href="http://en.wikipedia.org/wiki/DWARF"&gt;DWARF&lt;/a&gt;.&lt;/li&gt;
+&lt;li&gt;&lt;a class="reference external" href="http://dwarfstd.org/"&gt;Dwarf Debugging Standard home page&lt;/a&gt; - from here you can obtain the excellent DWARF tutorial by Michael Eager, as well as the DWARF standard itself. You'll probably want version 2 since it's what &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;gcc&lt;/span&gt;&lt;/tt&gt; produces.&lt;/li&gt;
+&lt;li&gt;&lt;a class="reference external" href="http://reality.sgiweb.org/davea/dwarf.html"&gt;libdwarf home page&lt;/a&gt; - the download package includes a comprehensive reference document for the library&lt;/li&gt;
+&lt;li&gt;&lt;a class="reference external" href="http://sourceware.org/binutils/docs-2.21/bfd/index.html"&gt;BFD documentation&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;div align="center" class="align-center"&gt;&lt;img class="align-center" src="https://eli.thegreenplace.net/images/hline.jpg" style="width: 320px; height: 5px;" /&gt;&lt;/div&gt;
+&lt;table class="docutils footnote" frame="void" id="id7" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;DWARF is an open standard, published &lt;a class="reference external" href="http://dwarfstd.org/"&gt;here&lt;/a&gt; by the DWARF standards committee. The DWARF logo displayed above is taken from that website.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id8" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id2"&gt;[2]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;At the end of the article I've collected some useful resources that will help you get more familiar with DWARF, if you're interested. Particularly, start with the DWARF tutorial.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id9" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id3"&gt;[3]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;Here and in subsequent examples, I'm placing &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;(...)&lt;/span&gt;&lt;/tt&gt; instead of some longer and un-interesting information for the sake of more convenient formatting.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id10" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id4"&gt;[4]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;Because the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;DW_AT_frame_base&lt;/span&gt;&lt;/tt&gt; attribute of &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;do_stuff&lt;/span&gt;&lt;/tt&gt; contains offset &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;0x0&lt;/span&gt;&lt;/tt&gt; into the location list. Note that the same attribute for &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;main&lt;/span&gt;&lt;/tt&gt; contains the offset &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;0x2c&lt;/span&gt;&lt;/tt&gt; which is the offset for the second set of location expressions.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id11" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id5"&gt;[5]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;Where the function prologue is usually executed and the local variables aren't even valid yet.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id12" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id6"&gt;[6]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;Some parts of the information (such as location data and line number data) are encoded as instructions for a specialized virtual machine. Yes, really.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;/div&gt;
+
+    </content><category term="misc"></category><category term="Debuggers"></category><category term="Programming"></category></entry><entry><title>How debuggers work: Part 2 - Breakpoints</title><link href="https://eli.thegreenplace.net/2011/01/27/how-debuggers-work-part-2-breakpoints" rel="alternate"></link><published>2011-01-27T06:43:40-08:00</published><updated>2024-05-04T19:46:23-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2011-01-27:/2011/01/27/how-debuggers-work-part-2-breakpoints</id><summary type="html">
+        &lt;p&gt;This is the second part in a series of articles on how debuggers work. Make sure you read &lt;a class="reference external" href="https://eli.thegreenplace.net/2011/01/23/how-debuggers-work-part-1/"&gt;the first part&lt;/a&gt; before this one.&lt;/p&gt;
+&lt;div class="section" id="in-this-part"&gt;
+&lt;h3&gt;In this part&lt;/h3&gt;
+&lt;p&gt;I'm going to demonstrate how breakpoints are implemented in a debugger. Breakpoints are one of the two main pillars of debugging - the other …&lt;/p&gt;&lt;/div&gt;</summary><content type="html">
+        &lt;p&gt;This is the second part in a series of articles on how debuggers work. Make sure you read &lt;a class="reference external" href="https://eli.thegreenplace.net/2011/01/23/how-debuggers-work-part-1/"&gt;the first part&lt;/a&gt; before this one.&lt;/p&gt;
+&lt;div class="section" id="in-this-part"&gt;
+&lt;h3&gt;In this part&lt;/h3&gt;
+&lt;p&gt;I'm going to demonstrate how breakpoints are implemented in a debugger. Breakpoints are one of the two main pillars of debugging - the other being able to inspect values in the debugged process's memory. We've already seen a preview of the other pillar in part 1 of the series, but breakpoints still remain mysterious. By the end of this article, they won't be.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="software-interrupts"&gt;
+&lt;h3&gt;Software interrupts&lt;/h3&gt;
+&lt;p&gt;To implement breakpoints on the x86 architecture, software interrupts (also known as &amp;quot;traps&amp;quot;) are used. Before we get deep into the details, I want to explain the concept of interrupts and traps in general.&lt;/p&gt;
+&lt;p&gt;A CPU has a single stream of execution, working through instructions one by one &lt;a class="footnote-reference" href="#id7" id="id1"&gt;[1]&lt;/a&gt;. To handle asynchronous events like IO and hardware timers, CPUs use interrupts. A hardware interrupt is usually a dedicated electrical signal to which a special &amp;quot;response circuitry&amp;quot; is attached. This circuitry notices an activation of the interrupt and makes the CPU stop its current execution, save its state, and jump to a predefined  address where a handler routine for the interrupt is located. When the handler finishes its work, the CPU resumes execution from where it stopped.&lt;/p&gt;
+&lt;p&gt;Software interrupts are similar in principle but a bit different in practice. CPUs support special instructions that allow the software to simulate an interrupt. When such an instruction is executed, the CPU treats it like an interrupt - stops its normal flow of execution, saves its state and jumps to a handler routine. Such &amp;quot;traps&amp;quot; allow many of the wonders of modern OSes (task scheduling, virtual memory, memory protection, debugging) to be implemented efficiently.&lt;/p&gt;
+&lt;p&gt;Some programming errors (such as division by 0) are also treated by the CPU as traps, and are frequently referred to as &amp;quot;exceptions&amp;quot;. Here the line between hardware and software blurs, since it's hard to say whether such exceptions are really hardware interrupts or software interrupts. But I've digressed too far away from the main topic, so it's time to get back to breakpoints.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="int-3-in-theory"&gt;
+&lt;h3&gt;int 3 in theory&lt;/h3&gt;
+&lt;p&gt;Having written the previous section, I can now simply say that breakpoints are implemented on the CPU by a special trap called &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;int&lt;/span&gt; &lt;span class="pre"&gt;3&lt;/span&gt;&lt;/tt&gt;. &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;int&lt;/span&gt;&lt;/tt&gt; is x86 jargon for &amp;quot;trap instruction&amp;quot; - a call to a predefined interrupt handler. x86 supports the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;int&lt;/span&gt;&lt;/tt&gt; instruction with a 8-bit operand specifying the number of the interrupt that occurred, so in theory 256 traps are supported. The first 32 are reserved by the CPU for itself, and number 3 is the one we're interested in here - it's called &amp;quot;trap to debugger&amp;quot;.&lt;/p&gt;
+&lt;p&gt;Without further ado, I'll quote from the bible itself &lt;a class="footnote-reference" href="#id8" id="id2"&gt;[2]&lt;/a&gt;:&lt;/p&gt;
+&lt;blockquote&gt;
+The INT 3 instruction generates a special one byte opcode (CC) that is intended for calling the debug exception handler. (This one byte form is valuable because it can be used to replace the first byte of any instruction with a breakpoint, including other one byte instructions, without over-writing other code).&lt;/blockquote&gt;
+&lt;p&gt;The part in parens is important, but it's still too early to explain it. We'll come back to it later in this article.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="int-3-in-practice"&gt;
+&lt;h3&gt;int 3 in practice&lt;/h3&gt;
+&lt;p&gt;Yes, knowing the theory behind things is great, OK, but what does this really mean? How do we use &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;int&lt;/span&gt; &lt;span class="pre"&gt;3&lt;/span&gt;&lt;/tt&gt; to implement breakpoints? Or to paraphrase common programming Q&amp;amp;A jargon - &lt;em&gt;Plz show me the codes!&lt;/em&gt;&lt;/p&gt;
+&lt;p&gt;In practice, this is really very simple. Once your process executes the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;int&lt;/span&gt; &lt;span class="pre"&gt;3&lt;/span&gt;&lt;/tt&gt; instruction, the OS stops it &lt;a class="footnote-reference" href="#id9" id="id3"&gt;[3]&lt;/a&gt;. On Linux (which is what we're concerned with in this article) it then sends the process a signal - &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;SIGTRAP&lt;/span&gt;&lt;/tt&gt;.&lt;/p&gt;
+&lt;p&gt;That's all there is to it - honest! Now recall from the first part of the series that a tracing (debugger) process gets notified of all the signals its child (or the process it attaches to for debugging) gets, and you can start getting a feel of where we're going.&lt;/p&gt;
+&lt;p&gt;That's it, no more computer architecture 101 jabber. It's time for examples and code.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="setting-breakpoints-manually"&gt;
+&lt;h3&gt;Setting breakpoints manually&lt;/h3&gt;
+&lt;p&gt;I'm now going to show code that sets a breakpoint in a program. The target program I'm going to use for this demonstration is the following:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;section    .text
+    ; The _start symbol must be declared for the linker (ld)
+    global _start
+
+_start:
+
+    ; Prepare arguments for the sys_write system call:
+    ;   - eax: system call number (sys_write)
+    ;   - ebx: file descriptor (stdout)
+    ;   - ecx: pointer to string
+    ;   - edx: string length
+    mov     edx, len1
+    mov     ecx, msg1
+    mov     ebx, 1
+    mov     eax, 4
+
+    ; Execute the sys_write system call
+    int     0x80
+
+    ; Now print the other message
+    mov     edx, len2
+    mov     ecx, msg2
+    mov     ebx, 1
+    mov     eax, 4
+    int     0x80
+
+    ; Execute sys_exit
+    mov     eax, 1
+    int     0x80
+
+section    .data
+
+msg1    db      &amp;#39;Hello,&amp;#39;, 0xa
+len1    equ     $ - msg1
+msg2    db      &amp;#39;world!&amp;#39;, 0xa
+len2    equ     $ - msg2
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;I'm using assembly language for now, in order to keep us clear of compilation issues and symbols that come up when we get into C code. What the program listed above does is simply print &amp;quot;Hello,&amp;quot; on one line and then &amp;quot;world!&amp;quot; on the next line. It's very similar to the program demonstrated in the previous article.&lt;/p&gt;
+&lt;p&gt;I want to set a breakpoint after the first printout, but before the second one. Let's say right after the first &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;int&lt;/span&gt; &lt;span class="pre"&gt;0x80&lt;/span&gt;&lt;/tt&gt; &lt;a class="footnote-reference" href="#id10" id="id4"&gt;[4]&lt;/a&gt;, on the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;mov&lt;/span&gt; &lt;span class="pre"&gt;edx,&lt;/span&gt; &lt;span class="pre"&gt;len2&lt;/span&gt;&lt;/tt&gt; instruction. First, we need to know what address this instruction maps to. Running &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;objdump&lt;/span&gt; &lt;span class="pre"&gt;-d&lt;/span&gt;&lt;/tt&gt;:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;traced_printer2:     file format elf32-i386
+
+Sections:
+Idx Name          Size      VMA       LMA       File off  Algn
+  0 .text         00000033  08048080  08048080  00000080  2**4
+                  CONTENTS, ALLOC, LOAD, READONLY, CODE
+  1 .data         0000000e  080490b4  080490b4  000000b4  2**2
+                  CONTENTS, ALLOC, LOAD, DATA
+
+Disassembly of section .text:
+
+08048080 &amp;lt;.text&amp;gt;:
+ 8048080:     ba 07 00 00 00          mov    $0x7,%edx
+ 8048085:     b9 b4 90 04 08          mov    $0x80490b4,%ecx
+ 804808a:     bb 01 00 00 00          mov    $0x1,%ebx
+ 804808f:     b8 04 00 00 00          mov    $0x4,%eax
+ 8048094:     cd 80                   int    $0x80
+ 8048096:     ba 07 00 00 00          mov    $0x7,%edx
+ 804809b:     b9 bb 90 04 08          mov    $0x80490bb,%ecx
+ 80480a0:     bb 01 00 00 00          mov    $0x1,%ebx
+ 80480a5:     b8 04 00 00 00          mov    $0x4,%eax
+ 80480aa:     cd 80                   int    $0x80
+ 80480ac:     b8 01 00 00 00          mov    $0x1,%eax
+ 80480b1:     cd 80                   int    $0x80
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;So, the address we're going to set the breakpoint on is 0x8048096. Wait, this is not how real debuggers work, right? Real debuggers set breakpoints on lines of code and on functions, not on some bare memory addresses? Exactly right. But we're still far from there - to set breakpoints like &lt;em&gt;real&lt;/em&gt; debuggers we still have to cover symbols and debugging information first, and it will take another part or two in the series to reach these topics. For now, we'll have to do with bare memory addresses.&lt;/p&gt;
+&lt;p&gt;At this point I really want to digress again, so you have two choices. If it's really interesting for you to know &lt;em&gt;why&lt;/em&gt; the address is 0x8048096 and what does it mean, read the next section. If not, and you just want to get on with the breakpoints, you can safely skip it.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="digression-process-addresses-and-entry-point"&gt;
+&lt;h3&gt;Digression - process addresses and entry point&lt;/h3&gt;
+&lt;p&gt;Frankly, 0x8048096 itself doesn't mean much, it's just a few bytes away from the beginning of the text section of the executable. If you look carefully at the dump listing above, you'll see that the text section starts at 0x08048080. This tells the OS to map the text section starting at this address in the virtual address space given to the process. On Linux these addresses can be absolute (i.e. the executable isn't being relocated when it's loaded into memory), because with the virtual memory system each process gets its own chunk of memory and sees the whole 32-bit address space as its own (called &amp;quot;linear&amp;quot; address).&lt;/p&gt;
+&lt;p&gt;If we examine the ELF &lt;a class="footnote-reference" href="#id11" id="id5"&gt;[5]&lt;/a&gt; header with &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;readelf&lt;/span&gt;&lt;/tt&gt;, we get:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;$ readelf -h traced_printer2
+ELF Header:
+  Magic:   7f 45 4c 46 01 01 01 00 00 00 00 00 00 00 00 00
+  Class:                             ELF32
+  Data:                              2&amp;#39;s complement, little endian
+  Version:                           1 (current)
+  OS/ABI:                            UNIX - System V
+  ABI Version:                       0
+  Type:                              EXEC (Executable file)
+  Machine:                           Intel 80386
+  Version:                           0x1
+  Entry point address:               0x8048080
+  Start of program headers:          52 (bytes into file)
+  Start of section headers:          220 (bytes into file)
+  Flags:                             0x0
+  Size of this header:               52 (bytes)
+  Size of program headers:           32 (bytes)
+  Number of program headers:         2
+  Size of section headers:           40 (bytes)
+  Number of section headers:         4
+  Section header string table index: 3
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Note the &amp;quot;entry point address&amp;quot; section of the header, which also points to 0x8048080. So if we interpret the directions encoded in the ELF file for the OS, it says:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;Map the text section (with given contents) to address 0x8048080&lt;/li&gt;
+&lt;li&gt;Start executing at the entry point - address 0x8048080&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;But still, why 0x8048080? For historic reasons, it turns out. Some googling led me to a few sources that claim that the first 128MB of each process's address space were reserved for the stack. 128MB happens to be 0x8000000, which is where other sections of the executable may start. 0x8048080, in particular, is the default entry point used by the Linux &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;ld&lt;/span&gt;&lt;/tt&gt; linker. This entry point can be modified by passing the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;-Ttext&lt;/span&gt;&lt;/tt&gt; argument to &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;ld&lt;/span&gt;&lt;/tt&gt;.&lt;/p&gt;
+&lt;p&gt;To conclude, there's nothing really special in this address and we can freely change it. As long as the ELF executable is properly structured and the entry point address in the header matches the real beginning of the program's code (text section), we're OK.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="setting-breakpoints-in-the-debugger-with-int-3"&gt;
+&lt;h3&gt;Setting breakpoints in the debugger with int 3&lt;/h3&gt;
+&lt;p&gt;To set a breakpoint at some target address in the traced process, the debugger does the following:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;Remember the data stored at the target address&lt;/li&gt;
+&lt;li&gt;Replace the first byte at the target address with the int 3 instruction&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;Then, when the debugger asks the OS to run the process (with &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;PTRACE_CONT&lt;/span&gt;&lt;/tt&gt; as we saw in the previous article), the process will run and eventually hit upon the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;int&lt;/span&gt; &lt;span class="pre"&gt;3&lt;/span&gt;&lt;/tt&gt;, where it will stop and the OS will send it a signal. This is where the debugger comes in again, receiving a signal that its child (or traced process) was stopped. It can then:&lt;/p&gt;
+&lt;ol class="arabic simple"&gt;
+&lt;li&gt;Replace the int 3 instruction at the target address with the original instruction&lt;/li&gt;
+&lt;li&gt;Roll the instruction pointer of the traced process back by one. This is needed because the instruction pointer now points &lt;em&gt;after&lt;/em&gt; the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;int&lt;/span&gt; &lt;span class="pre"&gt;3&lt;/span&gt;&lt;/tt&gt;, having already executed it.&lt;/li&gt;
+&lt;li&gt;Allow the user to interact with the process in some way, since the process is still halted at the desired target address. This is the part where your debugger lets you peek at variable values, the call stack and so on.&lt;/li&gt;
+&lt;li&gt;When the user wants to keep running, the debugger will take care of placing the breakpoint back (since it was removed in step 1) at the target address, unless the user asked to cancel the breakpoint.&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;Let's see how some of these steps are translated into real code. We'll use the debugger &amp;quot;template&amp;quot; presented in part 1 (forking a child process and tracing it). In any case, there's a link to  the full source code of this example at the end of the article.&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span style="color: #007f00"&gt;/* Obtain and show child&amp;#39;s instruction pointer */&lt;/span&gt;
+ptrace(PTRACE_GETREGS, child_pid, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;, &amp;amp;regs);
+procmsg(&lt;span style="color: #7f007f"&gt;&amp;quot;Child started. EIP = 0x%08x\n&amp;quot;&lt;/span&gt;, regs.eip);
+
+&lt;span style="color: #007f00"&gt;/* Look at the word at the address we&amp;#39;re interested in */&lt;/span&gt;
+&lt;span style="color: #00007f; font-weight: bold"&gt;unsigned&lt;/span&gt; addr = &lt;span style="color: #007f7f"&gt;0x8048096&lt;/span&gt;;
+&lt;span style="color: #00007f; font-weight: bold"&gt;unsigned&lt;/span&gt; data = ptrace(PTRACE_PEEKTEXT, child_pid, (&lt;span style="color: #00007f; font-weight: bold"&gt;void&lt;/span&gt;*)addr, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;);
+procmsg(&lt;span style="color: #7f007f"&gt;&amp;quot;Original data at 0x%08x: 0x%08x\n&amp;quot;&lt;/span&gt;, addr, data);
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Here the debugger fetches the instruction pointer from the traced process, as well as examines the word currently present at 0x8048096. When run tracing  the assembly program listed in the beginning of the article, this prints:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;[13028] Child started. EIP = 0x08048080
+[13028] Original data at 0x08048096: 0x000007ba
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;So far, so good. Next:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span style="color: #007f00"&gt;/* Write the trap instruction &amp;#39;int 3&amp;#39; into the address */&lt;/span&gt;
+&lt;span style="color: #00007f; font-weight: bold"&gt;unsigned&lt;/span&gt; data_with_trap = (data &amp;amp; &lt;span style="color: #007f7f"&gt;0xFFFFFF00&lt;/span&gt;) | &lt;span style="color: #007f7f"&gt;0xCC&lt;/span&gt;;
+ptrace(PTRACE_POKETEXT, child_pid, (&lt;span style="color: #00007f; font-weight: bold"&gt;void&lt;/span&gt;*)addr, (&lt;span style="color: #00007f; font-weight: bold"&gt;void&lt;/span&gt;*)data_with_trap);
+
+&lt;span style="color: #007f00"&gt;/* See what&amp;#39;s there again... */&lt;/span&gt;
+&lt;span style="color: #00007f; font-weight: bold"&gt;unsigned&lt;/span&gt; readback_data = ptrace(PTRACE_PEEKTEXT, child_pid, (&lt;span style="color: #00007f; font-weight: bold"&gt;void&lt;/span&gt;*)addr, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;);
+procmsg(&lt;span style="color: #7f007f"&gt;&amp;quot;After trap, data at 0x%08x: 0x%08x\n&amp;quot;&lt;/span&gt;, addr, readback_data);
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Note how &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;int&lt;/span&gt; &lt;span class="pre"&gt;3&lt;/span&gt;&lt;/tt&gt; is inserted at the target address. This prints:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;[13028] After trap, data at 0x08048096: 0x000007cc
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Again, as expected - &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;0xba&lt;/span&gt;&lt;/tt&gt; was replaced with &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;0xcc&lt;/span&gt;&lt;/tt&gt;. The debugger now runs the child and waits for it to halt on the breakpoint:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span style="color: #007f00"&gt;/* Let the child run to the breakpoint and wait for it to&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;** reach it&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;*/&lt;/span&gt;
+ptrace(PTRACE_CONT, child_pid, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;);
+
+wait(&amp;amp;wait_status);
+&lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (WIFSTOPPED(wait_status)) {
+    procmsg(&lt;span style="color: #7f007f"&gt;&amp;quot;Child got a signal: %s\n&amp;quot;&lt;/span&gt;, strsignal(WSTOPSIG(wait_status)));
+}
+&lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt; {
+    perror(&lt;span style="color: #7f007f"&gt;&amp;quot;wait&amp;quot;&lt;/span&gt;);
+    &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt;;
+}
+
+&lt;span style="color: #007f00"&gt;/* See where the child is now */&lt;/span&gt;
+ptrace(PTRACE_GETREGS, child_pid, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;, &amp;amp;regs);
+procmsg(&lt;span style="color: #7f007f"&gt;&amp;quot;Child stopped at EIP = 0x%08x\n&amp;quot;&lt;/span&gt;, regs.eip);
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;This prints:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;Hello,
+[13028] Child got a signal: Trace/breakpoint trap
+[13028] Child stopped at EIP = 0x08048097
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Note the &amp;quot;Hello,&amp;quot; that was printed before the breakpoint - exactly as we planned. Also note where the child stopped - just after the single-byte trap instruction.&lt;/p&gt;
+&lt;p&gt;Finally, as was explained earlier, to keep the child running we must do some work. We replace the trap with the original instruction and let the process continue running from it.&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span style="color: #007f00"&gt;/* Remove the breakpoint by restoring the previous data&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;** at the target address, and unwind the EIP back by 1 to&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;** let the CPU execute the original instruction that was&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;** there.&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;*/&lt;/span&gt;
+ptrace(PTRACE_POKETEXT, child_pid, (&lt;span style="color: #00007f; font-weight: bold"&gt;void&lt;/span&gt;*)addr, (&lt;span style="color: #00007f; font-weight: bold"&gt;void&lt;/span&gt;*)data);
+regs.eip -= &lt;span style="color: #007f7f"&gt;1&lt;/span&gt;;
+ptrace(PTRACE_SETREGS, child_pid, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;, &amp;amp;regs);
+
+&lt;span style="color: #007f00"&gt;/* The child can continue running now */&lt;/span&gt;
+ptrace(PTRACE_CONT, child_pid, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;);
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;This makes the child print &amp;quot;world!&amp;quot; and exit, just as planned.&lt;/p&gt;
+&lt;p&gt;Note that we don't restore the breakpoint here. That can be done by executing the original instruction in single-step mode, then placing the trap back and only then do &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;PTRACE_CONT&lt;/span&gt;&lt;/tt&gt;. The debug library demonstrated later in the article implements this.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="more-on-int-3"&gt;
+&lt;h3&gt;More on int 3&lt;/h3&gt;
+&lt;p&gt;Now is a good time to come back and examine &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;int&lt;/span&gt; &lt;span class="pre"&gt;3&lt;/span&gt;&lt;/tt&gt; and that curious note from Intel's manual. Here it is again:&lt;/p&gt;
+&lt;blockquote&gt;
+This one byte form is valuable because it can be used to replace the first byte of any instruction with a breakpoint, including other one byte instructions, without over-writing other code&lt;/blockquote&gt;
+&lt;p&gt;&lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;int&lt;/span&gt;&lt;/tt&gt; instructions on x86 occupy two bytes - &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;0xcd&lt;/span&gt;&lt;/tt&gt; followed by the interrupt number &lt;a class="footnote-reference" href="#id12" id="id6"&gt;[6]&lt;/a&gt;. &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;int&lt;/span&gt; &lt;span class="pre"&gt;3&lt;/span&gt;&lt;/tt&gt; could've been encoded as &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;cd&lt;/span&gt; &lt;span class="pre"&gt;03&lt;/span&gt;&lt;/tt&gt;, but there's a special single-byte instruction reserved for it - 0xcc.&lt;/p&gt;
+&lt;p&gt;Why so? Because this allows us to insert a breakpoint without ever overwriting more than one instruction. And this is important. Consider this sample code:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;    .. some code ..
+    jz    foo
+    dec   eax
+foo:
+    call  bar
+    .. some code ..
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Suppose we want to place a breakpoint on &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;dec&lt;/span&gt; &lt;span class="pre"&gt;eax&lt;/span&gt;&lt;/tt&gt;. This happens to be a single-byte instruction (with the opcode &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;0x48&lt;/span&gt;&lt;/tt&gt;). Had the replacement breakpoint instruction been longer than 1 byte, we'd be forced to overwrite part of the next instruction (&lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;call&lt;/span&gt;&lt;/tt&gt;), which would garble it and probably produce something completely invalid. But what is the branch &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;jz&lt;/span&gt; &lt;span class="pre"&gt;foo&lt;/span&gt;&lt;/tt&gt; was taken? Then, without stopping on &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;dec&lt;/span&gt; &lt;span class="pre"&gt;eax&lt;/span&gt;&lt;/tt&gt;, the CPU would go straight to execute the invalid instruction after it.&lt;/p&gt;
+&lt;p&gt;Having a special 1-byte encoding for &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;int&lt;/span&gt; &lt;span class="pre"&gt;3&lt;/span&gt;&lt;/tt&gt; solves this problem. Since 1 byte is the shortest an instruction can get on x86, we guarantee than only the instruction we want to break on gets changed.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="encapsulating-some-gory-details"&gt;
+&lt;h3&gt;Encapsulating some gory details&lt;/h3&gt;
+&lt;p&gt;Many of the low-level details shown in code samples of the previous section can be easily encapsulated behind a convenient API. I've done some encapsulation into a small utility library called &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;debuglib&lt;/span&gt;&lt;/tt&gt; - its code is available for download at the end of the article. Here I just want to demonstrate an example of its usage, but with a twist. We're going to trace a program written in C.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="tracing-a-c-program"&gt;
+&lt;h3&gt;Tracing a C program&lt;/h3&gt;
+&lt;p&gt;So far, for the sake of simplicity, I focused on assembly language targets. It's time to go one level up and see how we can trace a program written in C.&lt;/p&gt;
+&lt;p&gt;It turns out things aren't very different - it's just a bit harder to find where to place the breakpoints. Consider this simple program:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span style="color: #007f00"&gt;#include &amp;lt;stdio.h&amp;gt;&lt;/span&gt;
+
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;void&lt;/span&gt; &lt;span style="color: #00007f"&gt;do_stuff&lt;/span&gt;()
+{
+    printf(&lt;span style="color: #7f007f"&gt;&amp;quot;Hello, &amp;quot;&lt;/span&gt;);
+}
+
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;int&lt;/span&gt; &lt;span style="color: #00007f"&gt;main&lt;/span&gt;()
+{
+    &lt;span style="color: #00007f; font-weight: bold"&gt;for&lt;/span&gt; (&lt;span style="color: #00007f; font-weight: bold"&gt;int&lt;/span&gt; i = &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;; i &amp;lt; &lt;span style="color: #007f7f"&gt;4&lt;/span&gt;; ++i)
+        do_stuff();
+    printf(&lt;span style="color: #7f007f"&gt;&amp;quot;world!\n&amp;quot;&lt;/span&gt;);
+    &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;;
+}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Suppose I want to place a breakpoint at the entrance to &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;do_stuff&lt;/span&gt;&lt;/tt&gt;. I'll use the old friend &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;objdump&lt;/span&gt;&lt;/tt&gt; to disassemble the executable, but there's a lot in it. In particular, looking at the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;text&lt;/span&gt;&lt;/tt&gt; section is a bit useless since it contains a lot of C runtime initialization code I'm currently not interested in. So let's just look for &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;do_stuff&lt;/span&gt;&lt;/tt&gt; in the dump:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;080483e4 &amp;lt;do_stuff&amp;gt;:
+ 80483e4:     55                      push   %ebp
+ 80483e5:     89 e5                   mov    %esp,%ebp
+ 80483e7:     83 ec 18                sub    $0x18,%esp
+ 80483ea:     c7 04 24 f0 84 04 08    movl   $0x80484f0,(%esp)
+ 80483f1:     e8 22 ff ff ff          call   8048318 &amp;lt;puts@plt&amp;gt;
+ 80483f6:     c9                      leave
+ 80483f7:     c3                      ret
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Alright, so we'll place the breakpoint at 0x080483e4, which is the first instruction of &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;do_stuff&lt;/span&gt;&lt;/tt&gt;. Moreover, since this function is called in a loop, we want to keep stopping at the breakpoint until the loop ends. We're going to use the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;debuglib&lt;/span&gt;&lt;/tt&gt; library to make this simple. Here's the complete debugger function:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;void&lt;/span&gt; &lt;span style="color: #00007f"&gt;run_debugger&lt;/span&gt;(pid_t child_pid)
+{
+    procmsg(&lt;span style="color: #7f007f"&gt;&amp;quot;debugger started\n&amp;quot;&lt;/span&gt;);
+
+    &lt;span style="color: #007f00"&gt;/* Wait for child to stop on its first instruction */&lt;/span&gt;
+    wait(&lt;span style="color: #007f7f"&gt;0&lt;/span&gt;);
+    procmsg(&lt;span style="color: #7f007f"&gt;&amp;quot;child now at EIP = 0x%08x\n&amp;quot;&lt;/span&gt;, get_child_eip(child_pid));
+
+    &lt;span style="color: #007f00"&gt;/* Create breakpoint and run to it*/&lt;/span&gt;
+    debug_breakpoint* bp = create_breakpoint(child_pid, (&lt;span style="color: #00007f; font-weight: bold"&gt;void&lt;/span&gt;*)&lt;span style="color: #007f7f"&gt;0x080483e4&lt;/span&gt;);
+    procmsg(&lt;span style="color: #7f007f"&gt;&amp;quot;breakpoint created\n&amp;quot;&lt;/span&gt;);
+    ptrace(PTRACE_CONT, child_pid, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;);
+    wait(&lt;span style="color: #007f7f"&gt;0&lt;/span&gt;);
+
+    &lt;span style="color: #007f00"&gt;/* Loop as long as the child didn&amp;#39;t exit */&lt;/span&gt;
+    &lt;span style="color: #00007f; font-weight: bold"&gt;while&lt;/span&gt; (&lt;span style="color: #007f7f"&gt;1&lt;/span&gt;) {
+        &lt;span style="color: #007f00"&gt;/* The child is stopped at a breakpoint here. Resume its&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;        ** execution until it either exits or hits the&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;        ** breakpoint again.&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;        */&lt;/span&gt;
+        procmsg(&lt;span style="color: #7f007f"&gt;&amp;quot;child stopped at breakpoint. EIP = 0x%08X\n&amp;quot;&lt;/span&gt;, get_child_eip(child_pid));
+        procmsg(&lt;span style="color: #7f007f"&gt;&amp;quot;resuming\n&amp;quot;&lt;/span&gt;);
+        &lt;span style="color: #00007f; font-weight: bold"&gt;int&lt;/span&gt; rc = resume_from_breakpoint(child_pid, bp);
+
+        &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (rc == &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;) {
+            procmsg(&lt;span style="color: #7f007f"&gt;&amp;quot;child exited\n&amp;quot;&lt;/span&gt;);
+            &lt;span style="color: #00007f; font-weight: bold"&gt;break&lt;/span&gt;;
+        }
+        &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (rc == &lt;span style="color: #007f7f"&gt;1&lt;/span&gt;) {
+            &lt;span style="color: #00007f; font-weight: bold"&gt;continue&lt;/span&gt;;
+        }
+        &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt; {
+            procmsg(&lt;span style="color: #7f007f"&gt;&amp;quot;unexpected: %d\n&amp;quot;&lt;/span&gt;, rc);
+            &lt;span style="color: #00007f; font-weight: bold"&gt;break&lt;/span&gt;;
+        }
+    }
+
+
+    cleanup_breakpoint(bp);
+}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Instead of getting our hands dirty modifying EIP and the target process's memory space, we just use &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;create_breakpoint&lt;/span&gt;&lt;/tt&gt;, &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;resume_from_breakpoint&lt;/span&gt;&lt;/tt&gt; and &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;cleanup_breakpoint&lt;/span&gt;&lt;/tt&gt;. Let's see what this prints when tracing the simple C code displayed above:&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;pre&gt;$ bp_use_lib traced_c_loop
+[13363] debugger started
+[13364] target started. will run &amp;#39;traced_c_loop&amp;#39;
+[13363] child now at EIP = 0x00a37850
+[13363] breakpoint created
+[13363] child stopped at breakpoint. EIP = 0x080483E5
+[13363] resuming
+Hello,
+[13363] child stopped at breakpoint. EIP = 0x080483E5
+[13363] resuming
+Hello,
+[13363] child stopped at breakpoint. EIP = 0x080483E5
+[13363] resuming
+Hello,
+[13363] child stopped at breakpoint. EIP = 0x080483E5
+[13363] resuming
+Hello,
+world!
+[13363] child exited
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Just as expected!&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="the-code"&gt;
+&lt;h3&gt;The code&lt;/h3&gt;
+&lt;p&gt;&lt;a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2011/debuggers_part2_code"&gt;Here are&lt;/a&gt; the complete source code files for this part. In the archive you'll find:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;debuglib.h and debuglib.c - the simple library for encapsulating some of the inner workings of a debugger&lt;/li&gt;
+&lt;li&gt;bp_manual.c - the &amp;quot;manual&amp;quot; way of setting breakpoints presented first in this article. Uses the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;debuglib&lt;/span&gt;&lt;/tt&gt; library for some boilerplate code.&lt;/li&gt;
+&lt;li&gt;bp_use_lib.c - uses &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;debuglib&lt;/span&gt;&lt;/tt&gt; for most of its code, as demonstrated in the second code sample for tracing the loop in a C program.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/div&gt;
+&lt;div class="section" id="conclusion-and-next-steps"&gt;
+&lt;h3&gt;Conclusion and next steps&lt;/h3&gt;
+&lt;p&gt;We've covered how breakpoints are implemented in debuggers. While implementation details vary between OSes, when you're on x86 it's all basically variations on the same theme - substituting &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;int&lt;/span&gt; &lt;span class="pre"&gt;3&lt;/span&gt;&lt;/tt&gt; for the instruction where we want the process to stop.&lt;/p&gt;
+&lt;p&gt;That said, I'm sure some readers, just like me, will be less than excited about specifying raw memory addresses to break on. We'd like to say &amp;quot;break on &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;do_stuff&lt;/span&gt;&lt;/tt&gt;&amp;quot;, or even &amp;quot;break on &lt;em&gt;this&lt;/em&gt; line in &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;do_stuff&lt;/span&gt;&lt;/tt&gt;&amp;quot; and have the debugger do it. In the next article I'm going to show how it's done.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="references"&gt;
+&lt;h3&gt;References&lt;/h3&gt;
+&lt;p&gt;I've found the following resources and articles useful in the preparation of this article:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;&lt;a class="reference external" href="http://www.alexonlinux.com/how-debugger-works"&gt;How debugger works&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="reference external" href="http://www.linuxforums.org/articles/understanding-elf-using-readelf-and-objdump_125.html"&gt;Understanding ELF using readelf and objdump&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="reference external" href="http://mainisusuallyafunction.blogspot.com/2011/01/implementing-breakpoints-on-x86-linux.html"&gt;Implementing breakpoints on x86 Linux&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="reference external" href="http://www.nasm.us/xdoc/2.09.04/html/nasmdoc0.html"&gt;NASM manual&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="reference external" href="http://stackoverflow.com/questions/2187484/elf-binary-entry-point"&gt;SO discussion of the ELF entry point&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="reference external" href="https://news.ycombinator.net/item?id=2131894"&gt;This Hacker News discussion&lt;/a&gt; of the first part of the series&lt;/li&gt;
+&lt;li&gt;&lt;a class="reference external" href="http://www.deansys.com/doc/gdbInternals/gdbint_toc.html"&gt;GDB Internals&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;div align="center" class="align-center"&gt;&lt;img class="align-center" src="https://eli.thegreenplace.net/images/hline.jpg" style="width: 320px; height: 5px;" /&gt;&lt;/div&gt;
+&lt;table class="docutils footnote" frame="void" id="id7" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;On a high-level view this is true. Down in the gory details, many CPUs today execute multiple instructions in parallel, some of them &lt;a class="reference external" href="http://en.wikipedia.org/wiki/Out-of-order_execution"&gt;not in their original order&lt;/a&gt;.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id8" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id2"&gt;[2]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;The bible in this case being, of course, Intel's Architecture software developer's manual, volume 2A.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id9" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id3"&gt;[3]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;How can the OS stop a process just like that? The OS registered its own handler for &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;int&lt;/span&gt; &lt;span class="pre"&gt;3&lt;/span&gt;&lt;/tt&gt; with the CPU, that's how!&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id10" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id4"&gt;[4]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;Wait, &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;int&lt;/span&gt;&lt;/tt&gt; again? Yes! Linux uses &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;int&lt;/span&gt; &lt;span class="pre"&gt;0x80&lt;/span&gt;&lt;/tt&gt; to implement system calls from user processes into the OS kernel. The user places the number of the system call and its arguments into registers and executes &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;int&lt;/span&gt; &lt;span class="pre"&gt;0x80&lt;/span&gt;&lt;/tt&gt;. The CPU then jumps to the appropriate interrupt handler, where the OS registered a procedure that looks at the registers and decides which system call to execute.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id11" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id5"&gt;[5]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;&lt;a class="reference external" href="http://en.wikipedia.org/wiki/Executable_and_Linkable_Format"&gt;ELF&lt;/a&gt; (Executable and Linkable Format) is the file format used by Linux for object files, shared libraries and executables.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id12" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id6"&gt;[6]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;An observant reader can spot the translation of &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;int&lt;/span&gt; &lt;span class="pre"&gt;0x80&lt;/span&gt;&lt;/tt&gt; into &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;cd&lt;/span&gt; &lt;span class="pre"&gt;80&lt;/span&gt;&lt;/tt&gt; in the dumps listed above.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;/div&gt;
+
+    </content><category term="misc"></category><category term="Debuggers"></category><category term="Programming"></category></entry><entry><title>How debuggers work: Part 1 - Basics</title><link href="https://eli.thegreenplace.net/2011/01/23/how-debuggers-work-part-1" rel="alternate"></link><published>2011-01-23T07:40:48-08:00</published><updated>2024-05-04T19:46:23-07:00</updated><author><name>Eli Bendersky</name></author><id>tag:eli.thegreenplace.net,2011-01-23:/2011/01/23/how-debuggers-work-part-1</id><summary type="html">
+        &lt;p&gt;This is the first part in a series of articles on how debuggers work. I'm still not sure how many articles the series will contain and what topics it will cover, but I'm going to start with the basics.&lt;/p&gt;
+&lt;div class="section" id="in-this-part"&gt;
+&lt;h3&gt;In this part&lt;/h3&gt;
+&lt;p&gt;I'm going to present the main building block …&lt;/p&gt;&lt;/div&gt;</summary><content type="html">
+        &lt;p&gt;This is the first part in a series of articles on how debuggers work. I'm still not sure how many articles the series will contain and what topics it will cover, but I'm going to start with the basics.&lt;/p&gt;
+&lt;div class="section" id="in-this-part"&gt;
+&lt;h3&gt;In this part&lt;/h3&gt;
+&lt;p&gt;I'm going to present the main building block of a debugger's implementation on Linux - the &lt;tt class="docutils literal"&gt;ptrace&lt;/tt&gt; system call. All the code in this article is developed on a 32-bit Ubuntu machine. Note that the code is very much platform specific, although porting it to other platforms shouldn't be too difficult.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="motivation"&gt;
+&lt;h3&gt;Motivation&lt;/h3&gt;
+&lt;p&gt;To understand where we're going, try to imagine what it takes for a debugger to do its work. A debugger can start some process and debug it, or attach itself to an existing process. It can single-step through the code, set breakpoints and run to them, examine variable values and stack traces. Many debuggers have advanced features such as executing expressions and calling functions in the debbugged process's address space, and even changing the process's code on-the-fly and watching the effects.&lt;/p&gt;
+&lt;p&gt;Although modern debuggers are complex beasts &lt;a class="footnote-reference" href="#id7" id="id1"&gt;[1]&lt;/a&gt;, it's surprising how simple is the foundation on which they are built. Debuggers start with only a few basic services provided by the operating system and the compiler/linker, all the rest is just &lt;a class="reference external" href="http://en.wikipedia.org/wiki/Small_matter_of_programming"&gt;a simple matter of programming&lt;/a&gt;.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="linux-debugging-ptrace"&gt;
+&lt;h3&gt;Linux debugging - &lt;tt class="docutils literal"&gt;ptrace&lt;/tt&gt;&lt;/h3&gt;
+&lt;p&gt;The Swiss army knife of Linux debuggers is the &lt;tt class="docutils literal"&gt;ptrace&lt;/tt&gt; system call &lt;a class="footnote-reference" href="#id8" id="id2"&gt;[2]&lt;/a&gt;. It's a versatile and rather complex tool that allows one process to control the execution of another and to peek and poke at its innards &lt;a class="footnote-reference" href="#id9" id="id3"&gt;[3]&lt;/a&gt;. &lt;tt class="docutils literal"&gt;ptrace&lt;/tt&gt; can take a mid-sized book to explain fully, which is why I'm just going to focus on some of its practical uses in examples.&lt;/p&gt;
+&lt;p&gt;Let's dive right in.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="stepping-through-the-code-of-a-process"&gt;
+&lt;h3&gt;Stepping through the code of a process&lt;/h3&gt;
+&lt;p&gt;I'm now going to develop an example of running a process in &amp;quot;traced&amp;quot; mode in which we're going to single-step through its code - the machine code (assembly instructions) that's executed by the CPU. I'll show the example code in parts, explaining each, and in the end of the article you will find a link to download a complete C file that you can compile, execute and play with.&lt;/p&gt;
+&lt;p&gt;The high-level plan is to write code that splits into a child process that will execute a user-supplied command, and a parent process that traces the child. First, the main function:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;int&lt;/span&gt; &lt;span style="color: #00007f"&gt;main&lt;/span&gt;(&lt;span style="color: #00007f; font-weight: bold"&gt;int&lt;/span&gt; argc, &lt;span style="color: #00007f; font-weight: bold"&gt;char&lt;/span&gt;** argv)
+{
+    pid_t child_pid;
+
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (argc &amp;lt; &lt;span style="color: #007f7f"&gt;2&lt;/span&gt;) {
+        fprintf(stderr, &lt;span style="color: #7f007f"&gt;&amp;quot;Expected a program name as argument\n&amp;quot;&lt;/span&gt;);
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; -&lt;span style="color: #007f7f"&gt;1&lt;/span&gt;;
+    }
+
+    child_pid = fork();
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (child_pid == &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;)
+        run_target(argv[&lt;span style="color: #007f7f"&gt;1&lt;/span&gt;]);
+    &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (child_pid &amp;gt; &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;)
+        run_debugger(child_pid);
+    &lt;span style="color: #00007f; font-weight: bold"&gt;else&lt;/span&gt; {
+        perror(&lt;span style="color: #7f007f"&gt;&amp;quot;fork&amp;quot;&lt;/span&gt;);
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; -&lt;span style="color: #007f7f"&gt;1&lt;/span&gt;;
+    }
+
+    &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;;
+}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Pretty simple: we start a new child process with &lt;tt class="docutils literal"&gt;fork&lt;/tt&gt; &lt;a class="footnote-reference" href="#id10" id="id4"&gt;[4]&lt;/a&gt;. The &lt;tt class="docutils literal"&gt;if&lt;/tt&gt; branch of the subsequent condition runs the child process (called &amp;quot;target&amp;quot; here), and the &lt;tt class="docutils literal"&gt;else if&lt;/tt&gt; branch runs the parent process (called &amp;quot;debugger&amp;quot; here).&lt;/p&gt;
+&lt;p&gt;Here's the target process:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;void&lt;/span&gt; &lt;span style="color: #00007f"&gt;run_target&lt;/span&gt;(&lt;span style="color: #00007f; font-weight: bold"&gt;const&lt;/span&gt; &lt;span style="color: #00007f; font-weight: bold"&gt;char&lt;/span&gt;* programname)
+{
+    procmsg(&lt;span style="color: #7f007f"&gt;&amp;quot;target started. will run &amp;#39;%s&amp;#39;\n&amp;quot;&lt;/span&gt;, programname);
+
+    &lt;span style="color: #007f00"&gt;/* Allow tracing of this process */&lt;/span&gt;
+    &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (ptrace(PTRACE_TRACEME, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;) &amp;lt; &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;) {
+        perror(&lt;span style="color: #7f007f"&gt;&amp;quot;ptrace&amp;quot;&lt;/span&gt;);
+        &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt;;
+    }
+
+    &lt;span style="color: #007f00"&gt;/* Replace this process&amp;#39;s image with the given program */&lt;/span&gt;
+    execl(programname, programname, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;);
+}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The most interesting line here is the &lt;tt class="docutils literal"&gt;ptrace&lt;/tt&gt; call. &lt;tt class="docutils literal"&gt;ptrace&lt;/tt&gt; is declared thus (in &lt;tt class="docutils literal"&gt;sys/ptrace.h&lt;/tt&gt;):&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;long&lt;/span&gt; ptrace(&lt;span style="color: #00007f; font-weight: bold"&gt;enum&lt;/span&gt; __ptrace_request request, pid_t pid,
+                 &lt;span style="color: #00007f; font-weight: bold"&gt;void&lt;/span&gt; *addr, &lt;span style="color: #00007f; font-weight: bold"&gt;void&lt;/span&gt; *data);
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The first argument is a &lt;em&gt;request&lt;/em&gt;, which may be one of many predefined &lt;tt class="docutils literal"&gt;PTRACE_*&lt;/tt&gt; constants. The second argument specifies a process ID for some requests. The third and fourth arguments are address and data pointers, for memory manipulation. The &lt;tt class="docutils literal"&gt;ptrace&lt;/tt&gt; call in the code snippet above makes the &lt;tt class="docutils literal"&gt;PTRACE_TRACEME&lt;/tt&gt; request, which means that this child process asks the OS kernel to let its parent trace it. The request description from the man-page is quite clear:&lt;/p&gt;
+&lt;blockquote&gt;
+Indicates that this process is to be traced by its parent. Any signal (except SIGKILL) delivered to this process will cause it to stop and its parent to be notified via wait(). &lt;strong&gt;Also, all subsequent calls to exec() by this process will cause a SIGTRAP to be sent to it, giving the parent a chance to gain control before the new program begins execution&lt;/strong&gt;. A process probably shouldn't make this request if its parent isn't expecting to trace it. (pid, addr, and data are ignored.)&lt;/blockquote&gt;
+&lt;p&gt;I've highlighted the part that interests us in this example. Note that the very next thing &lt;tt class="docutils literal"&gt;run_target&lt;/tt&gt; does after &lt;tt class="docutils literal"&gt;ptrace&lt;/tt&gt; is invoke the program given to it as an argument with &lt;tt class="docutils literal"&gt;execl&lt;/tt&gt;. This, as the highlighted part explains, causes the OS kernel to stop the process just before it begins executing the program in &lt;tt class="docutils literal"&gt;execl&lt;/tt&gt; and send a signal to the parent.&lt;/p&gt;
+&lt;p&gt;Thus, time is ripe to see what the parent does:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;void&lt;/span&gt; &lt;span style="color: #00007f"&gt;run_debugger&lt;/span&gt;(pid_t child_pid)
+{
+    &lt;span style="color: #00007f; font-weight: bold"&gt;int&lt;/span&gt; wait_status;
+    &lt;span style="color: #00007f; font-weight: bold"&gt;unsigned&lt;/span&gt; icounter = &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;;
+    procmsg(&lt;span style="color: #7f007f"&gt;&amp;quot;debugger started\n&amp;quot;&lt;/span&gt;);
+
+    &lt;span style="color: #007f00"&gt;/* Wait for child to stop on its first instruction */&lt;/span&gt;
+    wait(&amp;amp;wait_status);
+
+    &lt;span style="color: #00007f; font-weight: bold"&gt;while&lt;/span&gt; (WIFSTOPPED(wait_status)) {
+        icounter++;
+        &lt;span style="color: #007f00"&gt;/* Make the child execute another instruction */&lt;/span&gt;
+        &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (ptrace(PTRACE_SINGLESTEP, child_pid, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;) &amp;lt; &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;) {
+            perror(&lt;span style="color: #7f007f"&gt;&amp;quot;ptrace&amp;quot;&lt;/span&gt;);
+            &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt;;
+        }
+
+        &lt;span style="color: #007f00"&gt;/* Wait for child to stop on its next instruction */&lt;/span&gt;
+        wait(&amp;amp;wait_status);
+    }
+
+    procmsg(&lt;span style="color: #7f007f"&gt;&amp;quot;the child executed %u instructions\n&amp;quot;&lt;/span&gt;, icounter);
+}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Recall from above that once the child starts executing the &lt;tt class="docutils literal"&gt;exec&lt;/tt&gt; call, it will stop and be sent the &lt;tt class="docutils literal"&gt;SIGTRAP&lt;/tt&gt; signal. The parent here waits for this to happen with the first &lt;tt class="docutils literal"&gt;wait&lt;/tt&gt; call. &lt;tt class="docutils literal"&gt;wait&lt;/tt&gt; will return once something interesting happens, and the parent checks that it was because the child was stopped (&lt;tt class="docutils literal"&gt;WIFSTOPPED&lt;/tt&gt; returns true if the child process was stopped by delivery of a signal).&lt;/p&gt;
+&lt;p&gt;What the parent does next is the most interesting part of this article. It invokes &lt;tt class="docutils literal"&gt;ptrace&lt;/tt&gt; with the &lt;tt class="docutils literal"&gt;PTRACE_SINGLESTEP&lt;/tt&gt; request giving it the child process ID. What this does is tell the OS - &lt;em&gt;please restart the child process, but stop it after it executes the next instruction&lt;/em&gt;. Again, the parent waits for the child to stop and the loop continues. The loop will terminate when the signal that came out of the &lt;tt class="docutils literal"&gt;wait&lt;/tt&gt; call wasn't about the child stopping. During a normal run of the tracer, this will be the signal that tells the parent that the child process exited (&lt;tt class="docutils literal"&gt;WIFEXITED&lt;/tt&gt; would return true on it).&lt;/p&gt;
+&lt;p&gt;Note that &lt;tt class="docutils literal"&gt;icounter&lt;/tt&gt; counts the amount of instructions executed by the child process. So our simple example actually does something useful - given a program name on the command line, it executes the program and reports the amount of CPU instructions it took to run from start to finish. Let's see it in action.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="a-test-run"&gt;
+&lt;h3&gt;A test run&lt;/h3&gt;
+&lt;p&gt;I compiled the following simple program and ran it under the tracer:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #007f00"&gt;#include &amp;lt;stdio.h&amp;gt;&lt;/span&gt;
+
+
+&lt;span style="color: #00007f; font-weight: bold"&gt;int&lt;/span&gt; &lt;span style="color: #00007f"&gt;main&lt;/span&gt;()
+{
+    printf(&lt;span style="color: #7f007f"&gt;&amp;quot;Hello, world!\n&amp;quot;&lt;/span&gt;);
+    &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt; &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;;
+}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;To my surprise, the tracer took quite long to run and reported that there were more than 100,000 instructions executed. For a simple &lt;tt class="docutils literal"&gt;printf&lt;/tt&gt; call? What gives? The answer is very interesting &lt;a class="footnote-reference" href="#id11" id="id5"&gt;[5]&lt;/a&gt;. By default, &lt;tt class="docutils literal"&gt;gcc&lt;/tt&gt; on Linux links programs to the C runtime libraries dynamically. What this means is  that one of the first things that runs when any program is executed is the dynamic library loader that looks for the required shared libraries. This is quite a lot of code - and remember that our basic tracer here looks at each and every instruction, not of just the &lt;tt class="docutils literal"&gt;main&lt;/tt&gt; function, but &lt;em&gt;of the whole process&lt;/em&gt;.&lt;/p&gt;
+&lt;p&gt;So, when I linked the test program with the &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;-static&lt;/span&gt;&lt;/tt&gt; flag (and verified that the executable gained some 500KB in weight, as is logical for a static link of the C runtime), the tracing reported only 7,000 instructions or so. This is still a lot, but makes perfect sense if you recall that &lt;tt class="docutils literal"&gt;libc&lt;/tt&gt; initialization still has to run before &lt;tt class="docutils literal"&gt;main&lt;/tt&gt;, and cleanup has to run after &lt;tt class="docutils literal"&gt;main&lt;/tt&gt;. Besides, &lt;tt class="docutils literal"&gt;printf&lt;/tt&gt; is a complex function.&lt;/p&gt;
+&lt;p&gt;Still not satisfied, I wanted to see something &lt;em&gt;testable&lt;/em&gt; - i.e. a whole run in which I could account for every instruction executed. This, of course, can be done with assembly code. So I took this version of &amp;quot;Hello, world!&amp;quot; and assembled it:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;section    .text
+    ; The _start symbol must be declared for the linker (ld)
+    global _start
+
+_start:
+
+    ; Prepare arguments for the sys_write system call:
+    ;   - eax: system call number (sys_write)
+    ;   - ebx: file descriptor (stdout)
+    ;   - ecx: pointer to string
+    ;   - edx: string length
+    mov    edx, len
+    mov    ecx, msg
+    mov    ebx, 1
+    mov    eax, 4
+
+    ; Execute the sys_write system call
+    int    0x80
+
+    ; Execute sys_exit
+    mov    eax, 1
+    int    0x80
+
+section   .data
+msg db    &amp;#39;Hello, world!&amp;#39;, 0xa
+len equ    $ - msg
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Sure enough. Now the tracer reported that 7 instructions were executed, which is something I can easily verify.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="deep-into-the-instruction-stream"&gt;
+&lt;h3&gt;Deep into the instruction stream&lt;/h3&gt;
+&lt;p&gt;The assembly-written program allows me to introduce you to another powerful use of &lt;tt class="docutils literal"&gt;ptrace&lt;/tt&gt; - closely examining the state of the traced process. Here's another version of the &lt;tt class="docutils literal"&gt;run_debugger&lt;/tt&gt; function:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #00007f; font-weight: bold"&gt;void&lt;/span&gt; &lt;span style="color: #00007f"&gt;run_debugger&lt;/span&gt;(pid_t child_pid)
+{
+    &lt;span style="color: #00007f; font-weight: bold"&gt;int&lt;/span&gt; wait_status;
+    &lt;span style="color: #00007f; font-weight: bold"&gt;unsigned&lt;/span&gt; icounter = &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;;
+    procmsg(&lt;span style="color: #7f007f"&gt;&amp;quot;debugger started\n&amp;quot;&lt;/span&gt;);
+
+    &lt;span style="color: #007f00"&gt;/* Wait for child to stop on its first instruction */&lt;/span&gt;
+    wait(&amp;amp;wait_status);
+
+    &lt;span style="color: #00007f; font-weight: bold"&gt;while&lt;/span&gt; (WIFSTOPPED(wait_status)) {
+        icounter++;
+        &lt;span style="color: #00007f; font-weight: bold"&gt;struct&lt;/span&gt; user_regs_struct regs;
+        ptrace(PTRACE_GETREGS, child_pid, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;, &amp;amp;regs);
+        &lt;span style="color: #00007f; font-weight: bold"&gt;unsigned&lt;/span&gt; instr = ptrace(PTRACE_PEEKTEXT, child_pid, regs.eip, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;);
+
+        procmsg(&lt;span style="color: #7f007f"&gt;&amp;quot;icounter = %u.  EIP = 0x%08x.  instr = 0x%08x\n&amp;quot;&lt;/span&gt;,
+                    icounter, regs.eip, instr);
+
+        &lt;span style="color: #007f00"&gt;/* Make the child execute another instruction */&lt;/span&gt;
+        &lt;span style="color: #00007f; font-weight: bold"&gt;if&lt;/span&gt; (ptrace(PTRACE_SINGLESTEP, child_pid, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;, &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;) &amp;lt; &lt;span style="color: #007f7f"&gt;0&lt;/span&gt;) {
+            perror(&lt;span style="color: #7f007f"&gt;&amp;quot;ptrace&amp;quot;&lt;/span&gt;);
+            &lt;span style="color: #00007f; font-weight: bold"&gt;return&lt;/span&gt;;
+        }
+
+        &lt;span style="color: #007f00"&gt;/* Wait for child to stop on its next instruction */&lt;/span&gt;
+        wait(&amp;amp;wait_status);
+    }
+
+    procmsg(&lt;span style="color: #7f007f"&gt;&amp;quot;the child executed %u instructions\n&amp;quot;&lt;/span&gt;, icounter);
+}
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The only difference is in the first few lines of the &lt;tt class="docutils literal"&gt;while&lt;/tt&gt; loop. There are two new &lt;tt class="docutils literal"&gt;ptrace&lt;/tt&gt; calls. The first one reads the value of the process's registers into a structure. &lt;tt class="docutils literal"&gt;user_regs_struct&lt;/tt&gt; is defined in &lt;tt class="docutils literal"&gt;sys/user.h&lt;/tt&gt;. Now here's the fun part - if you look at this header file, a comment close to the top says:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;&lt;span style="color: #007f00"&gt;/* The whole purpose of this file is for GDB and GDB only.&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;   Don&amp;#39;t read too much into it. Don&amp;#39;t use it for&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;   anything other than GDB unless know what you are&lt;/span&gt;
+&lt;span style="color: #007f00"&gt;   doing.  */&lt;/span&gt;
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;Now, I don't know about you, but it makes &lt;em&gt;me&lt;/em&gt; feel we're on the right track :-) Anyway, back to the example. Once we have all the registers in &lt;tt class="docutils literal"&gt;regs&lt;/tt&gt;, we can peek at the current instruction of the process by calling &lt;tt class="docutils literal"&gt;ptrace&lt;/tt&gt; with &lt;tt class="docutils literal"&gt;PTRACE_PEEKTEXT&lt;/tt&gt;, passing it &lt;tt class="docutils literal"&gt;regs.eip&lt;/tt&gt; (the extended instruction pointer on x86) as the address. What we get back is the instruction &lt;a class="footnote-reference" href="#id12" id="id6"&gt;[6]&lt;/a&gt;. Let's see this new tracer run on our assembly-coded snippet:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;$ simple_tracer traced_helloworld
+[5700] debugger started
+[5701] target started. will run &amp;#39;traced_helloworld&amp;#39;
+[5700] icounter = 1.  EIP = 0x08048080.  instr = 0x00000eba
+[5700] icounter = 2.  EIP = 0x08048085.  instr = 0x0490a0b9
+[5700] icounter = 3.  EIP = 0x0804808a.  instr = 0x000001bb
+[5700] icounter = 4.  EIP = 0x0804808f.  instr = 0x000004b8
+[5700] icounter = 5.  EIP = 0x08048094.  instr = 0x01b880cd
+Hello, world!
+[5700] icounter = 6.  EIP = 0x08048096.  instr = 0x000001b8
+[5700] icounter = 7.  EIP = 0x0804809b.  instr = 0x000080cd
+[5700] the child executed 7 instructions
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;OK, so now in addition to &lt;tt class="docutils literal"&gt;icounter&lt;/tt&gt; we also see the instruction pointer and the instruction it points to at each step. How to verify this is correct? By using &lt;tt class="docutils literal"&gt;objdump &lt;span class="pre"&gt;-d&lt;/span&gt;&lt;/tt&gt; on the executable:&lt;/p&gt;
+&lt;div class="highlight" style="background: #ffffff"&gt;&lt;pre style="line-height: 125%"&gt;$ objdump -d traced_helloworld
+
+traced_helloworld:     file format elf32-i386
+
+
+Disassembly of section .text:
+
+08048080 &amp;lt;.text&amp;gt;:
+ 8048080:     ba 0e 00 00 00          mov    $0xe,%edx
+ 8048085:     b9 a0 90 04 08          mov    $0x80490a0,%ecx
+ 804808a:     bb 01 00 00 00          mov    $0x1,%ebx
+ 804808f:     b8 04 00 00 00          mov    $0x4,%eax
+ 8048094:     cd 80                   int    $0x80
+ 8048096:     b8 01 00 00 00          mov    $0x1,%eax
+ 804809b:     cd 80                   int    $0x80
+&lt;/pre&gt;&lt;/div&gt;
+&lt;p&gt;The correspondence between this and our tracing output is easily observed.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="attaching-to-a-running-process"&gt;
+&lt;h3&gt;Attaching to a running process&lt;/h3&gt;
+&lt;p&gt;As you know, debuggers can also attach to an already-running process. By now you won't be surprised to find out that this is also done with &lt;tt class="docutils literal"&gt;ptrace&lt;/tt&gt;, which can get the &lt;tt class="docutils literal"&gt;PTRACE_ATTACH&lt;/tt&gt; request. I won't show a code sample here since it should be very easy to implement given the code we've already gone through. For educational purposes, the approach taken here is more convenient (since we can stop the child process right at its start).&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="the-code"&gt;
+&lt;h3&gt;The code&lt;/h3&gt;
+&lt;p&gt;The complete C source-code of the simple tracer presented in this article (the more advanced, instruction-printing version) is available &lt;a class="reference external" href="https://github.com/eliben/code-for-blog/blob/main/2011/simple_tracer.c"&gt;here&lt;/a&gt;. It compiles cleanly with &lt;tt class="docutils literal"&gt;&lt;span class="pre"&gt;-Wall&lt;/span&gt; &lt;span class="pre"&gt;-pedantic&lt;/span&gt; &lt;span class="pre"&gt;--std=c99&lt;/span&gt;&lt;/tt&gt; on version 4.4 of &lt;tt class="docutils literal"&gt;gcc&lt;/tt&gt;.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="conclusion-and-next-steps"&gt;
+&lt;h3&gt;Conclusion and next steps&lt;/h3&gt;
+&lt;p&gt;Admittedly, this part didn't cover much - we're still far from having a real debugger in our hands. However, I hope it has already made the process of debugging at least a little less mysterious. &lt;tt class="docutils literal"&gt;ptrace&lt;/tt&gt; is truly a versatile system call with many abilities, of which we've sampled only a few so far.&lt;/p&gt;
+&lt;p&gt;Single-stepping through the code is useful, but only to a certain degree. Take the C &amp;quot;Hello, world!&amp;quot; sample I demonstrated above. To get to &lt;tt class="docutils literal"&gt;main&lt;/tt&gt; it would probably take a couple of thousands of instructions of C runtime initialization code to step through. This isn't very convenient. What we'd ideally want to have is the ability to place a breakpoint at the entry to &lt;tt class="docutils literal"&gt;main&lt;/tt&gt; and step from there. Fair enough, and in the next part of the series I intend to show how breakpoints are implemented.&lt;/p&gt;
+&lt;/div&gt;
+&lt;div class="section" id="references"&gt;
+&lt;h3&gt;References&lt;/h3&gt;
+&lt;p&gt;I've found the following resources and articles useful in the preparation of this article:&lt;/p&gt;
+&lt;ul class="simple"&gt;
+&lt;li&gt;&lt;a class="reference external" href="http://www.linuxjournal.com/article/6100?page=0,1"&gt;Playing with ptrace, Part I&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class="reference external" href="http://www.alexonlinux.com/how-debugger-works"&gt;How debugger works&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;
+&lt;img class="align-center" src="https://eli.thegreenplace.net/images/hline.jpg" style="width: 320px; height: 5px;" /&gt;
+&lt;table class="docutils footnote" frame="void" id="id7" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id1"&gt;[1]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;I didn't check but I'm sure the LOC count of &lt;tt class="docutils literal"&gt;gdb&lt;/tt&gt; is at least in the six-figures range.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id8" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id2"&gt;[2]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;Run &lt;tt class="docutils literal"&gt;man 2 ptrace&lt;/tt&gt; for complete enlightment.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id9" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id3"&gt;[3]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;&lt;em&gt;Peek&lt;/em&gt; and &lt;em&gt;poke&lt;/em&gt; are well-known system programming &lt;a class="reference external" href="http://www.jargon.net/jargonfile/p/peek.html"&gt;jargon&lt;/a&gt; for directly reading and writing memory contents.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id10" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id4"&gt;[4]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;This article assumes some basic level of Unix/Linux programming experience. I assume you know (at least conceptually) about &lt;tt class="docutils literal"&gt;fork&lt;/tt&gt;, the &lt;tt class="docutils literal"&gt;exec&lt;/tt&gt; family of functions and Unix signals.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id11" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id5"&gt;[5]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;At least if you're as obsessed with low-level details as I am :-)&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;table class="docutils footnote" frame="void" id="id12" rules="none"&gt;
+&lt;colgroup&gt;&lt;col class="label" /&gt;&lt;col /&gt;&lt;/colgroup&gt;
+&lt;tbody valign="top"&gt;
+&lt;tr&gt;&lt;td class="label"&gt;&lt;a class="fn-backref" href="#id6"&gt;[6]&lt;/a&gt;&lt;/td&gt;&lt;td&gt;A word of warning here: as I noted above, a lot of this is highly platform specific. I'm making some simplifying assumptions - for example, x86 instructions don't have to fit into 4 bytes (the size of &lt;tt class="docutils literal"&gt;unsigned&lt;/tt&gt; on my 32-bit Ubuntu machine). In fact, many won't. Peeking at instructions meaningfully requires us to have a complete disassembler at hand. We don't have one here, but real debuggers do.&lt;/td&gt;&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;/div&gt;
+
+    </content><category term="misc"></category><category term="Debuggers"></category><category term="Programming"></category></entry></feed>

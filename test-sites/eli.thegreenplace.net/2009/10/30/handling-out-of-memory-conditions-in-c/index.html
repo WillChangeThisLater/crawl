@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Handling out-of-memory conditions in C - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../../index.html" class="navbar-brand">
+                <img src="../../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="../handling-out-of-memory-conditions-in-c.html"
+                       rel="bookmark"
+                       title="Permalink to Handling out-of-memory conditions in C">
+                        Handling out-of-memory conditions in C
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> October 30, 2009 at 07:57</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../../tag/c-c.html">C & C++</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <div class="section" id="main-title">
+<p>We've all been taught that when <tt class="docutils literal"><span class="pre">malloc</span></tt> returns 0, it means the machine ran out of memory. This case should be detected and &quot;handled&quot; by our application in some graceful manner. But what does &quot;handled&quot; mean here? How does an application recover from an out of memory (OOM) condition? And what about the increased code complexity of checking all those <tt class="docutils literal"><span class="pre">malloc</span></tt> return values and passing them around?</p>
+<p>In this article I want to discuss the common policies of handling OOM conditions in C code. There is no single <em>right</em> approach. Therefore, I will review the code of several popular applications and libraries, to find out how they do it in order to gain useful insights for my own programming.</p>
+<p>Note that I focus on desktop &amp; server applications here, not embedded applications, which deserve an article of their own.</p>
+</div>
+<div class="section" id="the-policies">
+<h3>The policies</h3>
+<p>Casting minor variations aside, it's safe to say there are three major policies for handling OOM:</p>
+<div class="section" id="recovery">
+<h4>recovery</h4>
+<p>The recovery policy is the least commonly used because it's the most difficult to implement, and is highly domain-specific. This policy dictates that an application has to gracefully recover from an OOM condition. By &quot;gracefully recover&quot;, we usually mean one or more of:</p>
+<ul class="simple">
+<li>Release some resources and try again</li>
+<li>Save the user's work and exit</li>
+<li>Clean up temporary resources and exit</li>
+</ul>
+<p>Recovery is hard. To be certain that your application recovers correctly, you must be sure that the steps it takes don't require any more dynamic memory allocation. This sometimes isn't feasible and always difficult to implement correctly. Since C has no exceptions, memory allocation errors should be carefully propagated to the point where they can be recovered from, and this sometimes means multiple levels of function calls.</p>
+</div>
+<div class="section" id="abort">
+<h4>abort</h4>
+<p>The abort policy is simple and familiar: when no memory is available, print a polite error message and exit (abort) the application. This is the most commonly used policy - most command-line tools and desktop applications use it.</p>
+<p>As a matter of fact, this policy is so common that most Unix programs use a <tt class="docutils literal"><span class="pre">gnulib</span></tt> library function <tt class="docutils literal"><span class="pre">xmalloc</span></tt> instead of <tt class="docutils literal"><span class="pre">malloc</span></tt>:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">void</span> *
+<span style="color: #00007f">xmalloc</span> (<span style="color: #00007f; font-weight: bold">size_t</span> n)
+{
+  <span style="color: #00007f; font-weight: bold">void</span> *p = malloc (n);
+  <span style="color: #00007f; font-weight: bold">if</span> (!p &amp;&amp; n != <span style="color: #007f7f">0</span>)
+    xalloc_die ();
+  <span style="color: #00007f; font-weight: bold">return</span> p;
+}
+</pre></div>
+<p>When this function is called, its return value isn't checked, reducing the code's complexity. Here's a representative usage from the <tt class="docutils literal"><span class="pre">find</span></tt> utility:</p>
+<div class="highlight"><pre>cur_path = xmalloc (cur_path_size);
+strcpy (cur_path, pathname);
+cur_path[pathname_len - <span style="color: #007f7f">2</span>] = <span style="color: #7f007f">&#39;/&#39;</span>;
+</pre></div>
+</div>
+<div class="section" id="segfault">
+<h4>segfault</h4>
+<p>The segfault policy is the most simplistic of all: don't check the return value of <tt class="docutils literal"><span class="pre">malloc</span></tt> at all. In case of OOM, a NULL pointer will get dereferenced, so the program will die in a segmentation fault.</p>
+<p>If there are proponents to this policy, they'd probably say - &quot;Why abort with an error message, when a segmentation fault would do? With a segfault, we can at least inspect the code dump and find out where the fault was&quot;.</p>
+</div>
+</div>
+<div class="section" id="examples-libraries">
+<h3>Examples - libraries</h3>
+<p>In this section, I present the OOM policies of a couple of well-known libraries.</p>
+<div class="section" id="glib">
+<h4>Glib</h4>
+<p><a class="reference external" href="http://en.wikipedia.org/wiki/Glib">Glib</a> is a cross platform utility library in C, used most notably for GTK+. At first sight, Glib's approach to memory allocation is flexible. It provides two functions (with several variations):</p>
+<ul class="simple">
+<li><tt class="docutils literal"><span class="pre">g_malloc</span></tt>: attempts to allocate memory and exits with an error if the allocation fails, using <tt class="docutils literal"><span class="pre">g_error</span></tt> <a class="footnote-reference" href="index.html#id9" id="id2">[1]</a>. This is the abort policy.</li>
+<li><tt class="docutils literal"><span class="pre">g_try_malloc</span></tt>: attempts to allocate memory and just returns NULL if that fails, without aborting.</li>
+</ul>
+<p>This way, Glib leaves the programmer the choice - you can choose the policy. However, the story doesn't end here. What does Glib use for its own utilities? Let's check <tt class="docutils literal"><span class="pre">g_array</span></tt> for instance. Allocation of a new array is done by means of calling <tt class="docutils literal"><span class="pre">g_array_maybe_expand</span></tt> that uses <tt class="docutils literal"><span class="pre">g_realloc</span></tt>, which is implemented with the same abort policy as <tt class="docutils literal"><span class="pre">g_malloc</span></tt> - it aborts when the memory can't be allocated.</p>
+<p>Curiously, Glib isn't consistent with this policy. Many modules use <tt class="docutils literal"><span class="pre">g_malloc</span></tt>, but a couple (such as the <tt class="docutils literal"><span class="pre">gfileutils</span></tt> module) use <tt class="docutils literal"><span class="pre">g_try_malloc</span></tt> and notify the caller on memory allocation errors.</p>
+<p>So what do we have here? It seems that one of the most popular C libraries out there uses the abort policy of memory allocations. Take that into account when writing applications that make use of Glib - if you're planning some kind of graceful OOM recovery, you're out of luck.</p>
+</div>
+<div class="section" id="sqlite">
+<h4>SQLite</h4>
+<p>SQLite is an extremely popular and successful embedded database <a class="footnote-reference" href="index.html#id10" id="id3">[2]</a>. It is a good example to discuss, since high reliability is one of its declared goals.</p>
+<p>SQLite's memory management scheme is very intricate. The user has several options for handling memory allocation:</p>
+<ul class="simple">
+<li>A normal malloc-like scheme can be used</li>
+<li>Allocation can be done from a static buffer that's pre-allocated at initialization</li>
+<li>A debugging memory allocator can be used to debug memory problems (leaks, out-of-bounds conditions, and so on)</li>
+<li>Finally, the user can provide his own allocation scheme</li>
+</ul>
+<p>I'll examine the default allocation configuration, which is a normal system <tt class="docutils literal"><span class="pre">malloc</span></tt>. The SQLite wrapper for it, <tt class="docutils literal"><span class="pre">sqlite3MemMalloc</span></tt> defined in <tt class="docutils literal"><span class="pre">mem1.c</span></tt> is:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">static</span> <span style="color: #00007f; font-weight: bold">void</span> *sqlite3MemMalloc(<span style="color: #00007f; font-weight: bold">int</span> nByte){
+  sqlite3_int64 *p;
+  assert( nByte&gt;<span style="color: #007f7f">0</span> );
+  nByte = ROUND8(nByte);
+  p = malloc( nByte+<span style="color: #007f7f">8</span> );
+  <span style="color: #00007f; font-weight: bold">if</span>( p ){
+    p[<span style="color: #007f7f">0</span>] = nByte;
+    p++;
+  }
+  <span style="color: #00007f; font-weight: bold">return</span> (<span style="color: #00007f; font-weight: bold">void</span> *)p;
+}
+</pre></div>
+<p><tt class="docutils literal"><span class="pre">malloc</span></tt> is used to obtain the memory. Moreover, the size of the allocation is saved right in-front of the block. This is a common idiom for allocators that can report the size of blocks allocated when passed the pointers <a class="footnote-reference" href="index.html#id11" id="id4">[3]</a>.</p>
+<p>As you can see, the pointer obtained from <tt class="docutils literal"><span class="pre">malloc</span></tt> is returned. Hence, SQLite leaves it to the user to handle an OOM condition. This is obviously the recovery policy.</p>
+</div>
+</div>
+<div class="section" id="examples-applications">
+<h3>Examples - applications</h3>
+<p>OOM handling in a few relatively popular applications.</p>
+<div class="section" id="git">
+<h4>Git</h4>
+<p>Distributed version control is all the rage nowadays, and Linus Torvalds' <a class="reference external" href="http://en.wikipedia.org/wiki/Git_%28software%29">Git</a> is one of the most popular tools used in that domain.</p>
+<p>Git defines its own <tt class="docutils literal"><span class="pre">xmalloc</span></tt> wrapper:</p>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">void</span> *<span style="color: #00007f">xmalloc</span>(<span style="color: #00007f; font-weight: bold">size_t</span> size)
+{
+      <span style="color: #00007f; font-weight: bold">void</span> *ret = malloc(size);
+      <span style="color: #00007f; font-weight: bold">if</span> (!ret &amp;&amp; !size)
+              ret = malloc(<span style="color: #007f7f">1</span>);
+      <span style="color: #00007f; font-weight: bold">if</span> (!ret) {
+              release_pack_memory(size, -<span style="color: #007f7f">1</span>);
+              ret = malloc(size);
+              <span style="color: #00007f; font-weight: bold">if</span> (!ret &amp;&amp; !size)
+                      ret = malloc(<span style="color: #007f7f">1</span>);
+              <span style="color: #00007f; font-weight: bold">if</span> (!ret)
+                      die(<span style="color: #7f007f">&quot;Out of memory, malloc failed&quot;</span>);
+      }
+<span style="color: #007f00">#ifdef XMALLOC_POISON</span>
+      memset(ret, <span style="color: #007f7f">0xA5</span>, size);
+<span style="color: #007f00">#endif</span>
+      <span style="color: #00007f; font-weight: bold">return</span> ret;
+}
+</pre></div>
+<p>When it runs out of memory, Git attempts to free resources and retries the allocation. This is an example of the recovery policy. If the allocation doesn't succeed even after releasing the resources, Git aborts.</p>
+</div>
+<div class="section" id="lighttpd">
+<h4>lighttpd</h4>
+<p><a class="reference external" href="http://en.wikipedia.org/wiki/Lighttpd">Lighttpd</a> is a popular web server, notable for its speed and low memory footprint.</p>
+<p>There are no OOM checks in Lighttpd - it's using the segfault policy. Following are a few samples.</p>
+<p>From <tt class="docutils literal"><span class="pre">network_server_init</span></tt>:</p>
+<div class="highlight"><pre>srv_socket = calloc(<span style="color: #007f7f">1</span>, <span style="color: #00007f; font-weight: bold">sizeof</span>(*srv_socket));
+srv_socket-&gt;fd = -<span style="color: #007f7f">1</span>;
+</pre></div>
+<p>From <tt class="docutils literal"><span class="pre">rewrite_rule_buffer_append</span></tt>:</p>
+<div class="highlight"><pre>kvb-&gt;ptr = malloc(kvb-&gt;size * <span style="color: #00007f; font-weight: bold">sizeof</span>(*kvb-&gt;ptr));
+
+<span style="color: #00007f; font-weight: bold">for</span>(i = <span style="color: #007f7f">0</span>; i &lt; kvb-&gt;size; i++) {
+        kvb-&gt;ptr[i] = calloc(<span style="color: #007f7f">1</span>, <span style="color: #00007f; font-weight: bold">sizeof</span>(**kvb-&gt;ptr));
+</pre></div>
+<p>And there are countless other examples. It's interesting to note that Lighttpd uses the <a class="reference external" href="http://www.hwaci.com/sw/lemon/">lemon parser generator</a>, a library which itself adheres to the abort policy. Here's a representative example:</p>
+<div class="highlight"><pre>PRIVATE acttab *acttab_alloc(<span style="color: #00007f; font-weight: bold">void</span>){
+  acttab *p = malloc( <span style="color: #00007f; font-weight: bold">sizeof</span>(*p) );
+  <span style="color: #00007f; font-weight: bold">if</span>( p==<span style="color: #007f7f">0</span> ){
+    fprintf(stderr,<span style="color: #7f007f">&quot;Unable to allocate memory for a new acttab.&quot;</span>);
+    exit(<span style="color: #007f7f">1</span>);
+  }
+  memset(p, <span style="color: #007f7f">0</span>, <span style="color: #00007f; font-weight: bold">sizeof</span>(*p));
+  <span style="color: #00007f; font-weight: bold">return</span> p;
+}
+</pre></div>
+</div>
+<div class="section" id="redis">
+<h4>Redis</h4>
+<p><a class="reference external" href="http://code.google.com/p/redis/">Redis</a> is a key-value database that can store lists and sets as well as strings. It runs as a daemon and communicates with clients using TCP/IP.</p>
+<p>Redis implements its own version of size-aware memory allocation function called <tt class="docutils literal"><span class="pre">zmalloc</span></tt>, which returns the value of <tt class="docutils literal"><span class="pre">malloc</span></tt> without aborting automatically when it's NULL. All the internal utility modules in Redis faithfully propagate a NULL from <tt class="docutils literal"><span class="pre">zmalloc</span></tt> up to the application layer. When the application layer detects a returned NULL, it calls the <tt class="docutils literal"><span class="pre">oom</span></tt> function which does the following:</p>
+<div class="highlight"><pre><span style="color: #007f00">/* Redis generally does not try to recover from out</span>
+<span style="color: #007f00"> * of memory conditions when allocating objects or</span>
+<span style="color: #007f00"> * strings, it is not clear if it will be possible</span>
+<span style="color: #007f00"> * to report this condition to the client since the</span>
+<span style="color: #007f00"> * networking layer itself is based on heap</span>
+<span style="color: #007f00"> * allocation for send buffers, so we simply abort.</span>
+<span style="color: #007f00"> * At least the code will be simpler to read... */</span>
+<span style="color: #00007f; font-weight: bold">static</span> <span style="color: #00007f; font-weight: bold">void</span> <span style="color: #00007f">oom</span>(<span style="color: #00007f; font-weight: bold">const</span> <span style="color: #00007f; font-weight: bold">char</span> *msg) {
+    fprintf(stderr, <span style="color: #7f007f">&quot;%s: Out of memory\n&quot;</span>,msg);
+    fflush(stderr);
+    sleep(<span style="color: #007f7f">1</span>);
+    abort();
+}
+</pre></div>
+<p>Note the comment above this function <a class="footnote-reference" href="index.html#id12" id="id8">[4]</a>. It very clearly and honestly summarizes why the abort policy is usually the most logical one for applications.</p>
+</div>
+</div>
+<div class="section" id="conclusion">
+<h3>Conclusion</h3>
+<p>In this article, the various OOM policies were explained, and many examples were shown from real-world libraries and applications. It is clear that not all tools, even the commonly used ones, are perfect in terms of OOM handling. But how should I write <em>my</em> code?</p>
+<p>If you're writing a library, you most certainly should use the recovery policy. It's impolite at the least, and rendering your library unusable at worst, to abort or dump core in case of an OOM condition. Even if the application that includes your library isn't some high-reliability life-support controller, it may have ideas of its own for handling OOM (such as logging it somewhere central). A good library does not impose its style and idiosyncrasies on the calling application.</p>
+<p>This makes the code a bit more difficult to write, though not by much. Library code is usually not very deeply nested, so there isn't a lot of error propagation up the calling stack to do.</p>
+<p>For extra points, you can allow the application to specify the allocators and error handlers your library will use. This is a good approach for ultra-flexible, customize-me-to-the-death libraries like SQLite.</p>
+<p>If you're writing an application, you have more choices. I'll be bold and say that if your application needs to be so reliable that it must recover from OOM in a graceful manner, you are probably a programmer too advanced to benefit from this article. Anyway, recovery techniques are out of scope here.</p>
+<p>Otherwise, IMHO the abort policy is the best approach. Wrap your allocation functions with some wrapper that aborts on OOM - this will save you a lot of error checking code in your main logic. The wrapper does more: it provides a viable path to scale up in the future, if required. Perhaps when your application grows more complex you'll want some kind of gentle recovery like Git does - if all the allocations in your application go through a wrapper, the change will be very easy to implement.</p>
+<div align="center" class="align-center"><img class="align-center" src="../../../../images/hline.jpg" style="width: 320px; height: 5px;" /></div>
+<table class="docutils footnote" frame="void" id="id9" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id2">[1]</a></td><td><p class="first">The documentation of <tt class="docutils literal"><span class="pre">g_error</span></tt> states:</p>
+<p class="last">A convenience function/macro to log an error message. Error messages are always fatal, resulting in a call to abort() to terminate the application. This function will result in a core dump; don't use it for errors you expect. Using this function indicates a bug in your program, i.e. an assertion failure.</p>
+</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id10" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id3">[2]</a></td><td><em>Embedded</em> in the sense that it can be embedded into other applications. Just link to the 500K DLL and use the convenient and powerful API - and you have a fast and robust database engine in your application.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id11" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id4">[3]</a></td><td>Here's the size-checking function from the same file:</td></tr>
+</tbody>
+</table>
+<div class="highlight"><pre><span style="color: #00007f; font-weight: bold">static</span> <span style="color: #00007f; font-weight: bold">int</span> sqlite3MemSize(<span style="color: #00007f; font-weight: bold">void</span> *pPrior){
+  sqlite3_int64 *p;
+  <span style="color: #00007f; font-weight: bold">if</span>( pPrior==<span style="color: #007f7f">0</span> ) <span style="color: #00007f; font-weight: bold">return</span> <span style="color: #007f7f">0</span>;
+  p = (sqlite3_int64*)pPrior;
+  p--;
+  <span style="color: #00007f; font-weight: bold">return</span> (<span style="color: #00007f; font-weight: bold">int</span>)p[<span style="color: #007f7f">0</span>];
+}
+</pre></div>
+<table class="docutils footnote" frame="void" id="id12" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#id8">[4]</a></td><td>I've reformatted it to fit on the blog page without horizontal scrolling.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../../theme/js/count.js"></script>
+</body>
+</html>

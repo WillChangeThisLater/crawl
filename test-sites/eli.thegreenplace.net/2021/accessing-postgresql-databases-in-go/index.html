@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Accessing PostgreSQL databases in Go - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Accessing PostgreSQL databases in Go">
+                        Accessing PostgreSQL databases in Go
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> July 17, 2021 at 06:20</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/go.html">Go</a>
+        ,
+    <a href="../../tag/databases.html">Databases</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This post discusses some options for accessing PostgreSQL databases from Go.
+I'll only be covering low-level packages that provide access to the underlying
+database; this post is not about ORMs, which were <a class="reference external" href="../../2019/to-orm-or-not-to-orm/index.html">covered earlier in this blog</a>. The full source
+code accompanying this post is <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2021/go-postgresql">on GitHub</a>.</p>
+<p>We're going to be using a simple data model that could serve as a basis for
+an online course system (like Coursera):</p>
+<img alt="DB schema for the online course system" class="align-center" src="../../images/2021/mooc-dbschema.png" />
+<p>There is a many-to-many relationship between courses and users (a user can take
+any number of courses, and each course has multiple users signed up), and
+a one-to-many relationship between courses and projects (a course has multiple
+projects, but a project belongs to a single course).</p>
+<p>The SQL to create these tables is:</p>
+<div class="highlight"><pre><span></span><span class="k">create</span><span class="w"> </span><span class="k">table</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="k">not</span><span class="w"> </span><span class="k">exists</span><span class="w"> </span><span class="n">courses</span><span class="w"> </span><span class="p">(</span><span class="w"></span>
+<span class="w">    </span><span class="n">id</span><span class="w"> </span><span class="n">bigserial</span><span class="w"> </span><span class="k">primary</span><span class="w"> </span><span class="k">key</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">created_at</span><span class="w"> </span><span class="k">timestamp</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="k">with</span><span class="w"> </span><span class="k">time</span><span class="w"> </span><span class="k">zone</span><span class="w"> </span><span class="k">not</span><span class="w"> </span><span class="k">null</span><span class="w"> </span><span class="k">default</span><span class="w"> </span><span class="n">now</span><span class="p">(),</span><span class="w"></span>
+<span class="w">    </span><span class="n">title</span><span class="w"> </span><span class="nb">text</span><span class="w"> </span><span class="k">not</span><span class="w"> </span><span class="k">null</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">hashtags</span><span class="w"> </span><span class="nb">text</span><span class="p">[]</span><span class="w"></span>
+<span class="p">);</span><span class="w"></span>
+
+<span class="k">create</span><span class="w"> </span><span class="k">table</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="k">not</span><span class="w"> </span><span class="k">exists</span><span class="w"> </span><span class="n">projects</span><span class="w"> </span><span class="p">(</span><span class="w"></span>
+<span class="w">    </span><span class="n">id</span><span class="w"> </span><span class="n">bigserial</span><span class="w"> </span><span class="k">primary</span><span class="w"> </span><span class="k">key</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">name</span><span class="w"> </span><span class="nb">text</span><span class="w"> </span><span class="k">not</span><span class="w"> </span><span class="k">null</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">content</span><span class="w"> </span><span class="nb">text</span><span class="w"> </span><span class="k">not</span><span class="w"> </span><span class="k">null</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">course_id</span><span class="w"> </span><span class="nb">bigint</span><span class="w"> </span><span class="k">not</span><span class="w"> </span><span class="k">null</span><span class="w"> </span><span class="k">references</span><span class="w"> </span><span class="n">courses</span><span class="w"> </span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="w"> </span><span class="k">on</span><span class="w"> </span><span class="k">delete</span><span class="w"> </span><span class="k">cascade</span><span class="w"></span>
+<span class="p">);</span><span class="w"></span>
+
+<span class="k">create</span><span class="w"> </span><span class="k">table</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="k">not</span><span class="w"> </span><span class="k">exists</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="p">(</span><span class="w"></span>
+<span class="w">    </span><span class="n">id</span><span class="w"> </span><span class="n">bigserial</span><span class="w"> </span><span class="k">primary</span><span class="w"> </span><span class="k">key</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">name</span><span class="w"> </span><span class="nb">text</span><span class="w"> </span><span class="k">not</span><span class="w"> </span><span class="k">null</span><span class="w"></span>
+<span class="p">);</span><span class="w"></span>
+
+<span class="k">create</span><span class="w"> </span><span class="k">table</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="k">not</span><span class="w"> </span><span class="k">exists</span><span class="w"> </span><span class="n">course_user</span><span class="w"> </span><span class="p">(</span><span class="w"></span>
+<span class="w">    </span><span class="n">course_id</span><span class="w"> </span><span class="nb">bigint</span><span class="w"> </span><span class="k">not</span><span class="w"> </span><span class="k">null</span><span class="w"> </span><span class="k">references</span><span class="w"> </span><span class="n">courses</span><span class="w"> </span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="w"> </span><span class="k">on</span><span class="w"> </span><span class="k">delete</span><span class="w"> </span><span class="k">cascade</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="n">user_id</span><span class="w"> </span><span class="nb">bigint</span><span class="w"> </span><span class="k">not</span><span class="w"> </span><span class="k">null</span><span class="w"> </span><span class="k">references</span><span class="w"> </span><span class="n">users</span><span class="w"> </span><span class="p">(</span><span class="n">id</span><span class="p">)</span><span class="w"> </span><span class="k">on</span><span class="w"> </span><span class="k">delete</span><span class="w"> </span><span class="k">cascade</span><span class="p">,</span><span class="w"></span>
+<span class="w">    </span><span class="k">constraint</span><span class="w"> </span><span class="n">course_user_key</span><span class="w"> </span><span class="k">primary</span><span class="w"> </span><span class="k">key</span><span class="w"> </span><span class="p">(</span><span class="n">course_id</span><span class="p">,</span><span class="w"> </span><span class="n">user_id</span><span class="p">)</span><span class="w"></span>
+<span class="p">);</span><span class="w"></span>
+</pre></div>
+<p>Note that the <tt class="docutils literal">hashtags</tt> column is of the PostgreSQL array type: <tt class="docutils literal">hashtags
+text[]</tt>; this is on purpose, to demonstrate how custom PostgreSQL types are
+modeled in the various Go approaches presented here.</p>
+<div class="section" id="database-sql-with-the-pq-driver">
+<h2>database/sql with the pq driver</h2>
+<p>Probably the most common way to access PostgreSQL databases in Go is using the
+standard library <tt class="docutils literal">database/sql</tt>, along with <a class="reference external" href="https://github.com/lib/pq">pq</a>
+as the database driver. The full code for this approach, applied to our sample
+database is available <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2021/go-postgresql/pq">here</a>;
+I'll present some relevant bits and pieces below:</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="p">(</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;database/sql&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;fmt&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;log&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;os&quot;</span><span class="w"></span>
+
+<span class="w">  </span><span class="nx">_</span><span class="w"> </span><span class="s">&quot;github.com/lib/pq&quot;</span><span class="w"></span>
+<span class="p">)</span><span class="w"></span>
+
+<span class="c1">// Check is a helper that terminates the program with err.Error() logged in</span><span class="w"></span>
+<span class="c1">// case err is not nil.</span><span class="w"></span>
+<span class="kd">func</span><span class="w"> </span><span class="nx">Check</span><span class="p">(</span><span class="nx">err</span><span class="w"> </span><span class="kt">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">db</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">sql</span><span class="p">.</span><span class="nx">Open</span><span class="p">(</span><span class="s">&quot;postgres&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Getenv</span><span class="p">(</span><span class="s">&quot;MOOCDSN&quot;</span><span class="p">))</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Check</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">db</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// ... use db here</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>There's the usual blank import of the driver package, which registers itself
+with <tt class="docutils literal">database/sql</tt>; thereafter, the <tt class="docutils literal">&quot;postgres&quot;</tt> name can be used as a
+driver name to pass to <tt class="docutils literal">sql.Open</tt>. The path to the database is passed in an
+env var; for example, it could be something like:</p>
+<div class="highlight"><pre><span></span>MOOCDSN=postgres://testuser:testpassword@localhost/testmooc
+</pre></div>
+<p>If the database was created with the name <tt class="docutils literal">testmooc</tt>, with the user
+<tt class="docutils literal">testuser</tt> having access to it.</p>
+<p>Following this initialization, we can issue queries to the database via <tt class="docutils literal">db</tt>.
+Before we look at sample queries, here's the data model translated to Go types:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">course</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Id</span><span class="w">        </span><span class="kt">int64</span><span class="w"></span>
+<span class="w">  </span><span class="nx">CreatedAt</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Time</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Title</span><span class="w">     </span><span class="kt">string</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Hashtags</span><span class="w">  </span><span class="p">[]</span><span class="kt">string</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">type</span><span class="w"> </span><span class="nx">user</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Id</span><span class="w">   </span><span class="kt">int64</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Name</span><span class="w"> </span><span class="kt">string</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">type</span><span class="w"> </span><span class="nx">project</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Id</span><span class="w">      </span><span class="kt">int64</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Name</span><span class="w">    </span><span class="kt">string</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Content</span><span class="w"> </span><span class="kt">string</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Note that, unlike with ORMs, relationships between tables are not captured here.
+A <tt class="docutils literal">course</tt> does not have a collection of <tt class="docutils literal">project</tt>s; this is something we
+need to set up manually when querying the DB. Another thing to note is that
+<tt class="docutils literal">Hashtags</tt> has the type <tt class="docutils literal">[]string</tt> which will be mapped to PostgreSQL's
+<tt class="docutils literal">text[]</tt>.</p>
+<p>Here's a sample function wrapping an SQL query:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">dbAllCoursesForUser</span><span class="p">(</span><span class="nx">db</span><span class="w"> </span><span class="o">*</span><span class="nx">sql</span><span class="p">.</span><span class="nx">DB</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="w"> </span><span class="kt">int64</span><span class="p">)</span><span class="w"> </span><span class="p">([]</span><span class="nx">course</span><span class="p">,</span><span class="w"> </span><span class="kt">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">rows</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">db</span><span class="p">.</span><span class="nx">Query</span><span class="p">(</span><span class="s">`</span>
+<span class="s">    select courses.id, courses.created_at, courses.title, courses.hashtags</span>
+<span class="s">    from courses</span>
+<span class="s">    inner join course_user on courses.id = course_user.course_id</span>
+<span class="s">    where course_user.user_id = $1`</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">rows</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">courses</span><span class="w"> </span><span class="p">[]</span><span class="nx">course</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">rows</span><span class="p">.</span><span class="nx">Next</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">c</span><span class="w"> </span><span class="nx">course</span><span class="w"></span>
+<span class="w">    </span><span class="nx">err</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">rows</span><span class="p">.</span><span class="nx">Scan</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">c</span><span class="p">.</span><span class="nx">Id</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">c</span><span class="p">.</span><span class="nx">CreatedAt</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">c</span><span class="p">.</span><span class="nx">Title</span><span class="p">,</span><span class="w"> </span><span class="nx">pq</span><span class="p">.</span><span class="nx">Array</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">c</span><span class="p">.</span><span class="nx">Hashtags</span><span class="p">))</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">courses</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nb">append</span><span class="p">(</span><span class="nx">courses</span><span class="p">,</span><span class="w"> </span><span class="nx">c</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">rows</span><span class="p">.</span><span class="nx">Err</span><span class="p">();</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">courses</span><span class="p">,</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Given a user ID, this function obtains all the courses the user is signed up
+for, by <tt class="docutils literal">join</tt>-ing the courses table with the <tt class="docutils literal">course_user</tt> linking table.
+<tt class="docutils literal">database/sql</tt> requires reading the result of the query in a scanning loop,
+and manually placing the results into structs; it's not aware of any mapping
+between Go structs and SQL tables. PostgreSQL arrays are read by wrapping with a
+<tt class="docutils literal">pq.Array</tt> type.</p>
+<p>Here's a slightly more involved query, which <tt class="docutils literal">join</tt>s three tables to
+obtain all the projects the user has to finish (there could be multiple
+projects per course, and a user could be signed up for multiple courses):</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">dbAllProjectsForUser</span><span class="p">(</span><span class="nx">db</span><span class="w"> </span><span class="o">*</span><span class="nx">sql</span><span class="p">.</span><span class="nx">DB</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="w"> </span><span class="kt">int64</span><span class="p">)</span><span class="w"> </span><span class="p">([]</span><span class="nx">project</span><span class="p">,</span><span class="w"> </span><span class="kt">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">rows</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">db</span><span class="p">.</span><span class="nx">Query</span><span class="p">(</span><span class="s">`</span>
+<span class="s">    select projects.id, projects.name, projects.content</span>
+<span class="s">    from courses</span>
+<span class="s">    inner join course_user on courses.id = course_user.course_id</span>
+<span class="s">    inner join projects on courses.id = projects.course_id</span>
+<span class="s">    where course_user.user_id = $1`</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">rows</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">projects</span><span class="w"> </span><span class="p">[]</span><span class="nx">project</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">rows</span><span class="p">.</span><span class="nx">Next</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">p</span><span class="w"> </span><span class="nx">project</span><span class="w"></span>
+<span class="w">    </span><span class="nx">err</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">rows</span><span class="p">.</span><span class="nx">Scan</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">p</span><span class="p">.</span><span class="nx">Id</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">p</span><span class="p">.</span><span class="nx">Name</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">p</span><span class="p">.</span><span class="nx">Content</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">projects</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nb">append</span><span class="p">(</span><span class="nx">projects</span><span class="p">,</span><span class="w"> </span><span class="nx">p</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">rows</span><span class="p">.</span><span class="nx">Err</span><span class="p">();</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">projects</span><span class="p">,</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>While the SQL is more complicated, the rest of the code is almost identical to
+the earlier function.</p>
+</div>
+<div class="section" id="pgx">
+<h2>pgx</h2>
+<p>While <tt class="docutils literal">pq</tt> has been around for a long time and has served the Go community
+well, it hasn't been very actively maintained recently. In fact, if you read
+all the way to the end of its README, you'll find this in the Status section:</p>
+<blockquote>
+This package is effectively in maintenance mode and is not actively
+developed. Small patches and features are only rarely reviewed and merged.
+We recommend using pgx which is actively maintained.</blockquote>
+<p>So what is <tt class="docutils literal">pgx</tt>? It's a <a class="reference external" href="https://github.com/jackc/pgx">driver and toolkit for PostgreSQL</a>:</p>
+<blockquote>
+<p>pgx aims to be low-level, fast, and performant, while also enabling
+PostgreSQL-specific features that the standard <tt class="docutils literal">database/sql</tt> package does
+not allow for.</p>
+<p>The driver component of pgx can be used alongside the standard
+<tt class="docutils literal">database/sql</tt> package.</p>
+</blockquote>
+<p>The <tt class="docutils literal">pgx</tt> package has two distinct modes of operation:</p>
+<ol class="arabic simple">
+<li>It can serve as a standard driver for <tt class="docutils literal">database/sql</tt>.</li>
+<li>It can serve as a direct interface to PostgreSQL, which isn't beholden to
+the standard API of <tt class="docutils literal">database/sql</tt>, and thus can employ PostgreSQL-specific
+features and code paths.</li>
+</ol>
+<p>To use option (1), we can reuse 99% of the previous sample (the
+<tt class="docutils literal">database/sql</tt> interface is really very well standardized!). All we have to
+do is replace the driver import with:</p>
+<div class="highlight"><pre><span></span><span class="nx">_</span><span class="w"> </span><span class="s">&quot;github.com/jackc/pgx/v4/stdlib&quot;</span><span class="w"></span>
+</pre></div>
+<p>And then change the <tt class="docutils literal">sql.Open</tt> call to invoke the <tt class="docutils literal">pgx</tt> driver:</p>
+<div class="highlight"><pre><span></span><span class="nx">db</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">sql</span><span class="p">.</span><span class="nx">Open</span><span class="p">(</span><span class="s">&quot;pgx&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Getenv</span><span class="p">(</span><span class="s">&quot;MOOCDSN&quot;</span><span class="p">))</span><span class="w"></span>
+</pre></div>
+<p>We don't have to update the rest of the code <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>.</p>
+<p>What about the direct interface? For this, we'll have to rejigger our code a
+bit, since the types are slightly different. The full code for this is available
+<a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2021/go-postgresql/pgx">here</a>;
+here are the salient changes:</p>
+<div class="highlight"><pre><span></span><span class="nx">ctx</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">context</span><span class="p">.</span><span class="nx">Background</span><span class="p">()</span><span class="w"></span>
+<span class="nx">conn</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">pgx</span><span class="p">.</span><span class="nx">Connect</span><span class="p">(</span><span class="nx">ctx</span><span class="p">,</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Getenv</span><span class="p">(</span><span class="s">&quot;MOOCDSN&quot;</span><span class="p">))</span><span class="w"></span>
+<span class="nx">Check</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="k">defer</span><span class="w"> </span><span class="nx">conn</span><span class="p">.</span><span class="nx">Close</span><span class="p">(</span><span class="nx">ctx</span><span class="p">)</span><span class="w"></span>
+</pre></div>
+<p>Instead of using <tt class="docutils literal">sql.Open</tt>, we call <tt class="docutils literal">pgx.Connect</tt> instead. When it's
+time to query the DB, our function for grabbing all the courses a user is signed
+up for would be:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">dbAllCoursesForUser</span><span class="p">(</span><span class="nx">ctx</span><span class="w"> </span><span class="nx">context</span><span class="p">.</span><span class="nx">Context</span><span class="p">,</span><span class="w"> </span><span class="nx">conn</span><span class="w"> </span><span class="o">*</span><span class="nx">pgx</span><span class="p">.</span><span class="nx">Conn</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="w"> </span><span class="kt">int64</span><span class="p">)</span><span class="w"> </span><span class="p">([]</span><span class="nx">course</span><span class="p">,</span><span class="w"> </span><span class="kt">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">rows</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">conn</span><span class="p">.</span><span class="nx">Query</span><span class="p">(</span><span class="nx">ctx</span><span class="p">,</span><span class="w"> </span><span class="s">`</span>
+<span class="s">    select courses.id, courses.created_at, courses.title, courses.hashtags</span>
+<span class="s">    from courses</span>
+<span class="s">    inner join course_user on courses.id = course_user.course_id</span>
+<span class="s">    where course_user.user_id = $1`</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">rows</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">courses</span><span class="w"> </span><span class="p">[]</span><span class="nx">course</span><span class="w"></span>
+<span class="w">  </span><span class="k">for</span><span class="w"> </span><span class="nx">rows</span><span class="p">.</span><span class="nx">Next</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nx">c</span><span class="w"> </span><span class="nx">course</span><span class="w"></span>
+<span class="w">    </span><span class="nx">err</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nx">rows</span><span class="p">.</span><span class="nx">Scan</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">c</span><span class="p">.</span><span class="nx">Id</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">c</span><span class="p">.</span><span class="nx">CreatedAt</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">c</span><span class="p">.</span><span class="nx">Title</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="nx">c</span><span class="p">.</span><span class="nx">Hashtags</span><span class="p">)</span><span class="w"></span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">      </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="w">    </span><span class="p">}</span><span class="w"></span>
+<span class="w">    </span><span class="nx">courses</span><span class="w"> </span><span class="p">=</span><span class="w"> </span><span class="nb">append</span><span class="p">(</span><span class="nx">courses</span><span class="p">,</span><span class="w"> </span><span class="nx">c</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">rows</span><span class="p">.</span><span class="nx">Err</span><span class="p">();</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">courses</span><span class="p">,</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Note that the Go struct types representing table entries remain exactly the
+same. Reading query results with <tt class="docutils literal">pgx</tt> is very similar to <tt class="docutils literal">database/sql</tt>,
+but array types no longer need to be wrapped in <tt class="docutils literal">pq.Array</tt>, since <tt class="docutils literal">pgx</tt>
+supports natively reading PostgreSQL arrays into Go slices.</p>
+<p>So, what do we get by using <tt class="docutils literal">pgx</tt> instead of <tt class="docutils literal">database/sql</tt>? According to
+the <a class="reference external" href="https://github.com/jackc/pgx#features">feature list on its README</a>, quite
+a lot, including native support for custom PostgreSQL types, JSON, an advanced
+connection pool and a whole slew of performance-oriented features. Most notably,
+<tt class="docutils literal">pgx</tt> uses the PostgreSQL binary protocol directly for faster marshaling and
+unmarshaling of types. According to <a class="reference external" href="https://github.com/jackc/go_db_bench">pgx's benchmarks</a>, there are considerable performance
+differences in some cases <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.</p>
+</div>
+<div class="section" id="sqlx">
+<h2>sqlx</h2>
+<p>We've seen a few examples of non-trivial SQL queries being scanned into Go
+objects so far; all of them involve the same pattern:</p>
+<ul class="simple">
+<li>The query is submitted</li>
+<li>The result is iterated row by row</li>
+<li>Each row gets manually unmarshaled into struct fields</li>
+</ul>
+<p>One of the biggest complaints about <tt class="docutils literal">database/sql</tt> in Go is the verbosity
+of this process; particularly the second and third steps above. Why can't we
+just say:</p>
+<div class="highlight"><pre><span></span><span class="kd">var</span><span class="w"> </span><span class="nx">courses</span><span class="w"> </span><span class="p">[]</span><span class="nx">course</span><span class="w"></span>
+<span class="nx">db</span><span class="p">.</span><span class="nx">FillInQueryResults</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">courses</span><span class="p">,</span><span class="w"> </span><span class="o">...</span><span class="p">.)</span><span class="w"></span>
+</pre></div>
+<p>After all, many packages in the Go standard library already work this way; for
+example <tt class="docutils literal">encoding/json</tt>, etc. The reason is the variety of types SQL supports.
+While JSON has relatively few supported types, SQL has many; moreover, SQL types
+differ by database. Therefore, it was fairly tricky for the Go project to offer
+such advanced scanning capabilities in the standard library, and we have to rely
+on third-party packages instead.</p>
+<p>Luckily, an abundance of third-party packages exists just for this purpose.
+One of the most prominent is <a class="reference external" href="https://github.com/jmoiron/sqlx">sqlx</a>. Let's
+revisit our sample database querying code, this time using <tt class="docutils literal">sqlx</tt>. The full
+code for this is available <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2021/go-postgresql/sqlx">here</a>.</p>
+<p>The database setup code is very similar to the vanilla <tt class="docutils literal">database/sql</tt> version:</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="p">(</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;fmt&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;log&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="s">&quot;os&quot;</span><span class="w"></span>
+
+<span class="w">  </span><span class="s">&quot;github.com/jmoiron/sqlx&quot;</span><span class="w"></span>
+<span class="w">  </span><span class="nx">_</span><span class="w"> </span><span class="s">&quot;github.com/lib/pq&quot;</span><span class="w"></span>
+<span class="p">)</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">Check</span><span class="p">(</span><span class="nx">err</span><span class="w"> </span><span class="kt">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">db</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">sqlx</span><span class="p">.</span><span class="nx">Open</span><span class="p">(</span><span class="s">&quot;postgres&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Getenv</span><span class="p">(</span><span class="s">&quot;MOOCDSN&quot;</span><span class="p">))</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Check</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">defer</span><span class="w"> </span><span class="nx">db</span><span class="p">.</span><span class="nx">Close</span><span class="p">()</span><span class="w"></span>
+
+<span class="w">  </span><span class="c1">// ... use db here</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p><tt class="docutils literal">sqlx.Open</tt> wraps <tt class="docutils literal">sql.Open</tt> and uses the same database driver registration
+mechanism. The type it returns is <tt class="docutils literal">sqlx.DB</tt>, which extends <tt class="docutils literal">sql.DB</tt> with
+some convenience methods. Here's our function to query all courses a user is
+signed up for, this time using <tt class="docutils literal">sqlx</tt>:</p>
+<div class="highlight"><pre><span></span><span class="kd">func</span><span class="w"> </span><span class="nx">dbAllCoursesForUser</span><span class="p">(</span><span class="nx">db</span><span class="w"> </span><span class="o">*</span><span class="nx">sqlx</span><span class="p">.</span><span class="nx">DB</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="w"> </span><span class="kt">int64</span><span class="p">)</span><span class="w"> </span><span class="p">([]</span><span class="nx">course</span><span class="p">,</span><span class="w"> </span><span class="kt">error</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="kd">var</span><span class="w"> </span><span class="nx">courses</span><span class="w"> </span><span class="p">[]</span><span class="nx">course</span><span class="w"></span>
+<span class="w">  </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">db</span><span class="p">.</span><span class="nx">Select</span><span class="p">(</span><span class="o">&amp;</span><span class="nx">courses</span><span class="p">,</span><span class="w"> </span><span class="s">`</span>
+<span class="s">    select courses.id, courses.created_at, courses.title, courses.hashtags</span>
+<span class="s">    from courses</span>
+<span class="s">    inner join course_user on courses.id = course_user.course_id</span>
+<span class="s">    where course_user.user_id = $1`</span><span class="p">,</span><span class="w"> </span><span class="nx">userId</span><span class="p">)</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="nx">courses</span><span class="p">,</span><span class="w"> </span><span class="kc">nil</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>This is just what we wanted! The code scans the result into a slice of
+<tt class="docutils literal">course</tt> objects directly, without needing the row-by-row loop. <tt class="docutils literal">sqlx</tt>
+accomplishes this feat by using reflection - it examines the underlying type
+of the struct in the slice and maps DB columns to struct fields automatically.
+It sometimes needs help, though; for example, our <tt class="docutils literal">course</tt> struct has to
+be modified as follows:</p>
+<div class="highlight"><pre><span></span><span class="kd">type</span><span class="w"> </span><span class="nx">course</span><span class="w"> </span><span class="kd">struct</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Id</span><span class="w">        </span><span class="kt">int64</span><span class="w"></span>
+<span class="w">  </span><span class="nx">CreatedAt</span><span class="w"> </span><span class="nx">time</span><span class="p">.</span><span class="nx">Time</span><span class="w"> </span><span class="s">`db:&quot;created_at&quot;`</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Title</span><span class="w">     </span><span class="kt">string</span><span class="w"></span>
+<span class="w">  </span><span class="nx">Hashtags</span><span class="w">  </span><span class="nx">pq</span><span class="p">.</span><span class="nx">StringArray</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Since <tt class="docutils literal">sqlx</tt> won't map the database <tt class="docutils literal">created_at</tt> column to the <tt class="docutils literal">CreatedAt</tt>
+field automatically, we have to provide an instruction to do so explicitly in
+a field tag.</p>
+<p><tt class="docutils literal">sqlx</tt> requires an underlying <tt class="docutils literal">database/sql</tt> driver for the
+actual DB interactions. In the example above, we've been using <tt class="docutils literal">pq</tt>, but
+the stdlib driver of <tt class="docutils literal">pgx</tt> can be used as well. Unfortunately, <tt class="docutils literal">sqlx</tt> <a class="reference external" href="https://github.com/jackc/pgx/issues/760">does
+not support the native pgx driver</a>.
+However, a different package called <a class="reference external" href="https://github.com/georgysavva/scany">scany</a> does support both the native and the
+stdlib drivers of <tt class="docutils literal">pgx</tt>. I wrote another version of this sample, using
+<tt class="docutils literal">scany</tt>; I won't show this code here, since it's very similar to the <tt class="docutils literal">sqlx</tt>
+example, but you can find it <a class="reference external" href="https://github.com/eliben/code-for-blog/tree/main/2021/go-postgresql/scany">on GitHub</a>.</p>
+</div>
+<div class="section" id="is-sqlx-worth-it">
+<h2>Is <tt class="docutils literal">sqlx</tt> worth it?</h2>
+<p>Looking at our <tt class="docutils literal">dbAllCoursesForUser</tt> function, the version using <tt class="docutils literal">sqlx</tt>
+saves about 14 lines of code compared to the vanilla scan with <tt class="docutils literal">database/sql</tt>.
+I'm <a class="reference external" href="../../2019/to-orm-or-not-to-orm/index.html">on record saying that ORMs are unlikely to be worthwhile in Go</a>, but what about
+<tt class="docutils literal">sqlx</tt>? Is saving 14 LOC per DB query function worth the trouble of an
+additional dependency, with its potential quirks, bugs and leaky abstractions?</p>
+<p>This question is hard to answer globally, so I'll just say &quot;it depends&quot;.</p>
+<p>On one hand, 14 LOC per DB query is really not much. Say you have 50
+possible SQL queries in your application, this saves 700 LOC of trivial and
+repetitive code. Is that a lot? In most cases, almost certainly not. In the end,
+it all boils down to the central thesis of the <a class="reference external" href="../../2017/benefits-of-dependencies-in-software-projects-as-a-function-of-effort/index.html">benefits of extra dependencies
+as a function of effort</a>.</p>
+<p>On the other hand, as opposed to ORMs, packages like <tt class="docutils literal">sqlx</tt> and <tt class="docutils literal">scany</tt>
+provide a fairly focused utility with not very much magic involved. After all,
+the standard library already has similar tools built in for unmarshaling JSON,
+so this is a tried-and-true method that can work for data in relational
+databases as well. Since the utility of these packages is focused, they are
+not terribly hard to tear out of a codebase and replace, in case things don't
+go as expected, so they also present a considerably smaller risk than going
+all-in on ORMs.</p>
+<p>To conclude, packages like <tt class="docutils literal">sqlx</tt> and <tt class="docutils literal">scany</tt> provide a middle ground
+between raw SQL access and full-blown ORMs; this means mid-of-the-way advantages
+as well as disadvantages.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>There's a small nuance to be aware of if you're following along with
+the code samples, trying to run them. To be able to read PostgreSQL
+arrays in Go using the <tt class="docutils literal">database/sql</tt> driver component of <tt class="docutils literal">pgx</tt>, we
+still need to import <tt class="docutils literal">pq</tt> in order to use its <tt class="docutils literal">pq.Array</tt> type. This
+type provides custom readers that are required to read custom DB types
+via the standard interface. When using the <tt class="docutils literal">pgx</tt> direct interface, this
+is not necessary since <tt class="docutils literal">pgx</tt> supports reading PostgreSQL arrays
+directly into slices. See <a class="reference external" href="https://github.com/jackc/pgx/issues/72">this pgx issue</a> for additional information.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>As usual with benchmarks, YMMV. Every case is different, and I
+imagine that in many scenarios the network overhead of a PostgreSQL
+connection will subsume any difference observable between different
+drivers.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Calling back into Python from llvmlite-JITed code - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Calling back into Python from llvmlite-JITed code">
+                        Calling back into Python from llvmlite-JITed code
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> April 18, 2015 at 05:50</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/llvm-clang.html">LLVM & Clang</a>
+        ,
+    <a href="../../tag/python.html">Python</a>
+        ,
+    <a href="../../tag/compilation.html">Compilation</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>This post is about a somewhat more interesting and complex use of llvmlite than
+the basic example presented in <a class="reference external" href="../building-and-using-llvmlite-a-basic-example/index.html">my previous article on the subject</a>.</p>
+<p>I see compilation as a meta-tool. It lets us build new levels of
+abstraction and expressiveness within our code. We can use it to build
+additional languages on top of our host language (common for C, C++ and
+Java-based systems, less common for Python), to accelerate some parts of our
+host language (more common in Python), or anything in between.</p>
+<p>To fully harness the power of runtime compilation (JITing), however, it's very
+useful to know how to bridge the gap between the host language and the JITed
+language; preferably in both directions. As the <a class="reference external" href="../building-and-using-llvmlite-a-basic-example/index.html">previous article</a>
+shows, calling from the host into the JITed language is trivial. In fact, this
+is what JITing is mostly about. But what about the other direction? This is
+somewhat more challenging, but leads to interesting uses and additional
+capabilities.</p>
+<p>While the post uses llvmlite for the JITing, I believe it presents general
+concepts that are relevant for any programming environment.</p>
+<div class="section" id="callback-from-jited-code-to-python">
+<h2>Callback from JITed code to Python</h2>
+<p>Let's start with a simple example: we want to be able to invoke some Python
+function from within JITed code.</p>
+<div class="highlight"><pre><span></span><span class="kn">from</span> <span class="nn">ctypes</span> <span class="kn">import</span> <span class="n">c_int64</span><span class="p">,</span> <span class="n">c_void_p</span><span class="p">,</span> <span class="n">CFUNCTYPE</span>
+<span class="kn">import</span> <span class="nn">sys</span>
+
+<span class="kn">import</span> <span class="nn">llvmlite.ir</span> <span class="k">as</span> <span class="nn">ir</span>
+<span class="kn">import</span> <span class="nn">llvmlite.binding</span> <span class="k">as</span> <span class="nn">llvm</span>
+
+<span class="k">def</span> <span class="nf">create_caller</span><span class="p">(</span><span class="n">m</span><span class="p">):</span>
+    <span class="c1"># define i64 @caller(i64 (i64, i64)* nocapture %f, i64 %i) #0 {</span>
+    <span class="c1"># entry:</span>
+    <span class="c1">#   %mul = shl nsw i64 %i, 1</span>
+    <span class="c1">#   %call = tail call i64 %f(i64 %i, i64 %mul) #1</span>
+    <span class="c1">#   ret i64 %call</span>
+    <span class="c1"># }</span>
+    <span class="n">i64_ty</span> <span class="o">=</span> <span class="n">ir</span><span class="o">.</span><span class="n">IntType</span><span class="p">(</span><span class="mi">64</span><span class="p">)</span>
+
+    <span class="c1"># The callback function &#39;caller&#39; accepts is a pointer to FunctionType with</span>
+    <span class="c1"># the appropriate signature.</span>
+    <span class="n">cb_func_ptr_ty</span> <span class="o">=</span> <span class="n">ir</span><span class="o">.</span><span class="n">FunctionType</span><span class="p">(</span><span class="n">i64_ty</span><span class="p">,</span> <span class="p">[</span><span class="n">i64_ty</span><span class="p">,</span> <span class="n">i64_ty</span><span class="p">])</span><span class="o">.</span><span class="n">as_pointer</span><span class="p">()</span>
+    <span class="n">caller_func_ty</span> <span class="o">=</span> <span class="n">ir</span><span class="o">.</span><span class="n">FunctionType</span><span class="p">(</span><span class="n">i64_ty</span><span class="p">,</span> <span class="p">[</span><span class="n">cb_func_ptr_ty</span><span class="p">,</span> <span class="n">i64_ty</span><span class="p">])</span>
+
+    <span class="n">caller_func</span> <span class="o">=</span> <span class="n">ir</span><span class="o">.</span><span class="n">Function</span><span class="p">(</span><span class="n">m</span><span class="p">,</span> <span class="n">caller_func_ty</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="s1">&#39;caller&#39;</span><span class="p">)</span>
+    <span class="n">caller_func</span><span class="o">.</span><span class="n">args</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">name</span> <span class="o">=</span> <span class="s1">&#39;f&#39;</span>
+    <span class="n">caller_func</span><span class="o">.</span><span class="n">args</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">name</span> <span class="o">=</span> <span class="s1">&#39;i&#39;</span>
+    <span class="n">irbuilder</span> <span class="o">=</span> <span class="n">ir</span><span class="o">.</span><span class="n">IRBuilder</span><span class="p">(</span><span class="n">caller_func</span><span class="o">.</span><span class="n">append_basic_block</span><span class="p">(</span><span class="s1">&#39;entry&#39;</span><span class="p">))</span>
+    <span class="n">mul</span> <span class="o">=</span> <span class="n">irbuilder</span><span class="o">.</span><span class="n">mul</span><span class="p">(</span><span class="n">caller_func</span><span class="o">.</span><span class="n">args</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span>
+                        <span class="n">irbuilder</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="n">i64_ty</span><span class="p">,</span> <span class="mi">2</span><span class="p">),</span>
+                        <span class="n">name</span><span class="o">=</span><span class="s1">&#39;mul&#39;</span><span class="p">)</span>
+    <span class="n">call</span> <span class="o">=</span> <span class="n">irbuilder</span><span class="o">.</span><span class="n">call</span><span class="p">(</span><span class="n">caller_func</span><span class="o">.</span><span class="n">args</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="p">[</span><span class="n">caller_func</span><span class="o">.</span><span class="n">args</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">mul</span><span class="p">])</span>
+    <span class="n">irbuilder</span><span class="o">.</span><span class="n">ret</span><span class="p">(</span><span class="n">call</span><span class="p">)</span>
+</pre></div>
+<p><tt class="docutils literal">create_caller</tt> creates a new LLVM IR function called <tt class="docutils literal">caller</tt> and injects
+it into the given module <tt class="docutils literal">m</tt>.</p>
+<p>If you're not an expert at reading LLVM IR, <tt class="docutils literal">caller</tt> is equivalent to this C
+function:</p>
+<div class="highlight"><pre><span></span><span class="kt">int64_t</span><span class="w"> </span><span class="nf">caller</span><span class="p">(</span><span class="kt">int64_t</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">f</span><span class="p">)(</span><span class="kt">int64_t</span><span class="p">,</span><span class="w"> </span><span class="kt">int64_t</span><span class="p">),</span><span class="w"> </span><span class="kt">int64_t</span><span class="w"> </span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">return</span><span class="w"> </span><span class="n">f</span><span class="p">(</span><span class="n">i</span><span class="p">,</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">2</span><span class="p">);</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>It takes <tt class="docutils literal">f</tt> - a pointer to a function accepting two integers and returning an
+integer (all integers in this post are 64-bit), and <tt class="docutils literal">i</tt> - an integer. It calls
+<tt class="docutils literal">f</tt> with <tt class="docutils literal">i*2</tt> and <tt class="docutils literal">i</tt> as the arguments. That's it - pretty simple, but
+sufficient for our demonstration's purposes.</p>
+<p>Now let's define a Python function:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">myfunc</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">):</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;I was called with </span><span class="si">{0}</span><span class="s1"> and </span><span class="si">{1}</span><span class="s1">&#39;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">))</span>
+    <span class="k">return</span> <span class="n">a</span> <span class="o">+</span> <span class="n">b</span>
+</pre></div>
+<p>Finally, let's see how we can pass <tt class="docutils literal">myfunc</tt> as the callback <tt class="docutils literal">caller</tt> will
+invoke. This is fairly straightforward, thanks to the support for callback
+functions in <tt class="docutils literal">ctypes</tt>. In fact, it's exactly similar to the way you'd pass
+Python callbacks to C code via <tt class="docutils literal">ctypes</tt> without any JITing involved:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">main</span><span class="p">():</span>
+    <span class="n">module</span> <span class="o">=</span> <span class="n">ir</span><span class="o">.</span><span class="n">Module</span><span class="p">()</span>
+    <span class="n">create_caller</span><span class="p">(</span><span class="n">module</span><span class="p">)</span>
+
+    <span class="n">llvm</span><span class="o">.</span><span class="n">initialize</span><span class="p">()</span>
+    <span class="n">llvm</span><span class="o">.</span><span class="n">initialize_native_target</span><span class="p">()</span>
+    <span class="n">llvm</span><span class="o">.</span><span class="n">initialize_native_asmprinter</span><span class="p">()</span>
+
+    <span class="n">llvm_module</span> <span class="o">=</span> <span class="n">llvm</span><span class="o">.</span><span class="n">parse_assembly</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">module</span><span class="p">))</span>
+    <span class="n">tm</span> <span class="o">=</span> <span class="n">llvm</span><span class="o">.</span><span class="n">Target</span><span class="o">.</span><span class="n">from_default_triple</span><span class="p">()</span><span class="o">.</span><span class="n">create_target_machine</span><span class="p">()</span>
+
+    <span class="c1"># Compile the module to machine code using MCJIT.</span>
+    <span class="k">with</span> <span class="n">llvm</span><span class="o">.</span><span class="n">create_mcjit_compiler</span><span class="p">(</span><span class="n">llvm_module</span><span class="p">,</span> <span class="n">tm</span><span class="p">)</span> <span class="k">as</span> <span class="n">ee</span><span class="p">:</span>
+        <span class="n">ee</span><span class="o">.</span><span class="n">finalize_object</span><span class="p">()</span>
+
+        <span class="c1"># Obtain a pointer to the compiled &#39;caller&#39; - it&#39;s the address of its</span>
+        <span class="c1"># JITed code in memory.</span>
+        <span class="n">CBFUNCTY</span> <span class="o">=</span> <span class="n">CFUNCTYPE</span><span class="p">(</span><span class="n">c_int64</span><span class="p">,</span> <span class="n">c_int64</span><span class="p">,</span> <span class="n">c_int64</span><span class="p">)</span>
+        <span class="n">cfptr</span> <span class="o">=</span> <span class="n">ee</span><span class="o">.</span><span class="n">get_pointer_to_function</span><span class="p">(</span><span class="n">llvm_module</span><span class="o">.</span><span class="n">get_function</span><span class="p">(</span><span class="s1">&#39;caller&#39;</span><span class="p">))</span>
+        <span class="n">callerfunc</span> <span class="o">=</span> <span class="n">CFUNCTYPE</span><span class="p">(</span><span class="n">c_int64</span><span class="p">,</span> <span class="n">CBFUNCTY</span><span class="p">,</span> <span class="n">c_int64</span><span class="p">)(</span><span class="n">cfptr</span><span class="p">)</span>
+
+        <span class="c1"># Wrap myfunc in CBFUNCTY and pass it as a callback to caller.</span>
+        <span class="n">cb_myfunc</span> <span class="o">=</span> <span class="n">CBFUNCTY</span><span class="p">(</span><span class="n">myfunc</span><span class="p">)</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;Calling &quot;caller&quot;&#39;</span><span class="p">)</span>
+        <span class="n">res</span> <span class="o">=</span> <span class="n">callerfunc</span><span class="p">(</span><span class="n">cb_myfunc</span><span class="p">,</span> <span class="mi">42</span><span class="p">)</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;  The result is&#39;</span><span class="p">,</span> <span class="n">res</span><span class="p">)</span>
+</pre></div>
+<p>If we run this code, we get the expected result:</p>
+<div class="highlight"><pre><span></span>Calling &quot;caller&quot;
+I was called with 42 and 84
+  The result is 126
+</pre></div>
+</div>
+<div class="section" id="registering-host-functions-in-jited-code">
+<h2>Registering host functions in JITed code</h2>
+<p>When developing a JIT, one need that comes up very often is to delegate some of
+the functionality in the JITed code to the host language. For example, if you're
+developing a JIT to implement a fast DSL, you may not want to reimplement a
+whole I/O stack in your language. So you'd prefer to delegate all I/O to the
+host language. Taking C as a sample host language, you just want to call
+<tt class="docutils literal">printf</tt> from your DSL and somehow have it routed to the host call.</p>
+<p>How do we accomplish this feat?  The solution here, naturally, depends on both
+the host language and the DSL you're JITing. Let's take the LLVM tutorial as an
+example. The Kaleidoscope language does computations on floating point numbers,
+but it has no I/O facilities of its own. Therefore, the Kaleidoscope compiler
+exposes a <tt class="docutils literal">putchard</tt> function from the host (C++) to be callable in
+Kaleidoscope. For <a class="reference external" href="http://llvm.org/docs/tutorial/LangImpl04.html">Kaleidoscope this is fairly simple</a>, because the host is C++ and is
+compiled into machine code in the same process with the JITed code. All the
+JITed code needs to know is the symbol name of the host function to call and the
+call can happen (as long as the calling conventions match, of course).</p>
+<p>Alas, for Python as a host language, things are not so straightforward. This is
+why, in my <a class="reference external" href="https://github.com/eliben/pykaleidoscope/blob/master/chapter5.py">reimplementation of Kaleidoscope with llvmlite</a>, I resorted
+to implementing the builtins in LLVM IR, emitting them into the module
+along with compiled Kaleidoscope code. These builtins just call the underlying C
+functions (which still reside in the same process, since Python itself is
+written in C) and don't call into Python.</p>
+<p>But say we wanted to actually call Python. How would we go about that?</p>
+<p>Well, we've seen a way to call Python from JITed code in this post. Can this
+approach be used? Yes, though it's quite cumbersome. The problem is that the
+only place where we have an actual interface between Python and the JITed code
+is when we invoke a JITed function. Somehow we should use this interface to
+convey to the JIT side what Python functions are available to it and how to call
+them. Essentially, we'll have to imlement something akin to the following schematic
+symbol table interface in the JITed code:</p>
+<div class="highlight"><pre><span></span><span class="k">typedef</span><span class="w"> </span><span class="kt">int64_t</span><span class="w"> </span><span class="p">(</span><span class="o">*</span><span class="n">CallbackType</span><span class="p">)(</span><span class="kt">int64_t</span><span class="p">,</span><span class="w"> </span><span class="kt">int64_t</span><span class="p">);</span><span class="w"></span>
+<span class="n">std</span><span class="o">::</span><span class="n">unordered_map</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="p">,</span><span class="w"> </span><span class="n">CallbackType</span><span class="o">&gt;</span><span class="w"> </span><span class="n">symtab</span><span class="p">;</span><span class="w"></span>
+
+<span class="kt">void</span><span class="w"> </span><span class="nf">register_callback</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">CallbackType</span><span class="w"> </span><span class="n">callback</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="n">symtab</span><span class="p">[</span><span class="n">name</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">callback</span><span class="p">;</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+
+<span class="n">CallbackType</span><span class="w"> </span><span class="nf">get_callback</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="w"> </span><span class="n">name</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">  </span><span class="k">auto</span><span class="w"> </span><span class="n">iter</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">symtab</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">name</span><span class="p">);</span><span class="w"></span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">iter</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="n">symtab</span><span class="p">.</span><span class="n">end</span><span class="p">())</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">iter</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="k">nullptr</span><span class="p">;</span><span class="w"></span>
+<span class="w">  </span><span class="p">}</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>To register Python callbacks with the JIT, we'll call <tt class="docutils literal">register_callback</tt> from
+Python, passing it a name and the callback (<tt class="docutils literal">CFUNCTYPE</tt> as shown in the code
+sample at the top). The JIT side will remember this mapping in a symbol table.
+When it needs to invoke a Python function it will use <tt class="docutils literal">get_callback</tt> to
+get the pointer by name.</p>
+<p>In addition to being cumbersome to implement <a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>, this is also inefficient. It
+seems wasteful to go through a symbol table lookup for every call to a Python
+builtin. It's not like these mappings ever change in a typical use case! We are
+emitting code at runtime here and have so much flexibility at our command - so
+this lookup feels like a crutch.</p>
+<p>Moreover, this is a simplified example - every callback takes two integer
+arguments. In real scenarios, the signatures of callback functions can be
+arbitrary, so we'd have to implement a full blown FFI-dispatching on the calls.</p>
+</div>
+<div class="section" id="breaching-the-compile-run-time-barrier">
+<h2>Breaching the compile/run-time barrier</h2>
+<p>We can do better. For every Python function we intend to call from the JITed
+code, we can emit a JITed wrapper. This wrapper will hard-code a call to the
+Python function, thus removing this dispatching (the symbol table shown above)
+from run-time; this totally makes sense because we know at compile time which
+Python functions are needed and where to find them.</p>
+<p>Let's write the code to do this with llvmlite:</p>
+<div class="highlight"><pre><span></span><span class="kn">import</span> <span class="nn">ctypes</span>
+<span class="kn">from</span> <span class="nn">ctypes</span> <span class="kn">import</span> <span class="n">c_int64</span><span class="p">,</span> <span class="n">c_void_p</span>
+<span class="kn">import</span> <span class="nn">sys</span>
+
+<span class="kn">import</span> <span class="nn">llvmlite.ir</span> <span class="k">as</span> <span class="nn">ir</span>
+<span class="kn">import</span> <span class="nn">llvmlite.binding</span> <span class="k">as</span> <span class="nn">llvm</span>
+
+<span class="n">cb_func_ty</span> <span class="o">=</span> <span class="n">ir</span><span class="o">.</span><span class="n">FunctionType</span><span class="p">(</span><span class="n">ir</span><span class="o">.</span><span class="n">IntType</span><span class="p">(</span><span class="mi">64</span><span class="p">),</span>
+                             <span class="p">[</span><span class="n">ir</span><span class="o">.</span><span class="n">IntType</span><span class="p">(</span><span class="mi">64</span><span class="p">),</span> <span class="n">ir</span><span class="o">.</span><span class="n">IntType</span><span class="p">(</span><span class="mi">64</span><span class="p">)])</span>
+<span class="n">cb_func_ptr_ty</span> <span class="o">=</span> <span class="n">cb_func_ty</span><span class="o">.</span><span class="n">as_pointer</span><span class="p">()</span>
+<span class="n">i64_ty</span> <span class="o">=</span> <span class="n">ir</span><span class="o">.</span><span class="n">IntType</span><span class="p">(</span><span class="mi">64</span><span class="p">)</span>
+
+<span class="k">def</span> <span class="nf">create_addrcaller</span><span class="p">(</span><span class="n">m</span><span class="p">,</span> <span class="n">addr</span><span class="p">):</span>
+    <span class="c1"># define i64 @addrcaller(i64 %a, i64 %b) #0 {</span>
+    <span class="c1"># entry:</span>
+    <span class="c1">#   %f = inttoptr i64% ADDR to i64 (i64, i64)*</span>
+    <span class="c1">#   %call = tail call i64 %f(i64 %a, i64 %b)</span>
+    <span class="c1">#   ret i64 %call</span>
+    <span class="c1"># }</span>
+    <span class="n">addrcaller_func_ty</span> <span class="o">=</span> <span class="n">ir</span><span class="o">.</span><span class="n">FunctionType</span><span class="p">(</span><span class="n">i64_ty</span><span class="p">,</span> <span class="p">[</span><span class="n">i64_ty</span><span class="p">,</span> <span class="n">i64_ty</span><span class="p">])</span>
+    <span class="n">addrcaller_func</span> <span class="o">=</span> <span class="n">ir</span><span class="o">.</span><span class="n">Function</span><span class="p">(</span><span class="n">m</span><span class="p">,</span> <span class="n">addrcaller_func_ty</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="s1">&#39;addrcaller&#39;</span><span class="p">)</span>
+    <span class="n">a</span> <span class="o">=</span> <span class="n">addrcaller_func</span><span class="o">.</span><span class="n">args</span><span class="p">[</span><span class="mi">0</span><span class="p">];</span> <span class="n">a</span><span class="o">.</span><span class="n">name</span> <span class="o">=</span> <span class="s1">&#39;a&#39;</span>
+    <span class="n">b</span> <span class="o">=</span> <span class="n">addrcaller_func</span><span class="o">.</span><span class="n">args</span><span class="p">[</span><span class="mi">1</span><span class="p">];</span> <span class="n">b</span><span class="o">.</span><span class="n">name</span> <span class="o">=</span> <span class="s1">&#39;b&#39;</span>
+    <span class="n">irbuilder</span> <span class="o">=</span> <span class="n">ir</span><span class="o">.</span><span class="n">IRBuilder</span><span class="p">(</span><span class="n">addrcaller_func</span><span class="o">.</span><span class="n">append_basic_block</span><span class="p">(</span><span class="s1">&#39;entry&#39;</span><span class="p">))</span>
+    <span class="n">f</span> <span class="o">=</span> <span class="n">irbuilder</span><span class="o">.</span><span class="n">inttoptr</span><span class="p">(</span><span class="n">irbuilder</span><span class="o">.</span><span class="n">constant</span><span class="p">(</span><span class="n">i64_ty</span><span class="p">,</span> <span class="n">addr</span><span class="p">),</span>
+                           <span class="n">cb_func_ptr_ty</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="s1">&#39;f&#39;</span><span class="p">)</span>
+    <span class="n">call</span> <span class="o">=</span> <span class="n">irbuilder</span><span class="o">.</span><span class="n">call</span><span class="p">(</span><span class="n">f</span><span class="p">,</span> <span class="p">[</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">])</span>
+    <span class="n">irbuilder</span><span class="o">.</span><span class="n">ret</span><span class="p">(</span><span class="n">call</span><span class="p">)</span>
+</pre></div>
+<p>The IR function created by <tt class="docutils literal">create_addrcaller</tt> is somewhat similar to the one
+we've seen above with <tt class="docutils literal">create_caller</tt>, but there's a subtle difference.
+<tt class="docutils literal">addcaller</tt> does not take a function pointer at runtime. It has knowledge of
+this function pointer encoded into it when it's generated. The <tt class="docutils literal">addr</tt> argument
+passed into <tt class="docutils literal">create_addrcaller</tt> is the runtime address of the function to
+call. <tt class="docutils literal">addrcaller</tt> converts it to a function pointer (using the <tt class="docutils literal">inttoptr</tt>
+instruction, which is somewhat similar to a <tt class="docutils literal">reinterpret_cast</tt> in C++) and
+calls it <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.</p>
+<p>Here's how to use it:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">main</span><span class="p">():</span>
+    <span class="n">CBFUNCTY</span> <span class="o">=</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">CFUNCTYPE</span><span class="p">(</span><span class="n">c_int64</span><span class="p">,</span> <span class="n">c_int64</span><span class="p">,</span> <span class="n">c_int64</span><span class="p">)</span>
+    <span class="k">def</span> <span class="nf">myfunc</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">):</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;I was called with </span><span class="si">{0}</span><span class="s1"> and </span><span class="si">{1}</span><span class="s1">&#39;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">))</span>
+        <span class="k">return</span> <span class="n">a</span> <span class="o">+</span> <span class="n">b</span>
+    <span class="n">cb_myfunc</span> <span class="o">=</span> <span class="n">CBFUNCTY</span><span class="p">(</span><span class="n">myfunc</span><span class="p">)</span>
+    <span class="n">cb_addr</span> <span class="o">=</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">cast</span><span class="p">(</span><span class="n">cb_myfunc</span><span class="p">,</span> <span class="n">c_void_p</span><span class="p">)</span><span class="o">.</span><span class="n">value</span>
+    <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;Callback address is 0x</span><span class="si">{0:x}</span><span class="s1">&#39;</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">cb_addr</span><span class="p">))</span>
+
+    <span class="n">module</span> <span class="o">=</span> <span class="n">ir</span><span class="o">.</span><span class="n">Module</span><span class="p">()</span>
+    <span class="n">create_addrcaller</span><span class="p">(</span><span class="n">module</span><span class="p">,</span> <span class="n">cb_addr</span><span class="p">)</span>
+    <span class="nb">print</span><span class="p">(</span><span class="n">module</span><span class="p">)</span>
+
+    <span class="n">llvm</span><span class="o">.</span><span class="n">initialize</span><span class="p">()</span>
+    <span class="n">llvm</span><span class="o">.</span><span class="n">initialize_native_target</span><span class="p">()</span>
+    <span class="n">llvm</span><span class="o">.</span><span class="n">initialize_native_asmprinter</span><span class="p">()</span>
+
+    <span class="n">llvm_module</span> <span class="o">=</span> <span class="n">llvm</span><span class="o">.</span><span class="n">parse_assembly</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">module</span><span class="p">))</span>
+
+    <span class="n">tm</span> <span class="o">=</span> <span class="n">llvm</span><span class="o">.</span><span class="n">Target</span><span class="o">.</span><span class="n">from_default_triple</span><span class="p">()</span><span class="o">.</span><span class="n">create_target_machine</span><span class="p">()</span>
+
+    <span class="c1"># Compile the module to machine code using MCJIT</span>
+    <span class="k">with</span> <span class="n">llvm</span><span class="o">.</span><span class="n">create_mcjit_compiler</span><span class="p">(</span><span class="n">llvm_module</span><span class="p">,</span> <span class="n">tm</span><span class="p">)</span> <span class="k">as</span> <span class="n">ee</span><span class="p">:</span>
+        <span class="n">ee</span><span class="o">.</span><span class="n">finalize_object</span><span class="p">()</span>
+        <span class="c1"># Now call addrcaller</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;Calling &quot;addrcaller&quot;&#39;</span><span class="p">)</span>
+        <span class="n">addrcaller</span> <span class="o">=</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">CFUNCTYPE</span><span class="p">(</span><span class="n">c_int64</span><span class="p">,</span> <span class="n">c_int64</span><span class="p">,</span> <span class="n">c_int64</span><span class="p">)(</span>
+            <span class="n">ee</span><span class="o">.</span><span class="n">get_pointer_to_function</span><span class="p">(</span><span class="n">llvm_module</span><span class="o">.</span><span class="n">get_function</span><span class="p">(</span><span class="s1">&#39;addrcaller&#39;</span><span class="p">)))</span>
+        <span class="n">res</span> <span class="o">=</span> <span class="n">addrcaller</span><span class="p">(</span><span class="mi">105</span><span class="p">,</span> <span class="mi">23</span><span class="p">)</span>
+        <span class="nb">print</span><span class="p">(</span><span class="s1">&#39;  The result is&#39;</span><span class="p">,</span> <span class="n">res</span><span class="p">)</span>
+</pre></div>
+<p>The key trick here is the call to <tt class="docutils literal">ctypes.cast</tt>. It takes a Python function
+wrapped in a <tt class="docutils literal">ctypes.CFUNCTYPE</tt> and casts it to a <tt class="docutils literal">void*</tt>; in other words,
+it obtains its address <a class="footnote-reference" href="index.html#footnote-3" id="footnote-reference-3">[3]</a>. This is the address we pass into
+<tt class="docutils literal">create_addrcaller</tt>. The code ends up having exactly the same effect as the
+previous sample, but with an important difference: whereas previously the
+dispatch to <tt class="docutils literal">myfunc</tt> happened at run-time, here it happens at compile-time.</p>
+<p>This is a synthetic example, but it should be clear how to extend it to the
+full thing mentioned earlier: for each built-in needed by the JITed code from
+the host code, we emit a JITed wrapper to call it. No symbol table dispatching
+at runtime. Even better, since these builtins can have arbitrary signatures,
+the JITed wrapper can handle all of that efficiently. PyPy uses this technique
+to make calls into C (via the <tt class="docutils literal">cffi</tt> library) much more efficien than they
+are with <tt class="docutils literal">ctypes</tt>. <tt class="docutils literal">ctypes</tt> uses libffi, which has to pack all the arguments
+to a function at runtime, according to a type signature it was provided.
+However, since this type signature almost never changes during the runtime of
+one program, this packing can be done much more efficiently with JITing.</p>
+</div>
+<div class="section" id="conclusion">
+<h2>Conclusion</h2>
+<p>Hopefully it's clear that while this article focuses on a very specific
+technology (using llvmlite to JIT native code from Python), its principles are
+universal. The overarching idea here is that the difference between what happens
+when the program is compiled and what happens when it runs is artificial. We can
+breach and overlay it in many ways, and use it to built increasingly complex
+abstractions. Some languages, like the Lisp family, list this mixture of
+compile-time and run-time as one of their unique strengths, and have been
+preaching it for decades. I fondly recall my own first real-world use of this
+technique <a class="reference external" href="../../2005/09/04/cool-hack-creating-custom-subroutines-on-the-fly-in-perl.html">many years ago</a>
+- reading a configuration file and generating code at runtime that unpacks data
+based on that configuration. That task, emitting Perl code from Perl according
+to a XML config may appear worlds away from the topic of this post - emitting
+LLVM IR from Python according to a function signature, but if you really think
+about it, it's exactly the same thing.</p>
+<p>I suspect this is one of the most obtuse articles I've written lately; if you
+read this far, I sure hope you found it interesting and helpful. Let me know in
+the comments if anything isn't clear or if you have relevant ideas - I love
+discussing this topic!</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>We'll have to compile the equivalent of a hash table implementation into
+our JITed code. While not impossible, this may be an overkill if you
+really just want a quick-and-simple DSL.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td>This delightful mixture of compile-time and run-time is by far the most
+important part of this article; if you remember just one thing from here,
+this should be it. Let me know in the comments if it's not clear.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-3" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-3">[3]</a></td><td>The concept of &quot;address&quot; for a Python function may raise an eyebrow. Keep
+in mind that this isn't a pure Python function we're talking about here.
+It's wrapped in a <tt class="docutils literal">ctypes.CFUNCTYPE</tt>, which is a dispatcher created by
+<tt class="docutils literal">ctypes</tt> (&quot;thunk&quot; in the nomenclature of libffi, the underlying
+mechanism behind <tt class="docutils literal">ctypes</tt>) to perform argument conversion and make the
+actual call.</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

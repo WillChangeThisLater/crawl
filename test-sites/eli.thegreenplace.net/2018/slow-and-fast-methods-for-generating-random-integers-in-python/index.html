@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Slow and fast methods for generating random integers in Python - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../index.html" class="navbar-brand">
+                <img src="../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="index.html"
+                       rel="bookmark"
+                       title="Permalink to Slow and fast methods for generating random integers in Python">
+                        Slow and fast methods for generating random integers in Python
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> June 28, 2018 at 06:29</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../tag/python.html">Python</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                <p>The other day, while playing with a simple program involving randomness, I
+noticed something strange. Python's <tt class="docutils literal">random.randint()</tt> function feels quite
+slow, in comparison to other randomness-generating functions. Since
+<tt class="docutils literal">randint()</tt> is the canonical answer for &quot;give me a random integer&quot; in Python,
+I decided to dig deeper to understand what's going on.</p>
+<p>This is a brief post that dives into the implementation of the <tt class="docutils literal">random</tt>
+module, and discusses some alternative methods for generating pseudo-random
+integers.</p>
+<p>First, a basic benchmark (Python 3.6):</p>
+<div class="highlight"><pre><span></span>$ python3 -m timeit -s &#39;import random&#39; &#39;random.random()&#39;
+10000000 loops, best of 3: 0.0523 usec per loop
+$ python3 -m timeit -s &#39;import random&#39; &#39;random.randint(0, 128)&#39;
+1000000 loops, best of 3: 1.09 usec per loop
+</pre></div>
+<p>Whoa! It's about 20x more expensive to generate a random integer in the range
+<tt class="docutils literal">[0, 128]</tt> than to generate a random float in the range <tt class="docutils literal">[0, 1)</tt>. That's
+pretty steep, indeed.</p>
+<p>To understand why <tt class="docutils literal">randint()</tt> is so slow, we'll have to dig into the <a class="reference external" href="https://github.com/python/cpython">Python
+source</a>. Let's start with <tt class="docutils literal">random()</tt>
+<a class="footnote-reference" href="index.html#footnote-1" id="footnote-reference-1">[1]</a>. In <tt class="docutils literal">Lib/random.py</tt>, the exported function <tt class="docutils literal">random</tt> is an alias to the
+<tt class="docutils literal">random</tt> method of the class <tt class="docutils literal">Random</tt>, which inherits this method directly
+from <tt class="docutils literal">_Random</tt>. This is the C companion defined in
+<tt class="docutils literal">Modules/_randommodule.c</tt>, and it defines its <tt class="docutils literal">random</tt> method as follows:</p>
+<div class="highlight"><pre><span></span><span class="k">static</span><span class="w"> </span><span class="n">PyObject</span><span class="w"> </span><span class="o">*</span><span class="w"></span>
+<span class="nf">random_random</span><span class="p">(</span><span class="n">RandomObject</span><span class="w"> </span><span class="o">*</span><span class="n">self</span><span class="p">,</span><span class="w"> </span><span class="n">PyObject</span><span class="w"> </span><span class="o">*</span><span class="n">Py_UNUSED</span><span class="p">(</span><span class="n">ignored</span><span class="p">))</span><span class="w"></span>
+<span class="p">{</span><span class="w"></span>
+<span class="w">    </span><span class="kt">uint32_t</span><span class="w"> </span><span class="n">a</span><span class="o">=</span><span class="n">genrand_int32</span><span class="p">(</span><span class="n">self</span><span class="p">)</span><span class="o">&gt;&gt;</span><span class="mi">5</span><span class="p">,</span><span class="w"> </span><span class="n">b</span><span class="o">=</span><span class="n">genrand_int32</span><span class="p">(</span><span class="n">self</span><span class="p">)</span><span class="o">&gt;&gt;</span><span class="mi">6</span><span class="p">;</span><span class="w"></span>
+<span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">PyFloat_FromDouble</span><span class="p">((</span><span class="n">a</span><span class="o">*</span><span class="mf">67108864.0</span><span class="o">+</span><span class="n">b</span><span class="p">)</span><span class="o">*</span><span class="p">(</span><span class="mf">1.0</span><span class="o">/</span><span class="mf">9007199254740992.0</span><span class="p">));</span><span class="w"></span>
+<span class="p">}</span><span class="w"></span>
+</pre></div>
+<p>Where <tt class="docutils literal">getrand_int32</tt> is defined directly above and implements a step of the
+<a class="reference external" href="https://en.wikipedia.org/wiki/Mersenne_Twister">Mersenne Twister</a> PRNG. All
+in all, when we call <tt class="docutils literal">random.random()</tt> in Python, the C function is directly
+invoked and there's not much extra work done beyond converting the result of
+<tt class="docutils literal">genrand_int32</tt> to a floating point number in a line of C.</p>
+<p>Now let's take a look at what <tt class="docutils literal">randint()</tt> is up to:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">randint</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="p">):</span>
+    <span class="sd">&quot;&quot;&quot;Return random integer in range [a, b], including both end points.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">randrange</span><span class="p">(</span><span class="n">a</span><span class="p">,</span> <span class="n">b</span><span class="o">+</span><span class="mi">1</span><span class="p">)</span>
+</pre></div>
+<p>It calls <tt class="docutils literal">randrange</tt>, fair enough. Here it is:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">randrange</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">start</span><span class="p">,</span> <span class="n">stop</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">step</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">_int</span><span class="o">=</span><span class="nb">int</span><span class="p">):</span>
+    <span class="sd">&quot;&quot;&quot;Choose a random item from range(start, stop[, step]).</span>
+
+<span class="sd">    This fixes the problem with randint() which includes the</span>
+<span class="sd">    endpoint; in Python this is usually not what you want.</span>
+
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="c1"># This code is a bit messy to make it fast for the</span>
+    <span class="c1"># common case while still doing adequate error checking.</span>
+    <span class="n">istart</span> <span class="o">=</span> <span class="n">_int</span><span class="p">(</span><span class="n">start</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">istart</span> <span class="o">!=</span> <span class="n">start</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;non-integer arg 1 for randrange()&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">stop</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">istart</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_randbelow</span><span class="p">(</span><span class="n">istart</span><span class="p">)</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;empty range for randrange()&quot;</span><span class="p">)</span>
+
+    <span class="c1"># stop argument supplied.</span>
+    <span class="n">istop</span> <span class="o">=</span> <span class="n">_int</span><span class="p">(</span><span class="n">stop</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">istop</span> <span class="o">!=</span> <span class="n">stop</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;non-integer stop for randrange()&quot;</span><span class="p">)</span>
+    <span class="n">width</span> <span class="o">=</span> <span class="n">istop</span> <span class="o">-</span> <span class="n">istart</span>
+    <span class="k">if</span> <span class="n">step</span> <span class="o">==</span> <span class="mi">1</span> <span class="ow">and</span> <span class="n">width</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">istart</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">_randbelow</span><span class="p">(</span><span class="n">width</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">step</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;empty range for randrange() (</span><span class="si">%d</span><span class="s2">,</span><span class="si">%d</span><span class="s2">, </span><span class="si">%d</span><span class="s2">)&quot;</span> <span class="o">%</span> <span class="p">(</span><span class="n">istart</span><span class="p">,</span> <span class="n">istop</span><span class="p">,</span> <span class="n">width</span><span class="p">))</span>
+
+    <span class="c1"># Non-unit step argument supplied.</span>
+    <span class="n">istep</span> <span class="o">=</span> <span class="n">_int</span><span class="p">(</span><span class="n">step</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">istep</span> <span class="o">!=</span> <span class="n">step</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;non-integer step for randrange()&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">istep</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="n">n</span> <span class="o">=</span> <span class="p">(</span><span class="n">width</span> <span class="o">+</span> <span class="n">istep</span> <span class="o">-</span> <span class="mi">1</span><span class="p">)</span> <span class="o">//</span> <span class="n">istep</span>
+    <span class="k">elif</span> <span class="n">istep</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="n">n</span> <span class="o">=</span> <span class="p">(</span><span class="n">width</span> <span class="o">+</span> <span class="n">istep</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">//</span> <span class="n">istep</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;zero step for randrange()&quot;</span><span class="p">)</span>
+
+    <span class="k">if</span> <span class="n">n</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;empty range for randrange()&quot;</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">istart</span> <span class="o">+</span> <span class="n">istep</span><span class="o">*</span><span class="bp">self</span><span class="o">.</span><span class="n">_randbelow</span><span class="p">(</span><span class="n">n</span><span class="p">)</span>
+</pre></div>
+<p>That's quite a bit of case checking and setting up parameters before we get to
+the next level. There are a couple of fast-path cases (for example, when the
+<tt class="docutils literal">stop</tt> parameter is not supplied, this function will be a bit faster),
+but overall after a bunch of checking we get to call the <tt class="docutils literal">_randbelow()</tt>
+method.</p>
+<p>By default, <tt class="docutils literal">_randbelow()</tt> gets mapped to <tt class="docutils literal">_randbelow_with_getrandbits()</tt>:</p>
+<div class="highlight"><pre><span></span><span class="k">def</span> <span class="nf">_randbelow_with_getrandbits</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">n</span><span class="p">):</span>
+    <span class="s2">&quot;Return a random int in the range [0,n).  Raises ValueError if n==0.&quot;</span>
+
+    <span class="n">getrandbits</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">getrandbits</span>
+    <span class="n">k</span> <span class="o">=</span> <span class="n">n</span><span class="o">.</span><span class="n">bit_length</span><span class="p">()</span>  <span class="c1"># don&#39;t use (n-1) here because n can be 1</span>
+    <span class="n">r</span> <span class="o">=</span> <span class="n">getrandbits</span><span class="p">(</span><span class="n">k</span><span class="p">)</span>          <span class="c1"># 0 &lt;= r &lt; 2**k</span>
+    <span class="k">while</span> <span class="n">r</span> <span class="o">&gt;=</span> <span class="n">n</span><span class="p">:</span>
+        <span class="n">r</span> <span class="o">=</span> <span class="n">getrandbits</span><span class="p">(</span><span class="n">k</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">r</span>
+</pre></div>
+<p>Note that it does a couple more computations and can end up invoking
+<tt class="docutils literal">getrandbits()</tt> multiple times (esp. if <tt class="docutils literal">n</tt> is far from a power of two).
+<tt class="docutils literal">getrandbits()</tt> is in C, and while it also ends up invoking the PRNG
+<tt class="docutils literal">getrand_int32()</tt>, it's somewhat heavier than <tt class="docutils literal">random()</tt> and runs twice as
+slow.</p>
+<p>In other words, there's a lot of Python and C code in the way to invoke the same
+underlying C function. Since Python is bytecode-interpreted, all of this ends up
+being quite a bit slower than simply calling the C function directly. A death
+by a thousand cuts. To be fair, <tt class="docutils literal">randint()</tt> is also more flexible in that it
+can generate pseudo-random numbers of any size; that said, it's not very common
+to need huge pseudo-random numbers, and our tests were with small numbers
+anyway.</p>
+<p>Here's a couple of experiments to help us test this hypothesis. First, let's try
+to hit the fast-path we've seen above in <tt class="docutils literal">randrange</tt>, by calling <tt class="docutils literal">randrange</tt>
+without a <tt class="docutils literal">stop</tt> parameter:</p>
+<div class="highlight"><pre><span></span>$ python3 -m timeit -s &#39;import random&#39; &#39;random.randrange(1)&#39;
+1000000 loops, best of 3: 0.784 usec per loop
+</pre></div>
+<p>As expected, the run-time is somewhat better than <tt class="docutils literal">randint</tt>. Another
+experiment is to rerun the comparison in PyPy, which is a JIT compiler that
+should end up tracing through the Python code and generating efficient machine
+code that strips a lot of abstractions.</p>
+<div class="highlight"><pre><span></span>$ pypy -m timeit -s &#39;import random&#39; &#39;random.random()&#39;
+100000000 loops, best of 3: 0.0139 usec per loop
+$ pypy -m timeit -s &#39;import random&#39; &#39;random.randint(0, 128)&#39;
+100000000 loops, best of 3: 0.0168 usec per loop
+</pre></div>
+<p>As expected, the difference between these calls in PyPy is small.</p>
+<div class="section" id="faster-methods-for-generating-pseudo-random-integers">
+<h2>Faster methods for generating pseudo-random integers</h2>
+<p>So <tt class="docutils literal">randint()</tt> turns out to be very slow. In most cases, no one cares; but
+just occasionally, we need many random numbers - so what is there to do?</p>
+<p>One tried and true trick is just using <tt class="docutils literal">random.random()</tt> instead, multiplying
+by our integer limit:</p>
+<div class="highlight"><pre><span></span>$ python3 -m timeit -s &#39;import random&#39; &#39;int(128 * random.random())&#39;
+10000000 loops, best of 3: 0.193 usec per loop
+</pre></div>
+<p>This gives us pseudo-random integers in the range <tt class="docutils literal">[0, 128)</tt>, much faster. One
+word of caution: Python represents its floats in double-precision, with 53 bits
+of accuracy. When the limit is above 53 bits, the numbers we'll be getting using
+this method are not quite random - bits will be missing. This is rarely a
+problem because we don't usually need such huge integers, but definitely
+something to keep in mind <a class="footnote-reference" href="index.html#footnote-2" id="footnote-reference-2">[2]</a>.</p>
+<p>Another quick way to generate pseudo-random integers is to use <tt class="docutils literal">getrandbits()</tt>
+directly:</p>
+<div class="highlight"><pre><span></span>$ python3 -m timeit -s &#39;import random&#39; &#39;random.getrandbits(7)&#39;
+10000000 loops, best of 3: 0.102 usec per loop
+</pre></div>
+<p>This method is fast but limited - it only supports ranges that are powers of
+two. If we want to limit the range we can't just compute a modulo - this will
+skew the distribution; rather we'll have to use a loop similarly to what
+<tt class="docutils literal">_randbelow_with_getrandbits()</tt> does in the sample above. This will slow
+things down, of course.</p>
+<p>Finally, we can turn away from the <tt class="docutils literal">random</tt> module altogether, and use Numpy:</p>
+<div class="highlight"><pre><span></span>$ python3 -m timeit -s &#39;import numpy.random&#39; &#39;numpy.random.randint(128)&#39;
+1000000 loops, best of 3: 1.21 usec per loop
+</pre></div>
+<p>Surprisingly, this is slow; that's because Numpy isn't great for working with
+single datums - it likes to amortize costs over large arrays created /
+manipulated in C. To see this in action, let's see how long it takes to generate
+100 random integers:</p>
+<div class="highlight"><pre><span></span>$ python3 -m timeit -s &#39;import numpy.random&#39; &#39;numpy.random.randint(128, size=100)&#39;
+1000000 loops, best of 3: 1.91 usec per loop
+</pre></div>
+<p>Only 60% slower than generating a single one! With 0.019 usec per integer, this
+is the fastest method <em>by far</em> - 3 times faster than calling
+<tt class="docutils literal">random.random()</tt>. The reason this method is so fast is because the Python
+call overheads are amortized over all generated integers, and deep inside Numpy
+runs an efficient C loop to generate them.</p>
+<p>To conclude, use Numpy if you want to generate large numbers of random ints; if
+you're just generating one-at-a-time, it may not be as useful (but then how much
+do you care about performance, really?)</p>
+</div>
+<div class="section" id="conclusion-performance-vs-abstraction">
+<h2>Conclusion: performance vs. abstraction</h2>
+<p>In programming, performance and abstraction/flexibility are often at odds. By
+making a certain function more flexible, we inevitably make it slower - and
+<tt class="docutils literal">randint()</tt> is a great practical example of this problem. 9 times out of 10
+we don't care about the performance of these functions, but when we do, it's
+useful to know what's going on and how to improve the situation.</p>
+<p>In a way, pure Python code itself is one of the slowest abstractions we
+encounter, since every line gets translated to a bunch of bytecode that
+has to be interpreted at run-time.</p>
+<p>To mitigate these effects, Python programmers who care about performance have
+many techniques at their disposal. Libraries like Numpy carefully move as much
+compute as possible to underlying C code; PyPy is a JIT compiler that can speed
+up most pure Python code sequences considerably. Numba is somewhere in between,
+while Cython lets us re-write chosen functions in a restricted subset of Python
+that can be efficiently compiled to machine code.</p>
+<hr class="docutils" />
+<table class="docutils footnote" frame="void" id="footnote-1" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-1">[1]</a></td><td>From this point on, file names point to source files in the CPython
+repository. Feel free to follow along on your machine or
+<a class="reference external" href="https://github.com/python/cpython">on GitHub</a>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="footnote-2" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="index.html#footnote-reference-2">[2]</a></td><td><p class="first">As an experiment, try to generate pseudo-random integers up to 2^54
+using this technique. You'll notice that only even numbers are generated!</p>
+<p class="last">More generally, the closer the multiplier is to machine precision, the
+less random the result becomes. Knuth has an interesting discussion of
+this in volume 2 of TAOCP - it has to do with unbalanced rounding that
+has to happen every time a precision-limited float is multiplied by an
+integer. That said, if the multiplier is much smaller than the precision,
+we'll be fine; for generating numbers up to 2^40, say, the bad effects
+on the distribution will be negligible.</p>
+</td></tr>
+</tbody>
+</table>
+</div>
+
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="index.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../theme/js/count.js"></script>
+</body>
+</html>

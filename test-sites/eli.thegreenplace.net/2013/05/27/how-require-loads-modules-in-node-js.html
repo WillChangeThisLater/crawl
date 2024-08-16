@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>How require loads modules in Node.js - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="how-require-loads-modules-in-node-js.html"
+                       rel="bookmark"
+                       title="Permalink to How require loads modules in Node.js">
+                        How require loads modules in Node.js
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> May 27, 2013 at 09:22</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/javascript.html">Javascript</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>One of the useful tools Node.js adds on top of standard ECMAScript is a notation for defining and using modules. A &quot;module&quot; exports objects and functions by adding them to <tt class="docutils literal">exports</tt>, and another module can import it by using <tt class="docutils literal">require</tt>. The semantics are explained well <a class="reference external" href="http://nodejs.org/api/modules.html">in the official documentation</a>.</p>
+<p>While the documentation does a good job describing how <tt class="docutils literal">require</tt> finds the module to import, it doesn't say much about how the importing itself happens, and how the <tt class="docutils literal">exports</tt> and <tt class="docutils literal">module</tt> objects are magically visible and usable in the module's code. Here I want to provide a lower-level view of this missing link, gleaned from the source code of Node.js v0.10.8 (<tt class="docutils literal">lib/module.js</tt>).</p>
+<p>As the documentation linked above explains, there are a few places modules can be found in by <tt class="docutils literal">require</tt>. There's also a number of different imports <tt class="docutils literal">require</tt> can perform - from folders, from JSON files, from compiled Node modules (C++), and so on. Here I'll focus on importing from a regular JavaScript source file (<tt class="docutils literal">.js</tt>).</p>
+<p>Code from <tt class="docutils literal">.js</tt> files is simply read into a string. Next, the code string is wrapped with a function:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">(<span style="color: #00007f; font-weight: bold">function</span> (exports, require, module, __filename, __dirname) {
+   <span style="color: #007f00">// &lt;-- MODULE CONTENTS HERE --&gt;</span>
+});
+</pre></div>
+<p>These wrapped contents are evaluated by the JavaScript VM, and the result is a function object; let's call it <tt class="docutils literal">module_func</tt>. This function is invoked as follows:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">module_func.apply(module.exports,
+                  [module.exports, require, module, filename, dirname]);
+</pre></div>
+<p>And the return value of <tt class="docutils literal">require</tt> is then <tt class="docutils literal">module.exports</tt>.</p>
+<p>What's <tt class="docutils literal">module</tt>? It's the special module object the <tt class="docutils literal">require</tt> mechanism has built for loading our module. It's actually described quite well in the modules documentation I mentioned before. That page says:</p>
+<blockquote>
+In each module, the <tt class="docutils literal">module</tt> free variable is a reference to the object representing the current module. In particular <tt class="docutils literal">module.exports</tt> is accessible via the <tt class="docutils literal">exports</tt> module-global. <tt class="docutils literal">module</tt> isn't actually a global but rather local to each module.</blockquote>
+<p>Now it should be obvious how this comes to be. The wrapper function created for our code has the arguments <tt class="docutils literal">module</tt> and <tt class="docutils literal">exports</tt>, which become visible in the code. The <tt class="docutils literal">apply</tt> invocation above shows what they get bound to. What it also does is set <tt class="docutils literal">this</tt> in the global scope of our code to the <tt class="docutils literal">exports</tt> property of the module. So the following are all equivalent ways to add stuff to a module's exports:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">exports.say_hi = <span style="color: #00007f; font-weight: bold">function</span> () {console.log(<span style="color: #7f007f">&#39;hi&#39;</span>);}
+module.exports.say_bye = <span style="color: #00007f; font-weight: bold">function</span> () {console.log(<span style="color: #7f007f">&#39;bye&#39;</span>);}
+<span style="color: #00007f; font-weight: bold">this</span>.say_farewell = <span style="color: #00007f; font-weight: bold">function</span> () {console.log(<span style="color: #7f007f">&#39;farewell&#39;</span>);}
+</pre></div>
+<p>The last way look suspicious. We know that by default, variables in the code don't get exported. In other words, in:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">var</span> foo = <span style="color: #007f7f">1</span>;
+exports.bar = <span style="color: #007f7f">2</span>;
+</pre></div>
+<p>While <tt class="docutils literal">bar</tt> is exported to <tt class="docutils literal">require</tt>, <tt class="docutils literal">foo</tt> is not. But how can this be, if <tt class="docutils literal">this</tt> is bound to <tt class="docutils literal">exports</tt>? Doesn't <tt class="docutils literal">var foo = 1</tt> add <tt class="docutils literal">foo</tt> to <tt class="docutils literal">this</tt>, being the global object?</p>
+<p>This is only puzzling if you think of your code as stand-alone JavaScript, in which the global scope is truly global. But recall, from a few paragraphs above, that our code is wrapped in a function. So the &quot;global&quot; scope in the module is actually function scope. In function scope, variables don't get auto-bound to <tt class="docutils literal">this</tt>. Mystery solved.</p>
+<p>One final note: Node.js has a few useful flags you can set as environment variables for debugging. In particular, I've found setting:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ NODE_DEBUG=module node &lt;file.js&gt;
+</pre></div>
+<p>Very handy for following through the module loading process <tt class="docutils literal">require</tt> does.</p>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="how-require-loads-modules-in-node-js.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

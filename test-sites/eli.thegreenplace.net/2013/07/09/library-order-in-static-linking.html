@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>Library order in static linking - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="library-order-in-static-linking.html"
+                       rel="bookmark"
+                       title="Permalink to Library order in static linking">
+                        Library order in static linking
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> July 09, 2013 at 05:56</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/linkers-and-loaders.html">Linkers and loaders</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>I'll start with a slightly sneaky but educational example. Suppose we have this code:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">volatile</span> <span style="color: #00007f; font-weight: bold">char</span> src[] = {<span style="color: #007f7f">1</span>, <span style="color: #007f7f">2</span>, <span style="color: #007f7f">3</span>, <span style="color: #007f7f">4</span>, <span style="color: #007f7f">5</span>};
+<span style="color: #00007f; font-weight: bold">volatile</span> <span style="color: #00007f; font-weight: bold">char</span> dst[<span style="color: #007f7f">50</span>] = {<span style="color: #007f7f">0</span>};
+
+<span style="color: #00007f; font-weight: bold">void</span>* memcpy(<span style="color: #00007f; font-weight: bold">void</span>* dst, <span style="color: #00007f; font-weight: bold">void</span>* src, <span style="color: #00007f; font-weight: bold">int</span> len);
+
+<span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">main</span>(<span style="color: #00007f; font-weight: bold">int</span> argc, <span style="color: #00007f; font-weight: bold">const</span> <span style="color: #00007f; font-weight: bold">char</span>* argv[])
+{
+    memcpy(dst, src, <span style="color: #00007f; font-weight: bold">sizeof</span>(src));
+    <span style="color: #00007f; font-weight: bold">return</span> dst[<span style="color: #007f7f">4</span>];
+}
+</pre></div>
+<p>It runs just fine and the return value is 5. Now, suppose this is part of a larger project that consists of many object files and libraries, and somewhere within the project there's a library that contains this code:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">void</span> <span style="color: #00007f">memcpy</span>(<span style="color: #00007f; font-weight: bold">char</span>* aa, <span style="color: #00007f; font-weight: bold">char</span>* bb, <span style="color: #00007f; font-weight: bold">char</span>* cc) {
+    <span style="color: #00007f; font-weight: bold">int</span> i;
+    <span style="color: #00007f; font-weight: bold">for</span> (i = <span style="color: #007f7f">0</span>; i &lt; <span style="color: #007f7f">100</span>; ++i) {
+        cc[i] = aa[i] + bb[i];
+    }
+}
+</pre></div>
+<p>If the previous snippet gets linked with this library, what happens? Would you expect it to still return 5? Return something else? Crash? The answer is: it depends - the result can be either correct or a segmentation fault. It depends on the order in which the objects and libraries in the project were fed to the linker.</p>
+<p>If you fully understand why this depends on linking order, as well as how to avoid the problem (and more serious problems, like circular dependencies) then congratulate yourself and move on - this article is probably not for you. Otherwise, read on.</p>
+<div class="section" id="the-basics">
+<h3>The basics</h3>
+<p>Let's start by defining the scope of this article: first, my examples are demonstrating the use of the gcc and binutils toolchain on Linux. Compatible toolchains (like clang instead of gcc) apply too. Second, the discussion here resolves around <em>static</em> linking that's done at compile/link time.</p>
+<p>To understand why linking order matters, it's first instructional to understand how the linker works with respect to linking libraries and objects together. Just as a quick reminder - an object file both <em>provides</em> (exports) external symbols <em>to</em> other objects and libraries, and <em>expects</em> (imports) symbols <em>from</em> other objects and libraries. For example, in this C code:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">int</span> imported(<span style="color: #00007f; font-weight: bold">int</span>);
+
+<span style="color: #00007f; font-weight: bold">static</span> <span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">internal</span>(<span style="color: #00007f; font-weight: bold">int</span> x) {
+    <span style="color: #00007f; font-weight: bold">return</span> x * <span style="color: #007f7f">2</span>;
+}
+
+<span style="color: #00007f; font-weight: bold">int</span> <span style="color: #00007f">exported</span>(<span style="color: #00007f; font-weight: bold">int</span> x) {
+    <span style="color: #00007f; font-weight: bold">return</span> imported(x) * internal(x);
+}
+</pre></div>
+<p>The names of the functions speak for themselves. Let's compile it and look at the symbol table:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ gcc -c x.c
+$ nm x.o
+000000000000000e T exported
+                 U imported
+0000000000000000 t internal
+</pre></div>
+<p>This means: <tt class="docutils literal">exported</tt> is an external symbol - defined in the object file and visible from the outside. <tt class="docutils literal">imported</tt> is an undefined symbol; in other words, the linker is expected to find it elsewhere. When we talk about linking later, the term <em>undefined</em> can become confusing - so it helps to remember that this is where it comes from originally. <tt class="docutils literal">internal</tt> is defined within the object but invisible from the outside.</p>
+<p>Now, a <em>library</em> is simply a collection of object files. Just a bunch of object files glued together. Creating a library is a very trivial operation that doesn't do anything special besides placing many object files into the same file. This in itself is important, because a horde of object files is not convenient to deal with. For example, on my system <tt class="docutils literal">libc.a</tt> (the static version of the C library) consists of almost 1500 object files. It's way nicer to just carry <tt class="docutils literal">libc.a</tt> around.</p>
+</div>
+<div class="section" id="the-linking-process">
+<h3>The linking process</h3>
+<p>This section defines the linking process in a somewhat dry, algorithmic manner. This process is the key to understanding why linking order matters.</p>
+<p>Consider a linker invocation:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ gcc main.o -L/some/lib/dir -lfoo -lbar -lbaz
+</pre></div>
+<p>The linker is almost always invoked through the compiler driver <tt class="docutils literal">gcc</tt> when compiling C or C++ code. This is because the driver knows how to provide the correct command-line arguments to the linker itself (<tt class="docutils literal">ld</tt>) with all the support libraries, etc. We'll see more of this later.</p>
+<p>Anyhow, as you can see the object files and libraries are provided in a certain order on the command-line, from left to right. This is the linking order. Here's what the linker does:</p>
+<ul class="simple">
+<li>The linker maintains a <em>symbol table</em>. This symbol table does a bunch of things, but among them is keeping two lists:<ul>
+<li>A list of symbols exported by all the objects and libraries encountered so far.</li>
+<li>A list of undefined symbols that the encountered objects and libraries requested to import and were not found yet.</li>
+</ul>
+</li>
+<li>When the linker encounters a new object file, it looks at:<ul>
+<li>The symbols it exports: these are added to the list of exported symbols mentioned above. If any symbol is in the undefined list, it's removed from there because it has now been found. If any symbol has already been in the exported list, we get a &quot;multiple definition&quot; error: two different objects export the same symbol and the linker is confused.</li>
+<li>The symbols it imports: these are added to the list of undefined symbols, unless they can be found in the list of exported symbols.</li>
+</ul>
+</li>
+<li>When the linker encounters a new library, things are a bit more interesting. The linker goes over all the objects in the library. For each one, it first looks at the symbols it exports.<ul>
+<li>If any of the symbols it exports are on the undefined list, the object is added to the link and the next step is executed. Otherwise, the next step is skipped.</li>
+<li>If the object has been added to the link, it's treated as described above - its undefined and exported symbols get added to the symbol table.</li>
+<li>Finally, if <em>any</em> of the objects in the library has been included in the link, the library is rescanned again - it's possible that symbols imported by the included object can be found in other objects within the same library.</li>
+</ul>
+</li>
+</ul>
+<p>When the linker finishes, it looks at the symbol table. If any symbols remain in the undefined list, the linker will throw an &quot;undefined reference&quot; error. For example, when you create an executable and forget to include the file with the <tt class="docutils literal">main</tt> function, you'll get something like:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">/usr/lib/x86_64-linux-gnu/crt1.o: In function &#39;_start&#39;:
+(.text+0x20): undefined reference to &#39;main&#39;
+collect2: ld returned 1 exit status
+</pre></div>
+<p>Note that after the linker has looked at a library, it won't look at it again. Even if it exports symbols that may be needed by some later library. The only time where a linker goes back to rescan objects it has already seen happens within a single library - as mentioned above, once an object from some library is taken into the link, all other objects in the same library will be rescanned. Flags passed to the linker can tweak this process - again, we'll see some examples later.</p>
+<p>Also note that when a library is examined, an object file within it can be left out of the link if it does not provide symbols that the symbol table needs. This is a very important feature of static linking. The C library I mentioned before makes a heavy use of this feature, by mostly splitting itself to an-object-per-function. So, for example if the only C standard library function your code uses is <tt class="docutils literal">strlen</tt>, only <tt class="docutils literal">strlen.o</tt> will be taken into the link from <tt class="docutils literal">libc.a</tt> - and your executable will be very small.</p>
+</div>
+<div class="section" id="simple-examples">
+<h3>Simple examples</h3>
+<p>The previous section can be hard to digest, so here are some simple examples that show the process in action.</p>
+<p>Let's start with the most basic case, of linking two objects together:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ cat simplefunc.c
+int func(int i) {
+    return i + 21;
+}
+
+$ cat simplemain.c
+int func(int);
+
+int main(int argc, const char* argv[])
+{
+    return func(argc);
+}
+
+$ gcc -c simplefunc.c
+$ gcc -c simplemain.c
+$ gcc simplefunc.o simplemain.o
+$ ./a.out ; echo $?
+22
+</pre></div>
+<p>Everything links and works as expected. Note that since these are object files, the linking order does not matter. Object files are always taken into the link. We can pass them to the linker in reversed order and it still works:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ gcc simplemain.o simplefunc.o
+$ ./a.out ; echo $?
+22
+</pre></div>
+<p>Now let's do something different. Let's put <tt class="docutils literal">simplefunc.c</tt> into a library:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ ar r libsimplefunc.a simplefunc.o
+$ ranlib libsimplefunc.a
+$ gcc  simplemain.o -L. -lsimplefunc
+$ ./a.out ; echo $?
+22
+</pre></div>
+<p>Works like a charm. But note what happens if the linking order is reversed now:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ gcc  -L. -lsimplefunc  simplemain.o
+simplemain.o: In function &#39;main&#39;:
+simplemain.c:(.text+0x15): undefined reference to &#39;func&#39;
+collect2: ld returned 1 exit status
+</pre></div>
+<p>Understanding the linking algorithm outlined above makes this case simple to explain. When the linker encounters <tt class="docutils literal">libsimplefunc.a</tt>, it still hasn't seen <tt class="docutils literal">simplemain.o</tt>, which means that <tt class="docutils literal">func</tt> is not yet on the undefined list. When the linker looks into the library it sees <tt class="docutils literal">simplefunc.o</tt> that exports <tt class="docutils literal">func</tt>. But since it doesn't need <tt class="docutils literal">func</tt>, this object file is not included in the link. When the linker does reach <tt class="docutils literal">simplemain.o</tt> and sees that <tt class="docutils literal">func</tt> is, indeed required, it's added to the undefined list (because it's not on the exported list). The linker then reaches the end of the link and <tt class="docutils literal">func</tt> is still undefined.</p>
+<p>Note how this doesn't happen in the previous linking order - since <tt class="docutils literal">simplemain.o</tt> comes first, <tt class="docutils literal">func</tt> is on the undefined list <em>before</em> the linker sees the library, so the object file exporting it does get included.</p>
+<p>This brings us to the most important corollary of the linking process outlined above:</p>
+<blockquote>
+If object or library AA needs a symbol from library BB, then AA should come <em>before</em> library BB in the command-line invocation of the linker.</blockquote>
+</div>
+<div class="section" id="circular-dependency">
+<h3>Circular dependency</h3>
+<p>The corollary above is an important summary of the linking process - it's certainly much more practical to keep in mind because it's so short. But it makes one wonder - what happens if AA needs a symbol from BB, but BB also needs a symbol from AA? While officially this isn't a good programming practice, in reality it happens quite a lot. But AA can't come both before and after BB on the command-line, right? That's just silly. Wait, is it, really?</p>
+<p>Let's see an example and start simple. Imagine that instead of <tt class="docutils literal">simplefunc.c</tt>, the <tt class="docutils literal">func</tt> symbol is provided thus:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ cat func_dep.c
+int bar(int);
+
+int func(int i) {
+    return bar(i + 1);
+}
+$ cat bar_dep.c
+int func(int);
+
+int bar(int i) {
+    if (i &gt; 3)
+        return i;
+    else
+        return func(i);
+}
+</pre></div>
+<p>These two files depend on each other and get placed into different libraries. If we link them in one order, we fail:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ gcc  simplemain.o -L.  -lbar_dep -lfunc_dep
+./libfunc_dep.a(func_dep.o): In function &#39;func&#39;:
+func_dep.c:(.text+0x14): undefined reference to &#39;bar&#39;
+collect2: ld returned 1 exit status
+</pre></div>
+<p>However, the other order does work:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ gcc  simplemain.o -L. -lfunc_dep -lbar_dep
+$ ./a.out ; echo $?
+4
+</pre></div>
+<p>Quiz: can you figure out why? Hint: just go over the linking process algorithm with this command-line. What undefined symbols does the symbol table contain when the linker first sees <tt class="docutils literal"><span class="pre">-lfunc_dep</span></tt>?</p>
+<p>But this is a very simple case. Let's look at a trickier one. We'll add a dependency to <tt class="docutils literal">bar</tt> on another function from <tt class="docutils literal">libfunc_dep.a</tt>, but one that lives in a different object:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ cat bar_dep.c
+int func(int);
+int frodo(int);
+
+int bar(int i) {
+    if (i &gt; 3)
+        return frodo(i);
+    else
+        return func(i);
+}
+
+$ cat frodo_dep.c
+int frodo(int i) {
+    return 6 * i;
+}
+</pre></div>
+<p>We'll recompile all these files into separate objects, and the <tt class="docutils literal">libfunc_dep.a</tt> library will now be:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ ar r libfunc_dep.a func_dep.o frodo_dep.o
+$ ranlib libfunc_dep.a
+</pre></div>
+<p>Here's a drawing of the libraries, with arrows showing the dependencies:</p>
+<img class="align-center" src="../../../images/2013/07/circdep2.png" />
+<p>Now linking fails no matter what order we list the libraries in:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ gcc  -L. simplemain.o -lfunc_dep -lbar_dep
+./libbar_dep.a(bar_dep.o): In function &#39;bar&#39;:
+bar_dep.c:(.text+0x17): undefined reference to &#39;frodo&#39;
+collect2: ld returned 1 exit status
+$ gcc  -L. simplemain.o -lbar_dep -lfunc_dep
+./libfunc_dep.a(func_dep.o): In function &#39;func&#39;:
+func_dep.c:(.text+0x14): undefined reference to &#39;bar&#39;
+collect2: ld returned 1 exit status
+</pre></div>
+<p>To solve this, consider that it's perfectly valid to list a library more than once on the link line; so in fact, we can provide <tt class="docutils literal">libfunc_dep.a</tt> both before and after <tt class="docutils literal">libbar_dep.a</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ gcc  -L. simplemain.o -lfunc_dep -lbar_dep -lfunc_dep
+$ ./a.out ; echo $?
+24
+</pre></div>
+<p>Another quiz: will the same trick work providing <tt class="docutils literal"><span class="pre">-lbar_dep</span></tt> twice? Why not?</p>
+</div>
+<div class="section" id="using-linker-flags-to-control-the-process">
+<h3>Using linker flags to control the process</h3>
+<p>As I've mentioned above, the linker has a number of interesting flags that can be used to control the process in a fine-grained manner. For example, circular dependency problems can be easily resolved with <tt class="docutils literal"><span class="pre">--start-group</span></tt> and <tt class="docutils literal"><span class="pre">--end-group</span></tt>. Here's an instructive portion from <tt class="docutils literal">man ld</tt>:</p>
+<blockquote>
+<p><strong>--start-group archives --end-group</strong></p>
+<p>The specified archives are searched repeatedly until no new undefined references are created.  Normally, an archive is searched only once in the order that it is specified on the command line.  If a symbol in that archive is needed to resolve an undefined symbol referred to by an object in an archive that appears later on the command line, the linker would not be able to resolve that reference.  By grouping the archives, they all be searched repeatedly until all possible references are resolved.</p>
+<p>Using this option has a significant performance cost.  It is best to use it only when there are unavoidable circular references between two or more archives.</p>
+</blockquote>
+<p>Here's how this helps in our case:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ gcc simplemain.o -L. -Wl,--start-group -lbar_dep -lfunc_dep -Wl,--end-group
+$ ./a.out ; echo $?
+24
+</pre></div>
+<p>It's interesting to note the &quot;significant performance cost&quot; warning in the excerpt above. This explains <em>why</em> the linking process is the way it is. Presumably, linkers could just re-scan the whole library list until no new symbols got resolved. This would eliminate most circular-dependency and linking order problems in the world, but it would also be slow. Linking is already a critical part of the compilation time of large systems, since it looks at the whole program and requires quite a bit of memory. It's better to make it as fast as possible for well-behaved programs (that got their linking order right), and provide special options like groups for the difficult circular dependency cases.</p>
+<p>There's at least one another linker flag that can help us resolve the circular dependency here. We can use the <tt class="docutils literal"><span class="pre">--undefined</span></tt> flag to tell the linker - &quot;buddy, here's a symbol I want you to add to the undefined list&quot;. In our case this makes the link error go away even though the libraries are specified only once:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ gcc simplemain.o -L. -Wl,--undefined=bar -lbar_dep -lfunc_dep
+$ ./a.out ; echo $?
+24
+</pre></div>
+<p>Figuring out why this works is left as an exercise to the reader.</p>
+</div>
+<div class="section" id="back-to-the-original-example">
+<h3>Back to the original example</h3>
+<p>Let's go back to the example this article started with. <tt class="docutils literal">main</tt> assumes it gets the correct <tt class="docutils literal">memcpy</tt> from the C library, but the <tt class="docutils literal">memcpy</tt> it gets linked with does something else. Assuming the <tt class="docutils literal">memcpy</tt> here was packed into the <tt class="docutils literal">libstray_memcpy.a</tt> library:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ gcc  -L. main_using_memcpy.o -lstray_memcpy
+$ ./a.out
+Segmentation fault (core dumped)
+</pre></div>
+<p>This is the expected behavior. Since <tt class="docutils literal"><span class="pre">-lstray_memcpy</span></tt> was provided after <tt class="docutils literal">main_using_memcpy.o</tt> on the command-line, it gets linked in. But what happens if the order is reversed:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ gcc  -L. -lstray_memcpy main_using_memcpy.o
+$ ./a.out ; echo $?
+5
+</pre></div>
+<p>The program links and works correctly. The reason for this is simple: even without us explicitly asking for it, gcc asks the linker to link the C library as well. The full linker invocation command of gcc is pretty complex, and can be examined by passing the <tt class="docutils literal"><span class="pre">-###</span></tt> flag to gcc. But in our case this amounts to:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ gcc  -L. -lstray_memcpy main_using_memcpy.o -lc
+</pre></div>
+<p>When the linker sees <tt class="docutils literal"><span class="pre">-lstray_memcpy</span></tt>, the symbol table does not yet have an undefined entry for <tt class="docutils literal">memcpy</tt>, so the object file with the wrong function does not get linked. The linker adds this undefined entry only after it sees <tt class="docutils literal">main_using_memcpy.o</tt>. Then, when it reaches <tt class="docutils literal"><span class="pre">-lc</span></tt>, the object file holding <tt class="docutils literal">memcpy</tt> from the C library <em>does</em> get linked in because by now <tt class="docutils literal">memcpy</tt> is on the undefined list.</p>
+</div>
+<div class="section" id="conclusion">
+<h3>Conclusion</h3>
+<p>The algorithm used by the linker to resolve symbols between objects and libraries is pretty simple. As long as you keep it in mind, linker errors and related problems should be easy to understand. If you still run into problematic situations you're not sure how to resolve, this article mentioned two tools that can be very useful in debugging such problems: one is <tt class="docutils literal">nm</tt>, which shows the symbol table of an object or a whole library. The other is the <tt class="docutils literal"><span class="pre">-###</span></tt> flag that gcc accepts and as a result shows the full commands it passes to the underlying tools.</p>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="library-order-in-static-linking.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>

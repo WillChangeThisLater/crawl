@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"
+      xmlns:og="http://ogp.me/ns#"
+      xmlns:fb="https://www.facebook.com/2008/fbml">
+<head>
+    <title>A deeper look into the LLVM code generator, Part 1 - Eli Bendersky's website</title>
+    <!-- Using the latest rendering mode for IE -->
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link href="../../../favicon.ico" rel="icon">
+
+    <!-- Bootstrap -->
+        <link rel="stylesheet" href="../../../theme/css/bootstrap.min.css" type="text/css"/>
+    <link href="../../../theme/css/font-awesome.min.css" rel="stylesheet">
+
+    <link href="../../../theme/css/pygments/vs.css" rel="stylesheet">
+    <link rel="stylesheet" href="../../../theme/css/style.css" type="text/css"/>
+
+        <link href="../../../feeds/all.atom.xml" type="application/atom+xml" rel="alternate"
+              title="Eli Bendersky's website ATOM Feed"/>
+
+</head>
+<body>
+
+<div class="navbar navbar-default navbar-fixed-top" role="navigation">
+    <div class="container">
+        <div class="navbar-header">
+            <button type="button" class="navbar-toggle" data-toggle="collapse" data-target=".navbar-ex1-collapse">
+                <span class="sr-only">Toggle navigation</span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+                <span class="icon-bar"></span>
+            </button>
+            <a href="../../../index.html" class="navbar-brand">
+                <img src="../../../images/logosmall.png" width="32" height="32"/>
+Eli Bendersky's website            </a>
+        </div>
+        <div class="collapse navbar-collapse navbar-ex1-collapse">
+            <ul class="nav navbar-nav navbar-right">
+                <li>
+                    <a href="../../../pages/about.html">
+                        <i class="fa fa-question"></i>
+                        <span class="icon-label">About</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../pages/projects.html">
+                        <i class="fa fa-github"></i>
+                        <span class="icon-label">Projects</span>
+                    </a>
+                </li>
+                <li>
+                    <a href="../../../archives/all.html">
+                        <i class="fa fa-th-list"></i>
+                        <span class="icon-label">Archives</span>
+                    </a>
+                </li>
+            </ul>
+        </div>
+        <!-- /.navbar-collapse -->
+    </div>
+</div> <!-- /.navbar -->
+
+<div class="container">
+    <div class="row">
+    <section id="content">
+        <article>
+            <header class="page-header">
+                <h1>
+                    <a href="a-deeper-look-into-the-llvm-code-generator-part-1.html"
+                       rel="bookmark"
+                       title="Permalink to A deeper look into the LLVM code generator, Part 1">
+                        A deeper look into the LLVM code generator, Part 1
+                    </a>
+                </h1>
+            </header>
+            <div class="entry-content">
+                <div class="panel">
+                    <div class="panel-body">
+<footer class="post-info">
+    <span class="published">
+        <i class="fa fa-calendar"></i>
+        <time> February 25, 2013 at 05:42</time>
+    </span>
+<span class="label label-default">Tags</span>
+    <a href="../../../tag/code-generation.html">Code generation</a>
+        ,
+    <a href="../../../tag/compilation.html">Compilation</a>
+        ,
+    <a href="../../../tag/llvm-clang.html">LLVM & Clang</a>
+</footer><!-- /.post-info -->                    </div>
+                </div>
+                
+        <p>In a <a class="reference external" href="../../../2012/11/24/life-of-an-instruction-in-llvm/index.html">previous article</a>, I followed the various incarnations an instruction takes when it's being compiled from the source language to machine code in LLVM. The article briefly mentioned a lot of layers within LLVM, each of which is interesting and non trivial.</p>
+<p>Here I want to focus on one of the most important and complex layers - the code generator, and specifically the instruction selection mechanism. A short reminder: the task of the code generator is to transform the high-level, mostly target-independent LLVM IR into low-level, target dependent machine language. Instruction selection is the process wherein the abstract operations in IR are mapped to concrete instructions of the target architecture.</p>
+<p>This article will follow a simple example to show the instruction selection mechanism in action (<em>ISel</em> in LLVM parlance).</p>
+<div class="section" id="getting-started-a-dag-for-simple-multiplication">
+<h3>Getting started: a DAG for simple multiplication</h3>
+<p>Here's some sample IR:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">define i64 @imul(i64 %a, i64 %b) nounwind readnone {
+entry:
+  %mul = mul nsw i64 %b, %a
+  ret i64 %mul
+}
+</pre></div>
+<p>It's compiled with Clang (<tt class="docutils literal"><span class="pre">-emit-llvm</span></tt> option) on a x64 machine from this C code:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%"><span style="color: #00007f; font-weight: bold">long</span> <span style="color: #00007f">imul</span>(<span style="color: #00007f; font-weight: bold">long</span> a, <span style="color: #00007f; font-weight: bold">long</span> b) {
+    <span style="color: #00007f; font-weight: bold">return</span> a * b;
+}
+</pre></div>
+<p>The first thing done by the code generator is convert the IR into a selection DAG representation. This is the initial DAG, right after it's built:</p>
+<img class="align-center" src="../../../images/2013/dag_imul5.png" />
+<p>There's really not much interesting going on here, and all the types are legal for the target architecture; therefore, this is also the DAG that reaches the instruction selection stage.</p>
+</div>
+<div class="section" id="patterns-for-instruction-selection">
+<h3>Patterns for instruction selection</h3>
+<p>Instruction selection is arguably the most important part of the code generation phase. Its task is to convert a legal selection DAG into a new DAG of target machine code. In other words, the abstract, target-independent input has to be matched to concrete, target-dependent output. For this purpose LLVM uses an elaborate pattern-matching algorithm that consists of two major steps.</p>
+<p>The first step happens &quot;offline&quot;, when LLVM itself is being built, and involves the TableGen tool, which generates the pattern matching tables from instruction definitions. TableGen is an important part of the LLVM eco-system, and it plays an especially central role in instruction selection, so it's worthwhile to spend a couple of minutes talking about it (there's also official documentation, starting with <a class="reference external" href="http://llvm.org/docs/TableGenFundamentals.html">TableGen fundamentals</a>).</p>
+<p>The problem with TableGen is that some of its uses are so complex (and instruction selection, as we'll shortly see, is one of the worst offenders) that it's easy to forget how simple the idea is in its core. The LLVM developers realized a long time ago that a lot of repetitive code has to be written for each new target. Take a machine instruction, for instance. An instruction is being used in code generation, in the assembler, in the disassembler, in optimizers, and in many other places. Each such use results in a &quot;table&quot; that maps instructions to some piece of information. Wouldn't it be nice if we could just define all instructions in one central place which collects all the interesting information we need about them and then generate all the tables automatically? This is precisely what TableGen was born to do.</p>
+<p>Let's examine an instruction definition relevant to this article (taken from <tt class="docutils literal">lib/Target/X86/X86InstrArithmetic.td</tt> and reformatted a bit):</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">def IMUL64rr : RI&lt;0xAF, MRMSrcReg, (outs GR64:$dst),
+                                   (ins GR64:$src1, GR64:$src2),
+                  &quot;imul{q}\t{$src2, $dst|$dst, $src2}&quot;,
+                  [(set GR64:$dst, EFLAGS,
+                        (X86smul_flag GR64:$src1, GR64:$src2))],
+                  IIC_IMUL64_RR&gt;,
+                 TB;
+</pre></div>
+<p>If this looks like gibberish, don't worry, that's the right first impression to have. To factor out common code and fanatically preserve DRY, TableGen grew some advanced features like multiple inheritance, a form of templating and more; all of these make definitions somewhat difficult to understand at first. If you want to see the &quot;naked&quot; definition of <tt class="docutils literal">IMUL64rr</tt>, you can run this from the root of the LLVM source tree:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">$ llvm-tblgen lib/Target/X86/X86.td -I=include -I=lib/Target/X86
+</pre></div>
+<p>The 13.5 MB output only contains simple <tt class="docutils literal">defs</tt> - table entries from which TableGen backends can take what they need. The <tt class="docutils literal">def</tt> for <tt class="docutils literal">IMUL64rr</tt> has something like 75 fields. But we'll only focus on the ones we need for this article, and the condensed description pasted above will do.</p>
+<p>The most important field for our discussion is the sixth template argument in the <tt class="docutils literal">def</tt> above:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">[(set GR64:$dst, EFLAGS,
+      (X86smul_flag GR64:$src1, GR64:$src2))],
+</pre></div>
+<p>This is the <em>pattern</em> on which the <tt class="docutils literal">IMUL64rr</tt> can be selected. It's essentially <a class="reference external" href="http://en.wikipedia.org/wiki/S_expression">an s-expression</a> describing the DAG path that will be matched. In this case it roughly means: an <tt class="docutils literal"><span class="pre">X86ISD::SMUL</span></tt> node (this is concealed behind the <tt class="docutils literal">X86smul_flag</tt> definition) with two 64-bit GPR (General Purpose Register) arguments is invoked and returns two results - one assigned to a destination GPR and the other to the status flag register <a class="footnote-reference" href="a-deeper-look-into-the-llvm-code-generator-part-1.html#id8" id="id1">[1]</a>. When the automatic instruction selection sees such a sequence in the DAG, it will
+match it to the said <tt class="docutils literal">IMUL64rr</tt> instruction.</p>
+<p>A careful reader will, at this point, notice that I'm cheating a little bit. If the node matched by this pattern is <tt class="docutils literal"><span class="pre">X86ISD::SMUL</span></tt>, then how did it match the DAG shown above which has an <tt class="docutils literal"><span class="pre">ISD::MUL</span></tt> node? Indeed, it didn't. I will show the pattern that actually matches the DAG shortly, but I felt it's important to demonstrate the instruction definitions with patterns, to enable me to discuss how all patterns are mashed together later.</p>
+<p>So what is the difference between <tt class="docutils literal"><span class="pre">ISD::MUL</span></tt> and <tt class="docutils literal"><span class="pre">X86ISD::SMUL</span></tt> <a class="footnote-reference" href="a-deeper-look-into-the-llvm-code-generator-part-1.html#id9" id="id2">[2]</a> ? In the former, we don't care about the actual flags affected by the multiplication, while in the latter we do. In the case of multiplication in C, we usually don't care about the flags affected, hence <tt class="docutils literal"><span class="pre">ISD::MUL</span></tt> is selected. But LLVM provides some special intrinsics such as <tt class="docutils literal">llvm.smul.with.overflow</tt> in which an overflow flag can be returned from the operation. For these (and possibly other uses), the <tt class="docutils literal"><span class="pre">X86ISD::SMUL</span></tt> node exists <a class="footnote-reference" href="a-deeper-look-into-the-llvm-code-generator-part-1.html#id10" id="id3">[3]</a>.</p>
+<p>What, then, actually matches the <tt class="docutils literal"><span class="pre">ISD::MUL</span></tt> node here? This pattern from <tt class="docutils literal">lib/Target/X86/X86InstrCompiler.td</tt>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">def : Pat&lt;(mul GR64:$src1, GR64:$src2),
+          (IMUL64rr GR64:$src1, GR64:$src2)&gt;;
+</pre></div>
+<p>This is an anonymous TableGen record that defines a &quot;pattern&quot; which is detached from any specific instruction. The pattern is simply a mapping from a DAG input to DAG output, the latter containing a selected instruction. We don't care how this mapping is called, so TableGen lets us define anonymous instances. In this case, the pattern should be fairly straightforward. Here's an interesting snippet from <tt class="docutils literal">include/llvm/Target/TargetSelectionDAG.td</tt>, where the <tt class="docutils literal">Pattern</tt> class (and its <tt class="docutils literal">Pat</tt> specialization) is defined:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">// Selection DAG Pattern Support.
+//
+// Patterns are what are actually matched against by the target-flavored
+// instruction selection DAG.  Instructions defined by the target implicitly
+// define patterns in most cases, but patterns can also be explicitly added when
+// an operation is defined by a sequence of instructions (e.g. loading a large
+// immediate value on RISC targets that do not support immediates as large as
+// their GPRs).
+//
+
+class Pattern&lt;dag patternToMatch, list&lt;dag&gt; resultInstrs&gt; {
+  dag             PatternToMatch  = patternToMatch;
+  list&lt;dag&gt;       ResultInstrs    = resultInstrs;
+  list&lt;Predicate&gt; Predicates      = [];  // See class Instruction in Target.td.
+  int             AddedComplexity = 0;   // See class Instruction in Target.td.
+}
+
+// Pat - A simple (but common) form of a pattern, which produces a simple result
+// not needing a full list.
+class Pat&lt;dag pattern, dag result&gt; : Pattern&lt;pattern, [result]&gt;;
+</pre></div>
+<p>The large comment at the top of this snippet is helpful, but it describes an exactly opposite situation of what we're observing for <tt class="docutils literal">IMUL64rr</tt>. In our case, the pattern defined within the instruction is actually the more complex one, while the basic pattern is defined outside with a <tt class="docutils literal">Pattern</tt>.</p>
+</div>
+<div class="section" id="the-pattern-matching-mechanism">
+<h3>The pattern matching mechanism</h3>
+<p>TableGen descriptions of target instructions support numerous pattern kinds. We've examined patterns implicitly defined within instruction definitions and patterns explicitly defined as stand-alones. In addition there are also &quot;complex&quot; patterns that specify a C++ function to be called, and &quot;pattern fragments&quot; that can contain arbitrary snippets of C++ code that do custom matching. If you're interested, these pattern types are somewhat described in the comments within <tt class="docutils literal">include/llvm/Target/TargetSelectionDAG.td</tt>.</p>
+<p>Mixing up C++ code in TableGen works because the final result of the TableGen run (with the specific DAG ISel backend) is a C++ method that gets embedded into a target's implementation of the <tt class="docutils literal">SelectionDAGISel</tt> interface.</p>
+<p>To be more specific, the sequence is:</p>
+<ul class="simple">
+<li>The generic <tt class="docutils literal"><span class="pre">SelectionDAGISel::DoInstructionSelection</span></tt> method calls <tt class="docutils literal">Select</tt> per DAG node.</li>
+<li><tt class="docutils literal">Select</tt> is an abstract method, implemented by the targets. For example <tt class="docutils literal"><span class="pre">X86DAGToDAGISel::Select</span></tt>.</li>
+<li>The latter intercepts some nodes for manual matching, but delegates the bulk of the work to <tt class="docutils literal"><span class="pre">X86DAGToDAGISel::SelectCode</span></tt>.</li>
+<li><tt class="docutils literal"><span class="pre">X86DAGToDAGISel::SelectCode</span></tt> is auto-generated by TableGen <a class="footnote-reference" href="a-deeper-look-into-the-llvm-code-generator-part-1.html#id11" id="id4">[4]</a>, and contains the matcher table, followed by a call to the generic <tt class="docutils literal"><span class="pre">SelectionDAGISel::SelectCodeCommon</span></tt>, passing it the table.</li>
+</ul>
+<p>So what is the matcher table? Essentially, it's a &quot;program&quot; written in a sort of a &quot;bytecode&quot; specific for instruction selection. To enable flexible pattern matching while staying efficient, TableGen munges all the patterns together and generates a program that, given a DAG mode, figures out which pattern it matches. <tt class="docutils literal"><span class="pre">SelectionDAGISel::SelectCodeCommon</span></tt> serves as the interpreter for this bytecode.</p>
+<p>Unfortunately, the bytecode language for pattern matching is not documented anywhere. To understand how it works, there's no substitute to looking at the interpreter code and at the generated bytecode for some backend <a class="footnote-reference" href="a-deeper-look-into-the-llvm-code-generator-part-1.html#id12" id="id5">[5]</a>.</p>
+</div>
+<div class="section" id="example-matching-our-sample-dag-node">
+<h3>Example: matching our sample DAG node</h3>
+<p>Let's examine how the <tt class="docutils literal"><span class="pre">ISD::MUL</span></tt> node in our sample DAG is matched. For this purpose, it's very useful to pass the <tt class="docutils literal"><span class="pre">-debug</span></tt> option to <tt class="docutils literal">llc</tt>, which makes it dump detailed debugging information throughout the code generation process. In particular, the selection process for each DAG node can be traced. Here's the relevant portion for our <tt class="docutils literal"><span class="pre">ISD::MUL</span></tt> node:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">Selecting: 0x38c4ee0: i64 = mul 0x38c4de0, 0x38c4be0 [ORD=1] [ID=7]
+
+ISEL: Starting pattern match on root node: 0x38c4ee0: i64 = mul 0x38c4de0, 0x38c4be0 [ORD=1] [ID=7]
+
+  Initial Opcode index to 57917
+  Match failed at index 57922
+  Continuing at 58133
+  Match failed at index 58137
+  Continuing at 58246
+  Match failed at index 58249
+  Continuing at 58335
+  TypeSwitch[i64] from 58337 to 58380
+MatchAddress: X86ISelAddressMode 0x7fff447ca040
+Base_Reg nul Base.FrameIndex 0
+ Scale1
+IndexReg nul Disp 0
+GV nul CP nul
+ES nul JT-1 Align0
+  Match failed at index 58380
+  Continuing at 58396
+  Match failed at index 58407
+  Continuing at 58516
+  Match failed at index 58517
+  Continuing at 58531
+  Match failed at index 58532
+  Continuing at 58544
+  Match failed at index 58545
+  Continuing at 58557
+  Morphed node: 0x38c4ee0: i64,i32 = IMUL64rr 0x38c4de0, 0x38c4be0 [ORD=1]
+
+ISEL: Match complete!
+=&gt; 0x38c4ee0: i64,i32 = IMUL64rr 0x38c4de0, 0x38c4be0 [ORD=1]
+</pre></div>
+<p>The indices mentioned here refer to the matcher table. You can see them in a comment at the beginning of each line in the generated <tt class="docutils literal">X86GenDAGISel.inc</tt> file. Here's the beginning of that table <a class="footnote-reference" href="a-deeper-look-into-the-llvm-code-generator-part-1.html#id13" id="id6">[6]</a>:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">// The main instruction selector code.
+SDNode *SelectCode(SDNode *N) {
+  // Some target values are emitted as 2 bytes, TARGET_VAL handles
+  // this.
+  #define TARGET_VAL(X) X &amp; 255, unsigned(X) &gt;&gt; 8
+  static const unsigned char MatcherTable[] = {
+/*0*/     OPC_SwitchOpcode /*221 cases */, 73|128,103/*13257*/,  TARGET_VAL(ISD::STORE),// -&gt;13262
+/*5*/       OPC_RecordMemRef,
+/*6*/       OPC_RecordNode,   // #0 = &#39;st&#39; chained node
+/*7*/       OPC_Scope, 5|128,2/*261*/, /*-&gt;271*/ // 7 children in Scope
+</pre></div>
+<p>At position 0 we have a <tt class="docutils literal">OPC_SwitchOpcode</tt> operation, which is kind of a huge switch table on the node opcode. It's followed by a list of cases. Each case begins with its size (so that the matcher knows where to go if matching the case fails), and then the opcode. For example, as you can see in the listing above, the first case in the table is for opcode <tt class="docutils literal"><span class="pre">ISD::STORE</span></tt>, and its size is 13257 (the size is encoded in a special variable-length-encoding since the table is byte-based).</p>
+<p>Looking at the debug output, the matching of our <tt class="docutils literal">MUL</tt> node starts at offset 57917. Here's the relevant part of the table:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">          /*SwitchOpcode*/ 53|128,8/*1077*/,  TARGET_VAL(ISD::MUL),// -&gt;58994
+/*57917*/   OPC_Scope, 85|128,1/*213*/, /*-&gt;58133*/ // 7 children in Scope
+</pre></div>
+<p>So, as expected, this is the switch case with <tt class="docutils literal"><span class="pre">ISD::MUL</span></tt> as the opcode. The matching for this case starts with <tt class="docutils literal">OPC_Scope</tt>, which is an instruction to the interpreter to push its current state. If something fails within the scope, the state can be then restored to proceed with matching the next cases. In the snippet above, if matching fails in the scope, it will proceed in offset 58133.</p>
+<p>You can see this happening in the debug output:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">Initial Opcode index to 57917
+Match failed at index 57922
+Continuing at 58133
+</pre></div>
+<p>At 57922, the interpreter tries to match the child of the node to a <tt class="docutils literal"><span class="pre">ISD::LOAD</span></tt> (meaning - multiply with in-memory argument), fails, and jumps to 58133 as the scope dictates. Similarly, the rest of the matching process can be traced - following the debug output and the matching table as a reference. Something interesting happens at offset 58337 though. Here's the relevant table part:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">/*58337*/     OPC_SwitchType /*2 cases */, 38,  MVT::i32,// -&gt;58378
+/*58340*/       OPC_Scope, 17, /*-&gt;58359*/ // 2 children in Scope
+/*58342*/         OPC_CheckPatternPredicate, 4, // (!Subtarget-&gt;is64Bit())
+/*58344*/         OPC_CheckComplexPat, /*CP*/3, /*#*/0, // SelectLEAAddr:$src #1 #2 #3 #4 #5
+/*58347*/         OPC_MorphNodeTo, TARGET_VAL(X86::LEA32r), 0,
+                      1/*#VTs*/, MVT::i32, 5/*#Ops*/, 1, 2, 3, 4, 5,
+                  // Src: lea32addr:i32:$src - Complexity = 18
+                  // Dst: (LEA32r:i32 lea32addr:i32:$src)
+</pre></div>
+<p>This is the result of a <em>complex pattern</em> described above. <tt class="docutils literal">SelectLEAAddr</tt> is a C++ method (defined by the X86 backen's ISel implementation) and it gets invoked to try and match the node operand to a LEA <a class="footnote-reference" href="a-deeper-look-into-the-llvm-code-generator-part-1.html#id14" id="id7">[7]</a>. The debug printout that follows comes from that method, and as we can see, eventually fails.</p>
+<p>Finally, where the interpreter reaches offset 58557, the match succeeds. Here's the relevant table part:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">/*58557*/       /*Scope*/ 12, /*-&gt;58570*/
+/*58558*/         OPC_CheckType, MVT::i64,
+/*58560*/         OPC_MorphNodeTo, TARGET_VAL(X86::IMUL64rr), 0,
+                      2/*#VTs*/, MVT::i64, MVT::i32, 2/*#Ops*/, 0, 1,
+                  // Src: (mul:i64 GR64:i64:$src1, GR64:i64:$src2) - Complexity = 3
+                  // Dst: (IMUL64rr:i64:i32 GR64:i64:$src1, GR64:i64:$src2)
+</pre></div>
+<p>Simply put, after it fails matching a bunch of optimizations and special cases, the matcher finally uses a generic integer-multiply between 64-bit registers, which is matched to the <tt class="docutils literal">IMUL64rr</tt> machine instruction.</p>
+<p>If it appears from the trace that the instruction selector works hard to find a suitable instruction, that is true. To generate good code, some work has to be done to try and match various optimized sequences before falling back to generic ones. In the next part of the article, I will show some more advanced cases of instruction selection with optimization.</p>
+</div>
+<div class="section" id="the-final-code">
+<h3>The final code</h3>
+<p>This is how the DAG looks <em>after</em> instruction selection:</p>
+<img class="align-center" src="../../../images/2013/dag_imul_postisel.png" />
+<p>Since the entry DAG was pretty basic, this one is very similar; the main difference is that the multiplication and return nodes were selected to actual instructions.</p>
+<p>If you remember from <a class="reference external" href="../../../2012/11/24/life-of-an-instruction-in-llvm/index.html">the life of an instruction in LLVM article</a>, the instruction goes through a couple of additional incarnations after being matched by the instruction selector. The final code that gets emitted is:</p>
+<div class="highlight" style="background: #ffffff"><pre style="line-height: 125%">imul:                                   # @imul
+      imulq   %rsi, %rdi
+      movq    %rdi, %rax
+      ret
+</pre></div>
+<p><tt class="docutils literal">imulq</tt> is the assembly (GAS flavor) representation of <tt class="docutils literal"><span class="pre">X86::IMUL64rr</span></tt>. It  multiplies the function's arguments (according to the AMD64 ABI, the first two integers come in <tt class="docutils literal">%rsi</tt> and <tt class="docutils literal">%rdi</tt>); then the result is moved to the return register - <tt class="docutils literal">%rax</tt>.</p>
+</div>
+<div class="section" id="conclusion">
+<h3>Conclusion</h3>
+<p>This article provided an in-depth peek into the instruction selection process - a key part of the LLVM code generator. While it uses a relatively simple example, it should contain sufficient information to gain some initial understanding of the mechanisms involved. In the next part of the article, I will examine a couple of additional examples through which other aspects of the code generation process should become clearer.</p>
+<img class="align-center" src="../../../images/hline.jpg" style="width: 320px; height: 5px;" />
+<table class="docutils footnote" frame="void" id="id8" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="a-deeper-look-into-the-llvm-code-generator-part-1.html#id1">[1]</a></td><td>Although the status flags are &quot;implicit&quot; on x86 (there's no explicit register you can work with), LLVM treats it as explicit to aid the code generation algorithms.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id9" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="a-deeper-look-into-the-llvm-code-generator-part-1.html#id2">[2]</a></td><td><tt class="docutils literal"><span class="pre">X86ISD::SMUL</span></tt> is the X86-specific lowering of the generic <tt class="docutils literal"><span class="pre">ISD::SMULO</span></tt> node.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id10" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="a-deeper-look-into-the-llvm-code-generator-part-1.html#id3">[3]</a></td><td>You may have a &quot;oh my, why is this so complex?&quot; reaction at this point. The TL;DR; answer is &quot;compilers are hard, let's go fishing&quot;. A longer rationale would be: the x86 instruction set is very large and complex. Moreover, LLVM is a compiler with many (quite different) targets and much of its machinery is thus engineered to be target-independent. The result is inherent complexity. To put it differently - the x86 TableGen definitions are about 20 KLOC in size. Add to that another 20 KLOC or so of custom C++ lowering code and compare to the Intel architecture manual which contains 3,000 <em>pages</em> or so. In terms of Kolmogorov complexity, this isn't very bad :-)</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id11" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="a-deeper-look-into-the-llvm-code-generator-part-1.html#id4">[4]</a></td><td>It's generated into <tt class="docutils literal"><span class="pre">&lt;BUILD_DIR&gt;/lib/Target/X86/X86GenDAGISel.inc</span></tt>, a file that's <tt class="docutils literal">#included</tt> by <tt class="docutils literal">lib/Target/X86/X86ISelDAGToDAG.cpp</tt>.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id12" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="a-deeper-look-into-the-llvm-code-generator-part-1.html#id5">[5]</a></td><td>If you want to understand <em>how</em> this bytecode is generated from the TableGen pattern definitions, you also need to look inside the TableGen DAG ISel backend.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id13" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="a-deeper-look-into-the-llvm-code-generator-part-1.html#id6">[6]</a></td><td>Note that the values in this table are relevant to the version of LLVM I have built for this example (r174056). Changes in X86 pattern definitions may result in different numbering, but the principle is the same.</td></tr>
+</tbody>
+</table>
+<table class="docutils footnote" frame="void" id="id14" rules="none">
+<colgroup><col class="label" /><col /></colgroup>
+<tbody valign="top">
+<tr><td class="label"><a class="fn-backref" href="a-deeper-look-into-the-llvm-code-generator-part-1.html#id7">[7]</a></td><td>Some multiplications can be optimized to use the faster <tt class="docutils literal">LEA</tt> instruction.</td></tr>
+</tbody>
+</table>
+</div>
+
+    
+            </div>
+            <!-- /.entry-content -->
+<hr/>
+<div class="dotted-links">
+<p class="align-center">
+For comments, please send me
+<a href="mailto:eliben@gmail.com"><i class="fa fa-envelope-o"></i> an email</a>.
+</p>
+</div>        </article>
+    </section>
+
+    </div>
+</div>
+<footer>
+   <div class="container">
+      <hr>
+      <div class="row">
+         <div class="col-xs-10">
+            &copy; 2003-2024 Eli Bendersky
+         </div>
+         <div class="col-xs-2"><p class="pull-right"><i class="fa fa-arrow-up"></i> <a href="a-deeper-look-into-the-llvm-code-generator-part-1.html#">Back to top</a></p></div>
+      </div>
+   </div>
+</footer>
+<script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+
+<!-- Include all compiled plugins (below), or include individual files as needed -->
+<script src="../../../theme/js/bootstrap.min.js"></script>
+
+<!--
+  Using goatcounter to count visitors. The count.js script is vendored in.
+-->
+<script data-goatcounter="https://stats.thegreenplace.net/count"
+        async src="../../../theme/js/count.js"></script>
+</body>
+</html>
