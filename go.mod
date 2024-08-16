@@ -1,4 +1,4 @@
-module crawl.go
+module github.com/WillChangeThisLater/go-simple-link-crawler
 
 go 1.22.5
 
