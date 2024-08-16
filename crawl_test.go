@@ -95,6 +95,14 @@ func setupServer(site string) *http.Server {
 	return srv
 }
 
+func ChanToArr(channel <-chan string) []string {
+	arr := make([]string, 0)
+	for e := range channel {
+		arr = append(arr, e)
+	}
+	return arr
+}
+
 func TestCrawlLinksBigSite(t *testing.T) {
 	site := "./test-sites/eli.thegreenplace.net/"
 	srv := setupServer(site)
@@ -112,12 +120,14 @@ func TestCrawlLinksBigSite(t *testing.T) {
 	waitForServerToStart(port)
 
 	baseURL := fmt.Sprintf("http://localhost:%d", port)
-	links := CrawlSiteForLinks(baseURL, 10)
-	if len(links) == 0 {
-		t.Errorf("Expected at least one link: %s", baseURL)
-	}
+	linksChannel := CrawlSiteForLinks(baseURL, 10)
+	links := ChanToArr(linksChannel)
 
 	seenLinks := make(map[string]struct{})
+
+	if len(links) == 0 {
+		t.Errorf("No links found for %s", baseURL)
+	}
 	for _, link := range links {
 		if _, ok := seenLinks[link]; ok {
 			t.Errorf("Link %s is listed at least twice", link)
@@ -144,7 +154,8 @@ func TestCrawlLinksSmallSite(t *testing.T) {
 	waitForServerToStart(port)
 
 	baseURL := fmt.Sprintf("http://localhost:%d", port)
-	links := CrawlSiteForLinks(baseURL, 10)
+	linksChannel := CrawlSiteForLinks(baseURL, 10)
+	links := ChanToArr(linksChannel)
 	if len(links) != 4 {
 		t.Errorf("Expected exactly four links from %s; got %d", baseURL, len(links))
 	}

@@ -93,26 +93,30 @@ func crawlLinks(wg *sync.WaitGroup, semaphore chan struct{}, link string, discov
 	}
 }
 
-func CrawlSiteForLinks(startURL string, maxConns int) []string {
+func CrawlSiteForLinks(startURL string, maxConns int) <-chan string {
 
-	var waitGroup sync.WaitGroup
-	done := make(chan bool)
-	semaphore := make(chan struct{}, maxConns)
-	discoveredLinks := make(chan string)
-	linksToReturn := make([]string, 0)
+	links := make(chan string)
 
-	waitGroup.Add(1)
-	go crawlLinks(&waitGroup, semaphore, startURL, discoveredLinks)
 	go func() {
-		for link := range discoveredLinks {
-			linksToReturn = append(linksToReturn, link)
-		}
-		done <- true
-	}()
+		var waitGroup sync.WaitGroup
+		done := make(chan bool)
+		discoveredLinks := make(chan string)
+		semaphore := make(chan struct{}, maxConns)
 
-	waitGroup.Wait()
-	close(discoveredLinks)
-	<-done
-	log.Printf("%s crawler done\n", startURL)
-	return linksToReturn
+		waitGroup.Add(1)
+		go crawlLinks(&waitGroup, semaphore, startURL, discoveredLinks)
+		go func() {
+			for link := range discoveredLinks {
+				links <- link
+			}
+			done <- true
+			close(links)
+		}()
+
+		waitGroup.Wait()
+		close(discoveredLinks)
+		<-done
+		log.Printf("%s crawler done\n", startURL)
+	}()
+	return links
 }
