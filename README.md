@@ -15,15 +15,18 @@ ln -s "$(pwd)/crawl /usr/local/bin/crawl
 ```
 
 ## Usage
+Most basic usage
 ```bash
-# most basic usage
 $ crawl https://www.example.com
 https://www.example.com
-# more advanced:
-#
-#   '-d' tells crawl to only scrape one level deep
-#   '-c 25' tells crawl to run up to 25 GET requests at a time
-#   '-s' silences errors like 4XXs and 5XXs
+```
+
+More advanced
+
+- `-d` tells `crawl` to only scrape one level deep
+- `-c 25` tells crawl to run up to 25 GET requests at a time
+- `-s` silences errors
+```bash
 $ crawl -d 1 -c 25 -s https://www.google.com
 https://www.google.com
 https://www.google.com/intl/en/policies/terms/
@@ -36,7 +39,10 @@ https://www.google.com/intl/en/about/products?tab=wh
 http://www.google.com/history/optout?hl=en
 https://www.google.com/intl/en/ads/
 https://www.google.com/services/
-# you can always run -h to get help
+```
+
+You can always ask for help
+```bash
 $ crawl -h
 Usage of crawl:
   -c int
