@@ -76,18 +76,20 @@ func crawlLinks(wg *sync.WaitGroup, semaphore chan struct{}, link string, discov
 		log.Printf("%s bad status code %d\n", link, resp.StatusCode)
 	}
 
-	discoveredLinks <- link
+	finalURL := resp.Request.URL.String()
+	discoveredLinks <- finalURL
 
 	defer resp.Body.Close()
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		panic(err)
+		log.Printf("Error reading body of %s: %v\n", finalURL, err)
+		return
 	}
 
-	baseURL, err := url.Parse(link)
+	baseURL, err := url.Parse(finalURL)
 	if err != nil {
-		log.Printf("Error parsing base URL %s: %v", link, err)
+		log.Printf("Error parsing base URL %s: %v", finalURL, err)
 		return
 	}
 	childLinks := getLinksFromHTML(bytes.NewReader(bodyBytes))
@@ -95,7 +97,7 @@ func crawlLinks(wg *sync.WaitGroup, semaphore chan struct{}, link string, discov
 		parsedChildLink, err := url.Parse(childLink)
 		if err != nil {
 			log.Printf("Error parsing child link %s: %v", childLink, err)
-			return
+			continue
 		}
 
 		resolvedURL := baseURL.ResolveReference(parsedChildLink)

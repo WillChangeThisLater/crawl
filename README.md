@@ -53,3 +53,21 @@ Usage of crawl:
   -t int
         Request timeout (default 5)
 ```
+
+
+## In the real world
+### Figure out what web pages are worth embedding
+This requires another one of my CLI tools, [refine](https://github.com/WillChangeThisLater/refine)
+
+If you just want a list of relevant articles
+```bash
+$ crawl https://simonwillison.net/ | refine "Filter for articles that are worth including in an embedding databsae. These should be articles that say something interesting and informative. Don't include pages that are really short, not interesting, or just serve to index other articles"
+```
+
+Or you can go the extra step and add them to [vault](https://github.com/WillChangeThisLater/vault)
+
+```bash
+URL="https://eli.thegreenplace.net/"
+PROMPT_REFINE="Filter for articles that are worth including in an embedding databsae. These should be articles that say something interesting and informative. Don't include pages that are really short, not interesting, or just serve to index other articles"
+for link in $(crawl -d 2 "$URL" | grep -v xml | grep -v "#" | refine "$PROMPT_REFINE"); do vault add "$link" --quick; echo "added article $link"; done
+```
