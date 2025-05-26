@@ -13,8 +13,9 @@ import (
 )
 
 var (
-	seenLinks = make(map[string]struct{})
-	mu        = new(sync.Mutex)
+	seenLinks      = make(map[string]struct{})
+	normalizedSeen = make(map[string]struct{})
+	mu             sync.Mutex
 )
 
 func getLinksFromHTML(htmlContent io.Reader) []string {
@@ -38,6 +39,16 @@ func getLinksFromHTML(htmlContent io.Reader) []string {
 	}
 }
 
+func normalizeURL(rawURL string) string {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		log.Printf("Error parsing URL %s: %v", rawURL, err)
+		return rawURL
+	}
+	parsedURL.Fragment = "" // remove the fragment
+	return parsedURL.String()
+}
+
 func crawlLinks(wg *sync.WaitGroup, semaphore chan struct{}, link string, discoveredLinks chan<- string, depth, maxDepth int, timeoutSecs int) {
 	defer wg.Done()
 
@@ -45,9 +56,8 @@ func crawlLinks(wg *sync.WaitGroup, semaphore chan struct{}, link string, discov
 	if _, ok := seenLinks[link]; ok {
 		mu.Unlock()
 		return
-	} else {
-		seenLinks[link] = struct{}{}
 	}
+	seenLinks[link] = struct{}{}
 	mu.Unlock()
 
 	if maxDepth != -1 && depth > maxDepth {
@@ -69,15 +79,14 @@ func crawlLinks(wg *sync.WaitGroup, semaphore chan struct{}, link string, discov
 		log.Printf("%s bad status code %d\n", link, resp.StatusCode)
 	}
 
-	if err != nil {
-		log.Printf("%s error %s\n", link, err)
-		return
-	} else if resp.StatusCode >= 400 {
-		log.Printf("%s bad status code %d\n", link, resp.StatusCode)
-	}
-
 	finalURL := resp.Request.URL.String()
-	discoveredLinks <- finalURL
+	mu.Lock()
+	normalizedURL := normalizeURL(finalURL)
+	if _, exists := normalizedSeen[normalizedURL]; !exists {
+		discoveredLinks <- finalURL
+		normalizedSeen[normalizedURL] = struct{}{}
+	}
+	mu.Unlock()
 
 	defer resp.Body.Close()
 
@@ -101,6 +110,7 @@ func crawlLinks(wg *sync.WaitGroup, semaphore chan struct{}, link string, discov
 		}
 
 		resolvedURL := baseURL.ResolveReference(parsedChildLink)
+
 		if resolvedURL.Host == baseURL.Host {
 			wg.Add(1)
 			go crawlLinks(wg, semaphore, resolvedURL.String(), discoveredLinks, depth+1, maxDepth, timeoutSecs)
