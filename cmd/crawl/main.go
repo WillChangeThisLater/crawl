@@ -1,68 +1,43 @@
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
-	"strings"
 
 	"github.com/WillChangeThisLater/crawl"
 )
 
 func main() {
-	// Define the input flag
-	urlFile := flag.String("input", "", "Input file containing URLs (one per line)")
+	// Define the flags
+	maxDepth := flag.Int("d", 1, "Maximum depth to crawl (use -1 for no limit)")
+	silence := flag.Bool("s", false, "Silence stderr output")
+	maxConns := flag.Int("c", 25, "Maximum number of concurrent requests")
+	timeout := flag.Int("t", 5, "Request timeout")
 
-	// Parse the CLI flags
+	// Parse the flags
 	flag.Parse()
 
-	var urls []string
-
-	// Check if the input flag is provided
-	if *urlFile != "" {
-		file, err := os.Open(*urlFile)
-		if err != nil {
-			log.Fatalf("Failed to open file: %s\n", err)
-		}
-		defer file.Close()
-
-		scanner := bufio.NewScanner(file)
-		for scanner.Scan() {
-			url := strings.TrimSpace(scanner.Text())
-			if url != "" {
-				urls = append(urls, url)
-			}
-		}
-
-		if err := scanner.Err(); err != nil {
-			log.Fatalf("Failed to read file: %s\n", err)
-		}
-	} else {
-		// If no input flag, read URLs from stdin
-		scanner := bufio.NewScanner(os.Stdin)
-		for scanner.Scan() {
-			url := strings.TrimSpace(scanner.Text())
-			if url != "" {
-				urls = append(urls, url)
-			}
-		}
-
-		if err := scanner.Err(); err != nil {
-			log.Fatalf("Failed to read stdin: %s\n", err)
-		}
+	// Ensure that exactly one non-flag argument is provided, which is the URL
+	if len(flag.Args()) != 1 {
+		log.Fatalf("Usage: %s [flags] <url>\n", os.Args[0])
 	}
 
-	// Set max concurrency
-	maxConns := 10
+	// Retrieve the URL from the arguments
+	url := flag.Arg(0)
 
-	// Crawl each URL
-	for _, url := range urls {
-		linksChan := crawl.CrawlSiteForLinks(url, maxConns)
-		// Print discovered links
-		for link := range linksChan {
-			fmt.Println(link)
-		}
+	// Silence stderr if the -s flag is set
+	if *silence {
+		log.SetOutput(ioutil.Discard)
+	}
+
+	// Crawl the URL
+	linksChan := crawl.CrawlSiteForLinks(url, *maxConns, *maxDepth, *timeout)
+
+	// Print discovered links
+	for link := range linksChan {
+		fmt.Println(link)
 	}
 }

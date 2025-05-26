@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"time"
 
 	"golang.org/x/net/html"
 )
@@ -37,12 +38,11 @@ func getLinksFromHTML(htmlContent io.Reader) []string {
 	}
 }
 
-func crawlLinks(wg *sync.WaitGroup, semaphore chan struct{}, link string, discoveredLinks chan<- string) {
+func crawlLinks(wg *sync.WaitGroup, semaphore chan struct{}, link string, discoveredLinks chan<- string, depth, maxDepth int, timeoutSecs int) {
 	defer wg.Done()
 
 	mu.Lock()
 	if _, ok := seenLinks[link]; ok {
-		// log.Printf("%s link seen before - skipping\n", link) // too noisy
 		mu.Unlock()
 		return
 	} else {
@@ -50,10 +50,24 @@ func crawlLinks(wg *sync.WaitGroup, semaphore chan struct{}, link string, discov
 	}
 	mu.Unlock()
 
+	if maxDepth != -1 && depth > maxDepth {
+		return
+	}
+
+	client := &http.Client{
+		Timeout: time.Duration(timeoutSecs) * time.Second,
+	}
+
 	semaphore <- struct{}{}
-	//log.Printf("%s - GET request\n", link) // too noisy
-	resp, err := http.Get(link)
+	resp, err := client.Get(link)
 	<-semaphore
+
+	if err != nil {
+		log.Printf("Error fetching %s: %v\n", link, err)
+		return
+	} else if resp.StatusCode >= 400 {
+		log.Printf("%s bad status code %d\n", link, resp.StatusCode)
+	}
 
 	if err != nil {
 		log.Printf("%s error %s\n", link, err)
@@ -86,15 +100,13 @@ func crawlLinks(wg *sync.WaitGroup, semaphore chan struct{}, link string, discov
 
 		resolvedURL := baseURL.ResolveReference(parsedChildLink)
 		if resolvedURL.Host == baseURL.Host {
-			//log.Printf("%s Kicking off crawl for %s\n", link, resolvedURL.String()) // too noisy
 			wg.Add(1)
-			go crawlLinks(wg, semaphore, resolvedURL.String(), discoveredLinks)
+			go crawlLinks(wg, semaphore, resolvedURL.String(), discoveredLinks, depth+1, maxDepth, timeoutSecs)
 		}
 	}
 }
 
-func CrawlSiteForLinks(startURL string, maxConns int) <-chan string {
-
+func CrawlSiteForLinks(startURL string, maxConns, maxDepth int, timeoutSecs int) <-chan string {
 	links := make(chan string)
 
 	go func() {
@@ -104,7 +116,7 @@ func CrawlSiteForLinks(startURL string, maxConns int) <-chan string {
 		semaphore := make(chan struct{}, maxConns)
 
 		waitGroup.Add(1)
-		go crawlLinks(&waitGroup, semaphore, startURL, discoveredLinks)
+		go crawlLinks(&waitGroup, semaphore, startURL, discoveredLinks, 0, maxDepth, timeoutSecs)
 		go func() {
 			for link := range discoveredLinks {
 				links <- link
